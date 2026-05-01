@@ -1,0 +1,18 @@
+* text=auto
+
+*.sln text eol=crlf
+*.csproj text eol=crlf
+*.pubxml text eol=crlf
+*.cmd text eol=crlf
+
+*.cs text diff=csharp
+*.js text
+*.glsl text
+*.wgsl text
+*.html text
+*.md text
+*.txt text
+
+*.ico binary
+*.png binary
+*.ttf binary

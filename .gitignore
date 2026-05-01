@@ -1,0 +1,72 @@
+# Local AI/agent/editor context
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+.ai-context/
+.agents/
+.agent/
+agents/
+.codex/
+.claude/
+.mcp/
+.cursor/
+.windsurf/
+.cline/
+.roo/
+agent.json
+agents.json
+agent.config.*
+agents.config.*
+.agent.json
+.agent.toml
+.agent.yaml
+.agent.yml
+.agents.json
+.agents.toml
+.agents.yaml
+.agents.yml
+codex.json
+codex.toml
+.codex.json
+.codex.toml
+mcp.json
+.mcp.json
+
+# Build output
+bin/
+obj/
+publish/
+MatrixDesktop/bin/
+MatrixDesktop/obj/
+MatrixDesktop/publish/
+
+# WebView2 runtime profile/cache
+userdata/
+**/userdata/
+
+# Visual Studio / Rider / VS Code local state
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# .NET / NuGet
+*.nupkg
+*.snupkg
+packages/
+TestResults/
+coverage/
+coverage.*
+
+# Logs and crash dumps
+*.log
+*.dmp
+*.mdmp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

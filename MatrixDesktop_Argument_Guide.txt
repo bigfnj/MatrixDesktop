@@ -1,0 +1,600 @@
+MATRIXDESKTOP ARGUMENT GUIDE (Desktop wrapper build v9)
+======================================================
+
+Scope
+-----
+This guide covers EVERY supported command-line argument in this Windows desktop build:
+
+A) App flags (wrapper-level)
+   - Consumed by the WinForms/WebView2 wrapper.
+   - Control windowing, monitor targeting, exit behavior, cursor, DevTools.
+   - NOT forwarded to the embedded Matrix web app.
+
+B) Web flags (visualizer-level)
+   - Forwarded to the embedded Matrix web app as URL query parameters.
+   - These must match the web app’s expected parameter names EXACTLY (case-sensitive).
+
+
+1) How to pass arguments
+------------------------
+The wrapper accepts multiple input styles (you can mix them):
+
+1. Raw query string (single argument)
+   - MatrixDesktop.exe "?version=3d&effect=mirror"
+   - MatrixDesktop.exe "version=3d&effect=mirror"   (also accepted)
+   Note: in Windows shells, the '&' character MUST be quoted.
+
+2. Key/value pairs
+   - MatrixDesktop.exe version=3d effect=mirror
+
+3. GNU-style flags
+   - MatrixDesktop.exe --version=3d --effect=mirror
+   - MatrixDesktop.exe --version 3d --effect mirror
+
+4. Windows-style flags
+   - MatrixDesktop.exe /version=3d /effect=mirror
+
+Precedence rules
+- If the same key appears multiple times, the LAST value wins.
+  Example: --fallSpeed 0.2 --fallSpeed 1.0 => effective fallSpeed is 1.0
+
+Case sensitivity rules (IMPORTANT)
+- Web flags are case-sensitive because the web app’s parser is case-sensitive.
+  Use: animationSpeed
+  Not: animationspeed
+
+
+2) How values are parsed (numbers, booleans, lists)
+---------------------------------------------------
+Numbers
+- Parsed as JavaScript parseFloat()/parseInt() in the web app.
+- Decimals are supported: 0.5, 1.25, -0.1
+- Scientific notation usually works: 1e-2
+- Percent signs are NOT a “percentage” feature.
+  Example: "50%" becomes 50 (not 0.5). Avoid %.
+
+Booleans
+- For known boolean web flags (camera, volumetric, glyphFlip, loops, skipIntro, suppressWarnings, once, isometric):
+  - Recommended: true / false
+  - Also accepted via wrapper normalization: 1/0, yes/no, on/off (these get converted to true/false).
+  - Bare boolean flags are treated as true.
+    Example: --volumetric  is treated as volumetric=true
+
+Comma-separated lists
+- Color and palette/stripe values are passed as comma-separated lists without brackets.
+  Example: --backgroundRGB 0,0,0
+
+Colors
+Gemini said
+To create a rainbow-like sequence of red, orange, yellow, green, blue, purple, we need to map each of those six colors to their corresponding RGB values (0 to 1).
+
+Here is the breakdown of the values:
+
+Color	Red	Green	Blue
+Red		1		0		0
+Orange	1		0.5		0
+Yellow	1		1		0
+Green	0		1		0
+Blue	0		0		1
+Purple	0.5		0		0.5
+
+Combining these into the single string format required by the module:
+--stripeColors 1,0,0,1,0.5,0,1,1,0,0,1,0,0,0,1,0.5,0,0.5
+
+A Quick Tip on Tuning
+If you find the colors don't look quite right on your specific screen, you can tweak the values:
+
+For a brighter Purple: Use 1, 0, 1 instead of 0.5, 0, 0.5.
+For a darker Orange: Reduce the green value to 0.4 or 0.3.
+
+
+3) App flags (wrapper-level; NOT forwarded to the web app)
+----------------------------------------------------------
+These flags control the desktop shell.
+
+Windowing / monitor selection
+- --borderless
+  Aliases: --fullscreen, --span, --span-all, --spanall
+  Default: ON
+  Meaning: borderless window spanning the full virtual desktop (all monitors).
+
+- --windowed
+  Default: OFF
+  Meaning: normal resizable window (useful for debugging).
+
+- --single-monitor
+  Aliases: --singlemonitor
+  Default: OFF
+  Meaning: borderless fullscreen on the PRIMARY monitor only.
+
+- --monitor N
+  Default: none
+  Meaning: borderless fullscreen on monitor index N (0-based; uses Screen.AllScreens ordering).
+  Notes:
+  - This implies single-monitor mode.
+  - Monitor ordering can change when Windows display layout changes.
+
+- --working-area
+  Aliases: --workingarea
+  Default: OFF
+  Meaning: uses WorkingArea instead of full monitor bounds (so taskbars remain visible).
+  Applies to borderless modes.
+
+Z-order (always on top)
+- --topmost
+  Default: OFF
+  Meaning: window stays above other windows.
+
+- --no-topmost
+  Aliases: --notopmost
+  Default: OFF
+  Meaning: explicitly disables topmost.
+
+Cursor
+- --hide-cursor
+  Aliases: --hidecursor
+  Default: OFF
+  Meaning: hides the mouse cursor while the app runs.
+
+- --show-cursor
+  Aliases: --showcursor
+  Default: ON (unless you explicitly hid it)
+  Meaning: ensures the app does not hide the cursor.
+
+Exit behavior (physical keyboard only; injected keypresses ignored)
+- This build uses a Windows low-level keyboard hook (WH_KEYBOARD_LL). It is intended to:
+  - exit on REAL keyboard hardware input
+  - ignore typical software-injected keystrokes by filtering LLKHF_INJECTED /
+    LLKHF_LOWER_IL_INJECTED events (for example, many SendInput/keybd_event
+    automation events)
+  - keep working when focus is inside native child windows such as WebView2
+  Note: virtual HID keyboard drivers can look like physical hardware to
+  user-mode code, so they may not be distinguishable from real keyboards.
+
+- --exit-on-any-key
+  Aliases: --exit-on-anykey, --anykey-exit
+  Default: ON
+  Meaning: any PHYSICAL keypress closes the app.
+
+- --no-exit-on-any-key
+  Aliases: --no-anykey-exit
+  Default: OFF
+  Meaning: disables the any-key exit.
+
+- --exit-on-esc
+  Aliases: --esc-exit, --exitonesc, --escexit
+  Default: ON
+  Meaning: physical ESC closes the app (useful if any-key exit is disabled).
+
+- --no-esc-exit
+  Aliases: --noesc-exit, --no-esc
+  Default: OFF
+  Meaning: disables ESC-to-exit.
+
+- --foreground-key-exit
+  Aliases: --require-foreground-key-exit
+  Default: ON
+  Meaning: only exit on keypress while MatrixDesktop is the foreground (active) app.
+
+- --global-key-exit
+  Aliases: --background-key-exit, --global-exit-on-key
+  Default: OFF
+  Meaning: exit on physical keypress even when MatrixDesktop is NOT focused.
+  Risk: this can be surprising because typing in other apps will close MatrixDesktop.
+
+WebView2 DevTools
+- --no-devtools
+  Aliases: --nodevtools
+  Default: OFF
+  Meaning: disables WebView2 DevTools (more locked-down distribution).
+
+- --devtools
+  Default: ON
+  Meaning: explicitly enables DevTools.
+
+Help
+- --help
+  Aliases: -h, /?, help
+  Meaning: shows built-in help dialog.
+
+
+4) Web flags (forwarded to the embedded Matrix web app)
+-------------------------------------------------------
+These flags control the visualizer.
+
+IMPORTANT: parameter names are case-sensitive.
+
+
+4.1 Core selection
+------------------
+version (string)
+- Key: version
+- Default: classic (if missing/unknown)
+- Meaning: selects a preset (“version”) that changes multiple internal settings.
+- Known values in this build:
+  classic, 3d, megacity, neomatrixology, operator, nightmare, paradise,
+  resurrections, trinity, morpheus, bugs, palimpsest, twilight, holoplay
+  Aliases: throwback=operator, updated=resurrections, 1999=operator, 2003=classic, 2021=resurrections
+- Examples:
+  MatrixDesktop.exe --version resurrections
+  MatrixDesktop.exe --version 3d
+
+font (string)
+- Key: font
+- Default: matrixcode (or the version’s font override)
+- Meaning: chooses the glyph set.
+- Known values in this build:
+  matrixcode, resurrections, gothic, coptic, megacity,
+  huberfishA, huberfishD, gtarg_tenretniolleh, gtarg_alientext, neomatrixology
+- Example:
+  MatrixDesktop.exe --font gothic
+
+effect (string)
+- Key: effect
+- Default: palette (if missing/unknown)
+- Meaning: selects the post-processing effect.
+- Known values in this build:
+  palette, plain, none, stripes, customStripes, pride, trans, transPride, image, mirror
+  Notes:
+  - effect=none shows a debug/behind-the-scenes view.
+  - effect=mirror can use the webcam if camera=true.
+  - effect=image uses url=... for the image.
+- Example:
+  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,1,1,0,0,1,0
+
+renderer (string)
+- Key: renderer
+- Default: regl
+- Meaning:
+  - regl  => WebGL backend
+  - webgpu => WebGPU backend (only if the machine supports WebGPU; otherwise it falls back to regl)
+- Examples:
+  MatrixDesktop.exe --renderer webgpu
+  MatrixDesktop.exe --renderer regl
+
+
+4.2 Layout and performance knobs
+--------------------------------
+numColumns (integer)
+- Key: numColumns
+- Aliases: width
+- Default: 80 (varies by version)
+- Meaning: base grid dimension (it drives BOTH rows and columns in the 2D mode).
+- Performance: high impact. Cost grows roughly with numColumns^2.
+- Recommended ranges:
+  40–120 for most machines; go lower if running multiple monitors at high resolution.
+- Examples:
+  MatrixDesktop.exe --numColumns 60
+  MatrixDesktop.exe --width 120
+
+resolution (number)
+- Key: resolution
+- Default: 0.75
+- Meaning: render resolution scale factor.
+  - 1.0 = full resolution (devicePixelRatio-aware)
+  - 0.5 = half resolution (faster, blurrier)
+  - >1.0 = supersampling (sharper, slower)
+- Accepts decimals. Avoid %.
+- Example:
+  MatrixDesktop.exe --resolution 0.6
+
+fps (number)
+- Key: fps
+- Default: 60
+- Range: clamped to 0–60
+- Meaning: frame rate cap.
+  - 60 = full speed
+  - 30 = half-rate
+  - 0 = effectively “do not render” (tends to look frozen)
+- Example:
+  MatrixDesktop.exe --fps 30
+
+bloomSize (number)
+- Key: bloomSize
+- Default: 0.4
+- Range: clamped to 0–1
+- Meaning: bloom blur scale / spread.
+- Performance: moderate impact.
+- Note: if bloomSize <= 0, bloomStrength is forced to 0.
+
+bloomStrength (number)
+- Key: bloomStrength
+- Default: 0.7
+- Range: clamped to 0–1
+- Meaning: bloom intensity.
+
+ditherMagnitude (number)
+- Key: ditherMagnitude
+- Default: 0.05
+- Range: clamped to 0–1
+- Meaning: adds noise to reduce visible gradient banding.
+
+
+4.3 Motion controls (the “speed knobs”)
+---------------------------------------
+General rule:
+- Higher positive numbers => faster motion
+- Lower positive numbers => slower motion
+- Decimals are supported.
+- Percent signs are not.
+
+animationSpeed (number)
+- Key: animationSpeed
+- Default: 1
+- Meaning: global multiplier applied to simulation time.
+  Think of it as “master speed”.
+- Effective motion is roughly:
+  effective fall ≈ animationSpeed * fallSpeed
+  effective cycle ≈ animationSpeed * cycleSpeed
+  effective forward ≈ animationSpeed * forwardSpeed
+- Example:
+  MatrixDesktop.exe --animationSpeed 0.5
+
+fallSpeed (number)
+- Key: fallSpeed
+- Default: 0.3 (varies by version)
+- Meaning: rate at which raindrops progress down the columns.
+- Negative values are allowed and tend to reverse direction (experimental but works).
+- Example:
+  MatrixDesktop.exe --fallSpeed 1.0
+
+cycleSpeed (number)
+- Key: cycleSpeed
+- Default: 0.03 (varies by version)
+- Meaning: how quickly glyphs change to new symbols.
+- Negative values are accepted but not generally useful (treat as experimental).
+- Example:
+  MatrixDesktop.exe --cycleSpeed 0.01
+
+forwardSpeed (number)
+- Key: forwardSpeed
+- Default: 0.25
+- Meaning: forward motion speed in volumetric (3D) mode.
+- Only meaningful when volumetric=true (or version=3d).
+- Example:
+  MatrixDesktop.exe --version 3d --forwardSpeed 0.08
+
+raindropLength (number)
+- Key: raindropLength
+- Aliases: dropLength
+- Default: 0.75
+- Meaning: controls vertical raindrop scale and spacing within columns.
+  Practical intuition:
+  - smaller values => shorter/tighter drops
+  - larger values => longer/sparser drops
+- Example:
+  MatrixDesktop.exe --raindropLength 1.2
+
+slant (number; degrees)
+- Key: slant
+- Aliases: angle
+- Default: 0
+- Meaning: slants the rain/grid by degrees.
+  - Positive vs negative changes direction of tilt.
+  - Values are interpreted as DEGREES and converted internally to radians.
+- Example:
+  MatrixDesktop.exe --slant 15
+
+
+4.4 3D controls
+---------------
+volumetric (boolean)
+- Key: volumetric
+- Default: false (true in version=3d)
+- Meaning: enables the volumetric/3D rendering mode.
+- Examples:
+  MatrixDesktop.exe --volumetric true
+  MatrixDesktop.exe --version 3d
+
+density (number)
+- Key: density
+- Default: 1
+- Meaning: in volumetric mode, multiplies the number of effective columns to increase depth density.
+- Range: clamped to >= 0, but avoid 0 (it can break the grid).
+- Note: when effect=none (debug view), density is effectively forced to 1.
+- Performance: high impact in volumetric mode.
+- Example:
+  MatrixDesktop.exe --version 3d --density 2
+
+isometric (boolean)
+- Key: isometric
+- Default: false
+- Meaning: when volumetric=true, switches to an isometric-like/orthographic camera style.
+- Example:
+  MatrixDesktop.exe --version 3d --isometric true
+
+
+4.5 Glyph transforms
+--------------------
+glyphFlip (boolean)
+- Key: glyphFlip
+- Default: false
+- Meaning: horizontally flips glyphs.
+- Example:
+  MatrixDesktop.exe --glyphFlip true
+
+glyphRotation (number; degrees)
+- Key: glyphRotation
+- Default: 0
+- Range: clamped to >= 0 (negative values become 0; use 270 instead of -90)
+- Meaning: rotates each glyph in-place (degrees).
+- Example:
+  MatrixDesktop.exe --glyphRotation 90
+
+
+4.6 Camera and external image
+-----------------------------
+camera (boolean)
+- Key: camera
+- Default: false
+- Meaning: enables webcam capture (used by effect=mirror).
+- Notes:
+  - If camera permission is blocked/denied, the app will continue without the camera.
+- Examples:
+  MatrixDesktop.exe --effect mirror --camera true
+  MatrixDesktop.exe --version updated --effect mirror --camera true
+
+url (string)
+- Key: url
+- Meaning: image URL used by effect=image.
+  In this desktop wrapper, you can reference local assets in the web folder too.
+  Example local asset path: assets/sand.png
+- Examples:
+  MatrixDesktop.exe --effect image --url assets/sand.png
+  MatrixDesktop.exe --effect image --url https://upload.wikimedia.org/.../EagleRock.jpg
+
+
+4.7 Color / palette / stripes
+-----------------------------
+Color value conventions
+- The engine generally expects color channel values as 0..1 floats (not 0..255).
+  - RGB: R,G,B each 0..1
+  - HSL: H,S,L each 0..1  (Hue is normalized; 0.0 and 1.0 are both “red”)
+
+backgroundColor (RGB)
+- Key: backgroundColor
+- Alias: backgroundRGB
+- Value format: R,G,B (floats)
+- Example:
+  MatrixDesktop.exe --backgroundRGB 0,0,0
+
+backgroundHSL (HSL)
+- Key: backgroundHSL
+- Value format: H,S,L (floats)
+- Example:
+  MatrixDesktop.exe --backgroundHSL 0.33,1,0.1
+
+cursorColor (RGB)
+- Key: cursorColor
+- Alias: cursorRGB
+- Value format: R,G,B
+
+cursorHSL (HSL)
+- Key: cursorHSL
+- Value format: H,S,L
+
+glintColor (RGB)
+- Key: glintColor
+- Alias: glintRGB
+- Value format: R,G,B
+
+glintHSL (HSL)
+- Key: glintHSL
+- Value format: H,S,L
+
+cursorIntensity (number)
+- Key: cursorIntensity
+- Default: 2
+- Range: clamped to >= 0
+- Meaning: brightness multiplier for cursor glow.
+- Example:
+  MatrixDesktop.exe --cursorIntensity 3
+
+glyphIntensity (number)
+- Key: glyphIntensity
+- Range: clamped to >= 0
+- Meaning: accepted by the config parser.
+- Note: in this specific build, glyphIntensity is not currently referenced by the rendering passes,
+  so it may have little to no visible effect.
+
+palette (RGB gradient)
+- Key: palette
+- Alias: paletteRGB
+- Value format: repeating groups of 4 numbers:
+  R,G,B,at,R,G,B,at,...
+  where 'at' is a stop position (typically 0..1).
+- Example (3 stops):
+  MatrixDesktop.exe --palette 0.1,0,0.2,0,  0.2,0.5,0,0.5,  1,0.7,0,1
+
+paletteHSL (HSL gradient)
+- Key: paletteHSL
+- Value format: H,S,L,at,H,S,L,at,...
+
+stripeColors (RGB stripes)
+- Key: stripeColors
+- Aliases: stripeRGB, colors
+- Value format: repeating groups of 3 numbers:
+  R,G,B,R,G,B,R,G,B,...
+- Example (red/yellow/green):
+  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,  1,1,0,  0,1,0
+
+stripeHSL (HSL stripes)
+- Key: stripeHSL
+- Value format: H,S,L,H,S,L,...
+
+
+4.8 Control toggles and debug
+-----------------------------
+skipIntro (boolean)
+- Key: skipIntro
+- Default: true
+- Meaning:
+  - true  => start immediately
+  - false => start from a blank/intro progression
+- Example:
+  MatrixDesktop.exe --skipIntro false
+
+loops (boolean)
+- Key: loops
+- Default: false
+- Meaning: makes the simulation more periodic/loop-friendly (useful for looping captures).
+- Example:
+  MatrixDesktop.exe --loops true
+
+once (boolean)
+- Key: once
+- Default: false
+- Meaning: render a single frame and stop (useful for screenshots).
+- Example:
+  MatrixDesktop.exe --once true
+
+suppressWarnings (boolean)
+- Key: suppressWarnings
+- Default: false
+- Meaning: suppresses the “hardware acceleration disabled” warning screen.
+- Example:
+  MatrixDesktop.exe --suppressWarnings true
+
+testFix (string)
+- Key: testFix
+- Default: null
+- Meaning: internal compatibility/debug switch for specific WebGL extension behaviors.
+- Known values (from the code):
+  fwidth_10_1_2022_A
+  fwidth_10_1_2022_B
+- Example:
+  MatrixDesktop.exe --testFix fwidth_10_1_2022_A
+
+
+5) A few high-signal recipes
+----------------------------
+A) Performance-first (especially useful across multiple monitors)
+- Reduce render scale and bloom:
+  MatrixDesktop.exe --resolution 0.6 --bloomSize 0.2 --fps 45
+
+B) Cinematic slow motion
+  MatrixDesktop.exe --animationSpeed 0.5
+
+C) Fast rain, slow glyph changes
+  MatrixDesktop.exe --fallSpeed 1.0 --cycleSpeed 0.01
+
+D) 3D subtle forward drift
+  MatrixDesktop.exe --version 3d --forwardSpeed 0.08 --density 1.2
+
+E) Stripes
+  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0, 1,1,0, 0,1,0
+
+F) Image effect using a local bundled asset
+  MatrixDesktop.exe --effect image --url assets/mesh.png
+
+
+6) Notable “gotchas” (practical warnings)
+-----------------------------------------
+- Web parameter keys are case-sensitive. “animationspeed” will be ignored; “animationSpeed” will work.
+- Avoid percent signs in numeric values. “50%” becomes 50.
+- density=0 or numColumns <= 0 can break rendering; treat them as invalid.
+- forwardSpeed has no visible effect unless volumetric=true.
+- isometric has no visible effect unless volumetric=true.
+- Some internal config properties exist but are NOT exposed as URL params in this build
+  (e.g., glintIntensity, baseTexture, glintTexture, brightness/contrast controls, ripple knobs).
+  Changing those requires editing web/js/config.js.

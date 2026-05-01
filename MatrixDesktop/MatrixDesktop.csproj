@@ -1,0 +1,70 @@
+<!--
+  NOTE:
+  - NETSDK1137 warns that Microsoft.NET.Sdk.WindowsDesktop is unnecessary for .NET 5+.
+    Using Microsoft.NET.Sdk + <UseWindowsForms>true</UseWindowsForms> is the modern approach.
+  - Recent versions of Microsoft.Web.WebView2 bring in the WPF control assembly as a reference
+    (Microsoft.Web.WebView2.Wpf.dll) even for WinForms-only apps, which can trigger an MSB3277
+    WindowsBase 4.0/5.0 conflict warning. We explicitly remove the WPF assembly reference.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>MatrixDesktop</AssemblyName>
+    <RootNamespace>MatrixDesktop</RootNamespace>
+    <!-- Icon for the compiled EXE -->
+    <ApplicationIcon>Matrix.ico</ApplicationIcon>
+
+    <!--
+      Safety net: if an MSBuild/SDK layer still emits MSB3277 (e.g., via transitive targets),
+      we suppress it so "treat warnings as errors" builds remain unblocked.
+    -->
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+    
+    <!-- Single-file publish settings (when PublishSingleFile is true) -->
+    <IncludeNativeLibrariesForSelfExtract Condition="'$(PublishSingleFile)' == 'true'">true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile Condition="'$(PublishSingleFile)' == 'true'">true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WebView2: embeds Edge (Chromium) for rendering the HTML/JS app -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3856.49" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ensure the web assets are treated as Content (not None) so they can be copied to output. -->
+    <None Remove="web\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Copy the web assets into BOTH build output and publish output so the EXE can load them at runtime.
+
+      The upstream repo includes extra folders and sources that are not required for the
+      desktop wrapper. Excluding them keeps publish output smaller and build/publish faster.
+
+      Notes:
+        - We keep the JS modules, shaders, fonts, images, etc.
+        - We exclude docs/dev helpers (md/txt), large screenshots, and non-runtime source folders.
+    -->
+    <Content Include="web\**\*"
+             Exclude="web\playdate\**\*;web\msdfgen\**\*;web\svg sources\**\*;web\screenshot.png;web\lib\regl.js;web\**\*.md;web\**\*.txt;web\.gitmodules;web\.gitignore;web\.gitattributes">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    Workaround for MSB3277 WindowsBase 4.0/5.0 conflicts caused by WebView2's WPF control reference.
+    This project is WinForms-only, so the WPF control assembly is not needed.
+  -->
+  <Target Name="_MatrixDesktop_RemoveWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.FileName)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+</Project>
