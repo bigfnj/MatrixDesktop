@@ -396,16 +396,35 @@ versions["2003"] = versions.classic;
 versions["2021"] = versions.resurrections;
 
 const range = (f, min = -Infinity, max = Infinity) => Math.max(min, Math.min(max, f));
-const nullNaN = (f) => (isNaN(f) ? null : f);
+const nullNaN = (f) => (Number.isFinite(f) ? f : null);
 const isTrue = (s) => s.toLowerCase() === "true";
 
-const parseColor = (isHSL) => (s) => ({
-	space: isHSL ? "hsl" : "rgb",
-	values: s.split(",").map(parseFloat),
-});
+const parseFiniteList = (s) => {
+	const values = s.split(",").map((v) => parseFloat(v.trim()));
+	return values.length > 0 && values.every(Number.isFinite) ? values : null;
+};
+
+const parseClampedFloat = (min, max) => (s) => nullNaN(range(parseFloat(s), min, max));
+const parseClampedInt = (min, max) => (s) => {
+	const parsed = parseInt(s);
+	return Number.isFinite(parsed) ? range(parsed, min, max) : null;
+};
+
+const parseColor = (isHSL) => (s) => {
+	const values = parseFiniteList(s);
+	return values != null && values.length === 3
+		? {
+				space: isHSL ? "hsl" : "rgb",
+				values,
+			}
+		: null;
+};
 
 const parseColors = (isHSL) => (s) => {
-	const values = s.split(",").map(parseFloat);
+	const values = parseFiniteList(s);
+	if (values == null || values.length < 3 || values.length % 3 !== 0) {
+		return null;
+	}
 	const space = isHSL ? "hsl" : "rgb";
 	return Array(Math.floor(values.length / 3))
 		.fill()
@@ -416,7 +435,10 @@ const parseColors = (isHSL) => (s) => {
 };
 
 const parsePalette = (isHSL) => (s) => {
-	const values = s.split(",").map(parseFloat);
+	const values = parseFiniteList(s);
+	if (values == null || values.length < 4 || values.length % 4 !== 0) {
+		return null;
+	}
 	const space = isHSL ? "hsl" : "rgb";
 	return Array(Math.floor(values.length / 4))
 		.fill()
@@ -438,9 +460,9 @@ const paramMapping = {
 	font: { key: "font", parser: (s) => s },
 	effect: { key: "effect", parser: (s) => s },
 	camera: { key: "useCamera", parser: isTrue },
-	numColumns: { key: "numColumns", parser: (s) => nullNaN(parseInt(s)) },
-	density: { key: "density", parser: (s) => nullNaN(range(parseFloat(s), 0)) },
-	resolution: { key: "resolution", parser: (s) => nullNaN(parseFloat(s)) },
+	numColumns: { key: "numColumns", parser: parseClampedInt(1, 256) },
+	density: { key: "density", parser: parseClampedFloat(0.01, 4) },
+	resolution: { key: "resolution", parser: parseClampedFloat(0.05, 2) },
 	animationSpeed: {
 		key: "animationSpeed",
 		parser: (s) => nullNaN(parseFloat(s)),

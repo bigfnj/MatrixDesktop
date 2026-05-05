@@ -40,6 +40,14 @@ MatrixDesktop/bin/
 MatrixDesktop/obj/
 MatrixDesktop/publish/
 
+# Non-runtime upstream web extras
+MatrixDesktop/web/playdate/
+MatrixDesktop/web/svg sources/
+MatrixDesktop/web/screenshot.png
+MatrixDesktop/web/lib/regl.js
+MatrixDesktop/web/**/*.md
+MatrixDesktop/web/**/*.txt
+
 # WebView2 runtime profile/cache
 userdata/
 **/userdata/

@@ -260,6 +260,7 @@ numColumns (integer)
 - Aliases: width
 - Default: 80 (varies by version)
 - Meaning: base grid dimension (it drives BOTH rows and columns in the 2D mode).
+- Range: clamped to 1–256.
 - Performance: high impact. Cost grows roughly with numColumns^2.
 - Recommended ranges:
   40–120 for most machines; go lower if running multiple monitors at high resolution.
@@ -274,6 +275,7 @@ resolution (number)
   - 1.0 = full resolution (devicePixelRatio-aware)
   - 0.5 = half resolution (faster, blurrier)
   - >1.0 = supersampling (sharper, slower)
+- Range: clamped to 0.05–2.
 - Accepts decimals. Avoid %.
 - Example:
   MatrixDesktop.exe --resolution 0.6
@@ -390,7 +392,7 @@ density (number)
 - Key: density
 - Default: 1
 - Meaning: in volumetric mode, multiplies the number of effective columns to increase depth density.
-- Range: clamped to >= 0, but avoid 0 (it can break the grid).
+- Range: clamped to 0.01–4.
 - Note: when effect=none (debug view), density is effectively forced to 1.
 - Performance: high impact in volumetric mode.
 - Example:
@@ -592,7 +594,7 @@ F) Image effect using a local bundled asset
 -----------------------------------------
 - Web parameter keys are case-sensitive. “animationspeed” will be ignored; “animationSpeed” will work.
 - Avoid percent signs in numeric values. “50%” becomes 50.
-- density=0 or numColumns <= 0 can break rendering; treat them as invalid.
+- Unsafe density, numColumns, and resolution values are clamped before rendering.
 - forwardSpeed has no visible effect unless volumetric=true.
 - isometric has no visible effect unless volumetric=true.
 - Some internal config properties exist but are NOT exposed as URL params in this build

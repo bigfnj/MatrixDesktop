@@ -8,7 +8,7 @@ import makeStripePass from "./stripePass.js";
 import makeImagePass from "./imagePass.js";
 import makeMirrorPass from "./mirrorPass.js";
 import makeEndPass from "./endPass.js";
-import { setupCamera, cameraCanvas, cameraAspectRatio, cameraSize } from "../camera.js";
+import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio, cameraSize } from "../camera.js";
 
 const loadJS = (src) =>
 	new Promise((resolve, reject) => {
@@ -34,6 +34,8 @@ const effects = {
 
 export default async (canvas, config) => {
 	await loadJS("lib/gl-matrix.js");
+	let pipeline = null;
+	let cleanedUp = false;
 
 	const dblclickHandler = () => {
 		if (document.fullscreenElement == null) {
@@ -51,10 +53,17 @@ export default async (canvas, config) => {
 		canvas.addEventListener("dblclick", dblclickHandler);
 	}
 	
-	// Cleanup function for event listeners
 	const cleanup = () => {
+		if (cleanedUp) {
+			return;
+		}
+		cleanedUp = true;
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
+		}
+		pipeline?.cleanup?.();
+		if (config.useCamera) {
+			stopCamera();
 		}
 	};
 
@@ -109,7 +118,7 @@ export default async (canvas, config) => {
 	};
 
 	const effectName = config.effect in effects ? config.effect : "palette";
-	const pipeline = await makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeEndPass]);
+	pipeline = await makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeEndPass]);
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
 	let frames = 0;
@@ -135,8 +144,8 @@ export default async (canvas, config) => {
 		}
 
 		const devicePixelRatio = window.devicePixelRatio ?? 1;
-		const canvasWidth = Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution);
-		const canvasHeight = Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution);
+		const canvasWidth = Math.max(1, Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution));
+		const canvasHeight = Math.max(1, Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution));
 		canvasSize[0] = canvasWidth;
 		canvasSize[1] = canvasHeight;
 		if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {

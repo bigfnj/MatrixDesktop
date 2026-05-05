@@ -13,7 +13,7 @@ const makePyramid = (regl, height, halfFloat) =>
 		.map((_) => makePassFBO(regl, halfFloat));
 
 const resizePyramid = (pyramid, vw, vh, scale) =>
-	pyramid.forEach((fbo, index) => fbo.resize(Math.floor((vw * scale) / 2 ** index), Math.floor((vh * scale) / 2 ** index)));
+	pyramid.forEach((fbo, index) => fbo.resize(Math.max(1, Math.floor((vw * scale) / 2 ** index)), Math.max(1, Math.floor((vh * scale) / 2 ** index))));
 
 export default ({ regl, config }, inputs) => {
 	const { bloomStrength, bloomSize, highPassThreshold } = config;

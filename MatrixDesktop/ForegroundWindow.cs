@@ -16,7 +16,7 @@ namespace MatrixDesktop;
 /// This is not a 100% guarantee (by design, Windows can still refuse), but it greatly improves
 /// reliability for typical launcher flows.
 /// </summary>
-internal static partial class ForegroundWindow
+internal static class ForegroundWindow
 {
     private const int SW_SHOW = 5;
     private const int SW_RESTORE = 9;
@@ -146,35 +146,35 @@ internal static partial class ForegroundWindow
         SetActiveWindow(hwnd);
     }
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetForegroundWindow(IntPtr hWnd);
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool BringWindowToTop(IntPtr hWnd);
+    private static extern bool BringWindowToTop(IntPtr hWnd);
 
-    [LibraryImport("user32.dll")]
-    private static partial IntPtr SetActiveWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetActiveWindow(IntPtr hWnd);
 
-    [LibraryImport("user32.dll")]
-    private static partial IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
 
-    [LibraryImport("user32.dll", SetLastError = true)]
-    private static partial uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
-    [LibraryImport("user32.dll", SetLastError = true)]
+    [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
 
-    [LibraryImport("kernel32.dll")]
-    private static partial uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool IsIconic(IntPtr hWnd);
+    private static extern bool IsIconic(IntPtr hWnd);
 
-    [LibraryImport("user32.dll")]
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 }

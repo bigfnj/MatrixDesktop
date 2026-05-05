@@ -13,7 +13,6 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>MatrixDesktop</AssemblyName>
     <RootNamespace>MatrixDesktop</RootNamespace>
     <!-- Icon for the compiled EXE -->

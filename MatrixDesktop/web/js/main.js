@@ -1,4 +1,5 @@
 import makeConfig from "./config.js";
+import { stopCamera } from "./camera.js";
 
 const canvas = document.createElement("canvas");
 document.body.appendChild(canvas);
@@ -41,6 +42,7 @@ const loadRenderer = async (canvas, config, useWebGPU) => {
 			return;
 		} catch (err) {
 			console.warn("WebGPU renderer failed, falling back to regl:", err);
+			stopCamera();
 		}
 	}
 	const reglModule = await import("./regl/main.js");
@@ -71,6 +73,7 @@ document.body.onload = async () => {
 				canvas.style.display = "unset";
 				document.body.removeChild(notice);
 			} catch (err) {
+				stopCamera();
 				console.error("Failed to load renderer:", err);
 				const errorDiv = document.createElement("div");
 				errorDiv.className = "notice";
@@ -82,6 +85,7 @@ document.body.onload = async () => {
 		try {
 			await loadRenderer(canvas, config, useWebGPU);
 		} catch (err) {
+			stopCamera();
 			console.error("Failed to load renderer:", err);
 			const errorDiv = document.createElement("div");
 			errorDiv.className = "notice";

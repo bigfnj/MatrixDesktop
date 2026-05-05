@@ -96,7 +96,7 @@ const isDebugMode = () => {
 
 const _debugMode = isDebugMode();
 
-const makePass = (name, loaded, build, run) => ({
+const makePass = (name, loaded, build, run, cleanup) => ({
 	loaded: loaded ?? Promise.resolve(),
 	build: build ?? ((size, inputs) => inputs),
 	run: _debugMode
@@ -105,9 +105,10 @@ const makePass = (name, loaded, build, run) => ({
 				run?.(encoder, shouldRender);
 				encoder.popDebugGroup();
 			}
-		: (encoder, shouldRender) => {
-				run?.(encoder, shouldRender);
-			},
+			: (encoder, shouldRender) => {
+					run?.(encoder, shouldRender);
+				},
+	cleanup: cleanup ?? (() => {}),
 });
 
 const makePipeline = async (context, steps) => {
@@ -117,6 +118,7 @@ const makePipeline = async (context, steps) => {
 		steps,
 		build: (canvasSize) => steps.reduce((outputs, step) => step.build(canvasSize, outputs), null),
 		run: (encoder, shouldRender) => steps.forEach((step) => step.run(encoder, shouldRender)),
+		cleanup: () => steps.forEach((step) => step.cleanup?.()),
 	};
 };
 

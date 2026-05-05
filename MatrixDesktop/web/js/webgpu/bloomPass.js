@@ -18,11 +18,11 @@ const makePyramid = (device, size, pyramidHeight) =>
 	Array(pyramidHeight)
 		.fill()
 		.map((_, index) =>
-			makeComputeTarget(
-				device,
-				size.map((x) => Math.floor(x * 2 ** -index))
-			)
-		);
+				makeComputeTarget(
+					device,
+					size.map((x) => Math.max(1, Math.floor(x * 2 ** -index)))
+				)
+			);
 
 const destroyPyramid = (pyramid) => pyramid?.forEach((texture) => texture.destroy());
 
@@ -102,7 +102,7 @@ export default ({ config, device }) => {
 
 	const build = (screenSize, inputs) => {
 		// Since the bloom is blurry, we downscale everything
-		scaledScreenSize = screenSize.map((x) => Math.floor(x * bloomSize));
+			scaledScreenSize = screenSize.map((x) => Math.max(1, Math.floor(x * bloomSize)));
 
 		destroyPyramid(hBlurPyramid);
 		hBlurPyramid = makePyramid(device, scaledScreenSize, pyramidHeight);

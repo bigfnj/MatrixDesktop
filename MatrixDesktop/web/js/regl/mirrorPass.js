@@ -43,10 +43,11 @@ export default ({ regl, config, cameraTex, cameraAspectRatio }, inputs) => {
 			output.resize(w, h);
 			aspectRatio = w / h;
 		},
-		(shouldRender) => {
-			if (shouldRender) {
-				render({ frag: mirrorPassFrag.text() });
-			}
-		}
-	);
-};
+			(shouldRender) => {
+				if (shouldRender) {
+					render({ frag: mirrorPassFrag.text() });
+				}
+			},
+			() => window.removeEventListener("click", clickHandler)
+		);
+	};

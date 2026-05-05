@@ -141,11 +141,12 @@ const make1DTexture = (regl, rgbas) => {
 	});
 };
 
-const makePass = (outputs, ready, setSize, execute) => ({
+const makePass = (outputs, ready, setSize, execute, cleanup) => ({
 	outputs: outputs ?? {},
 	ready: ready ?? Promise.resolve(),
 	setSize: setSize ?? (() => {}),
 	execute: execute ?? (() => {}),
+	cleanup: cleanup ?? (() => {}),
 });
 
 const makePipeline = (context, steps) =>

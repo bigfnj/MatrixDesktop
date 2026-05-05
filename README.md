@@ -23,16 +23,25 @@ This solution addresses both:
 
 This version focuses on *portable distribution hygiene* and *leaner publish output* without touching the upstream visualizer logic.
 
-### Portable-friendly WebView2 user data
+### AppData WebView2 user data
 
 WebView2 keeps a browser profile/cache (“user data folder”). By default, that lives under the user’s profile in `%LOCALAPPDATA%`.
 
-For a truly portable single-folder build, this wrapper now:
+This wrapper stores WebView2 user data under AppData instead of beside the EXE:
 
-1. Tries to store WebView2 user data beside the EXE in: `userdata\`
-2. If that folder is not writable, it falls back to: `%LOCALAPPDATA%\MatrixDesktop\userdata\`
+1. Primary: `%LOCALAPPDATA%\MatrixDesktop\WebView2\`
+2. Fallback: `%APPDATA%\MatrixDesktop\WebView2\`
+3. Last-resort fallback: `%TEMP%\MatrixDesktop\WebView2\`
 
-Tradeoff: a portable folder can now accumulate cache files next to the EXE (expected for a portable app). Delete `userdata\` to reset.
+This avoids WebView2 startup failures when the app is launched from read-only folders, network-style paths, or WSL-mounted locations such as `Z:\home\...`.
+
+The bundled `web\` runtime assets are also staged into AppData before WebView2 maps them:
+
+1. Primary: `%LOCALAPPDATA%\MatrixDesktop\Web\`
+2. Fallback: `%APPDATA%\MatrixDesktop\Web\`
+3. Last-resort fallback: `%TEMP%\MatrixDesktop\Web\`
+
+This keeps WebView2 asset loading on a normal local Windows path even when the EXE itself is launched from a WSL-mounted folder.
 
 ### Smaller web payload in build/publish output
 
@@ -152,10 +161,10 @@ The following arguments are recognized by the upstream `web/js/config.js` URL pa
 
 #### Animation and layout
 
-- `numColumns` (int) — size of the glyph grid.
+- `numColumns` (int) — size of the glyph grid, clamped to 1–256.
 - `width` (int) — alias of `numColumns`.
-- `density` (number) — volumetric density multiplier (>= 0).
-- `resolution` (number) — render resolution scale factor.
+- `density` (number) — volumetric density multiplier, clamped to 0.01–4.
+- `resolution` (number) — render resolution scale factor, clamped to 0.05–2.
 - `animationSpeed` (number) — global animation multiplier.
 - `forwardSpeed` (number) — forward motion speed in volumetric mode.
 - `cycleSpeed` (number) — glyph cycling speed.
@@ -298,8 +307,12 @@ Output:
   - Some upstream folders and docs are excluded from build/publish output to keep the portable folder smaller.
 
 - WebView2 user data:
-  - The wrapper will try to create `userdata\` next to the EXE.
-  - If that isn't writable, it will fall back to `%LOCALAPPDATA%\MatrixDesktop\userdata\`.
+  - The wrapper stores WebView2 profile/cache data in `%LOCALAPPDATA%\MatrixDesktop\WebView2\`.
+  - If LocalAppData is not writable, it falls back to `%APPDATA%\MatrixDesktop\WebView2\`, then `%TEMP%\MatrixDesktop\WebView2\`.
+
+- WebView2 web assets:
+  - The wrapper stages the bundled `web\` folder into `%LOCALAPPDATA%\MatrixDesktop\Web\`.
+  - If LocalAppData is not writable, it falls back to `%APPDATA%\MatrixDesktop\Web\`, then `%TEMP%\MatrixDesktop\Web\`.
 
 ## Attribution / License
 

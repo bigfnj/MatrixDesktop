@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
@@ -12,8 +14,9 @@ public sealed class MainForm : Form
 {
     private const string HostName = "appassets.local";
     private static readonly string HostOriginPrefix = $"https://{HostName}/";
+    private const int CatastrophicFailureHResult = unchecked((int)0x8000FFFF);
 
-    private readonly WebView2 _webView;
+    private WebView2 _webView;
     private readonly string _startupQueryString;
     private readonly EventHandler _displaySettingsChangedHandler;
     private readonly AppOptions _appOptions;
@@ -31,6 +34,7 @@ public sealed class MainForm : Form
     private EventHandler<CoreWebView2NavigationStartingEventArgs>? _navigationStartingHandler;
 
     private bool _isShuttingDown;
+    private bool _webViewInitializationStarted;
 
     private static string? _cachedUserDataFolder;
 
@@ -73,30 +77,9 @@ public sealed class MainForm : Form
 
         _startupQueryString = MatrixArgs.BuildQueryString(passthroughArgs);
 
-        _webView = new WebView2
-        {
-            Dock = DockStyle.Fill,
-            BackColor = System.Drawing.Color.Black,
-            DefaultBackgroundColor = System.Drawing.Color.Black,
-            CreationProperties = new CoreWebView2CreationProperties
-            {
-                // For a portable folder distribution, it is useful to keep the WebView2 profile/cache
-                // beside the EXE when possible. If the folder isn't writable, we fall back.
-                UserDataFolder = GetBestEffortUserDataFolder(),
-            },
-        };
-
+        _webView = CreateWebView(GetAppDataUserDataFolder());
         Controls.Add(_webView);
-        Load += MainForm_Load;
-        Shown += (_, __) =>
-        {
-            TryApplyCursorVisibility();
-
-            // Some launch contexts (shells, scripts, startup tasks) don't reliably
-            // activate the new window. Make a best-effort attempt to become the
-            // foreground app.
-            TryBeginForegroundEnforce();
-        };
+        Shown += MainForm_Shown;
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -406,69 +389,44 @@ public sealed class MainForm : Form
         }
     }
 
-
-    private async void MainForm_Load(object? sender, EventArgs e)
+    private static WebView2 CreateWebView(string userDataFolder)
     {
+        return new WebView2
+        {
+            Dock = DockStyle.Fill,
+            BackColor = System.Drawing.Color.Black,
+            DefaultBackgroundColor = System.Drawing.Color.Black,
+            CreationProperties = new CoreWebView2CreationProperties
+            {
+                UserDataFolder = userDataFolder,
+            },
+        };
+    }
+
+    private async void MainForm_Shown(object? sender, EventArgs e)
+    {
+        TryApplyCursorVisibility();
+
+        // Some launch contexts (shells, scripts, startup tasks) don't reliably
+        // activate the new window. Make a best-effort attempt to become the
+        // foreground app.
+        TryBeginForegroundEnforce();
+
+        await InitializeWebViewAsync();
+    }
+
+    private async Task InitializeWebViewAsync()
+    {
+        if (_webViewInitializationStarted || _isShuttingDown || IsDisposed)
+        {
+            return;
+        }
+
+        _webViewInitializationStarted = true;
+
         try
         {
-            await _webView.EnsureCoreWebView2Async();
-
-            // Slightly reduce background features we don't need for an offline local app.
-            // (This reduces "browser-y" behavior and a bit of overhead.)
-            TryTightenWebViewSettings();
-
-            // Open external links (if any) in the system browser.
-            _newWindowRequestedHandler = (_, args) =>
-            {
-                args.Handled = true;
-                TryOpenExternal(args.Uri);
-            };
-            _webView.CoreWebView2.NewWindowRequested += _newWindowRequestedHandler;
-
-            // Prevent unexpected navigation away from our local content.
-            _navigationStartingHandler = (_, navArgs) =>
-            {
-                var uri = navArgs.Uri ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(uri)) return;
-
-                // Allow our virtual host origin and a few benign internal schemes.
-                if (uri.StartsWith(HostOriginPrefix, StringComparison.OrdinalIgnoreCase)
-                    || uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)
-                    || uri.StartsWith("edge:", StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-
-                navArgs.Cancel = true;
-                TryOpenExternal(uri);
-            };
-            _webView.CoreWebView2.NavigationStarting += _navigationStartingHandler;
-
-            var webRoot = Path.Combine(AppContext.BaseDirectory, "web");
-            if (!Directory.Exists(webRoot))
-            {
-                MessageBox.Show(
-                    $"Missing web assets folder:\n{webRoot}\n\n" +
-                    "Rebuild/publish the solution and ensure the project copies the 'web' folder to the output directory.",
-                    "MatrixDesktop",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-                Close();
-                return;
-            }
-
-            // Map the local 'web' folder to a virtual HTTPS origin.
-            // This avoids file:// restrictions while keeping everything local (no HTTP server needed).
-            _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                HostName,
-                webRoot,
-                CoreWebView2HostResourceAccessKind.Allow);
-
-            var target = string.IsNullOrWhiteSpace(_startupQueryString)
-                ? $"{HostOriginPrefix}index.html"
-                : $"{HostOriginPrefix}index.html?{_startupQueryString}";
-
-            _webView.CoreWebView2.Navigate(target);
+            await InitializeCurrentWebViewAsync();
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -480,11 +438,139 @@ public sealed class MainForm : Form
                 MessageBoxIcon.Error);
             Close();
         }
+        catch (COMException ex) when (ex.HResult == CatastrophicFailureHResult)
+        {
+            await RetryWebViewInitializationAfterCatastrophicFailureAsync(ex);
+        }
         catch (Exception ex)
         {
             MessageBox.Show(ex.ToString(), "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Close();
         }
+    }
+
+    private async Task InitializeCurrentWebViewAsync()
+    {
+        if (!IsHandleCreated)
+        {
+            _ = Handle;
+        }
+
+        if (!_webView.IsHandleCreated)
+        {
+            _ = _webView.Handle;
+        }
+
+        await Task.Yield();
+        await _webView.EnsureCoreWebView2Async();
+
+        // Slightly reduce background features we don't need for an offline local app.
+        // (This reduces "browser-y" behavior and a bit of overhead.)
+        TryTightenWebViewSettings();
+
+        // Open external links (if any) in the system browser.
+        _newWindowRequestedHandler = (_, args) =>
+        {
+            args.Handled = true;
+            TryOpenExternal(args.Uri);
+        };
+        _webView.CoreWebView2.NewWindowRequested += _newWindowRequestedHandler;
+
+        // Prevent unexpected navigation away from our local content.
+        _navigationStartingHandler = (_, navArgs) =>
+        {
+            var uri = navArgs.Uri ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(uri)) return;
+
+            // Allow our virtual host origin and a few benign internal schemes.
+            if (uri.StartsWith(HostOriginPrefix, StringComparison.OrdinalIgnoreCase)
+                || uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)
+                || uri.StartsWith("edge:", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            navArgs.Cancel = true;
+            TryOpenExternal(uri);
+        };
+        _webView.CoreWebView2.NavigationStarting += _navigationStartingHandler;
+
+        string webRoot;
+        try
+        {
+            webRoot = PrepareWebRoot();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                "Unable to prepare bundled web assets for WebView2.\n\n" +
+                $"Source folder:\n{Path.Combine(AppContext.BaseDirectory, "web")}\n\n" +
+                $"Error:\n{ex}",
+                "MatrixDesktop",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            Close();
+            return;
+        }
+
+        // Map the local 'web' folder to a virtual HTTPS origin.
+        // This avoids file:// restrictions while keeping everything local (no HTTP server needed).
+        _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+            HostName,
+            webRoot,
+            CoreWebView2HostResourceAccessKind.Allow);
+
+        var target = string.IsNullOrWhiteSpace(_startupQueryString)
+            ? $"{HostOriginPrefix}index.html"
+            : $"{HostOriginPrefix}index.html?{_startupQueryString}";
+
+        _webView.CoreWebView2.Navigate(target);
+    }
+
+    private async Task RetryWebViewInitializationAfterCatastrophicFailureAsync(COMException firstException)
+    {
+        var originalProfile = _webView.CreationProperties?.UserDataFolder ?? "(unknown)";
+        var retryProfile = GetFreshLocalUserDataFolder();
+
+        try
+        {
+            ReplaceWebView(retryProfile);
+            await InitializeCurrentWebViewAsync();
+        }
+        catch (Exception retryException)
+        {
+            MessageBox.Show(
+                "WebView2 failed to initialize and a retry with a fresh local profile also failed.\n\n" +
+                $"Original profile:\n{originalProfile}\n\n" +
+                $"Retry profile:\n{retryProfile}\n\n" +
+                $"First failure:\n{firstException}\n\n" +
+                $"Retry failure:\n{retryException}",
+                "MatrixDesktop",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            Close();
+        }
+    }
+
+    private void ReplaceWebView(string userDataFolder)
+    {
+        var oldWebView = _webView;
+
+        DetachWebViewHandlers(oldWebView);
+        Controls.Remove(oldWebView);
+
+        try
+        {
+            oldWebView.Dispose();
+        }
+        catch
+        {
+            // Ignore.
+        }
+
+        _webView = CreateWebView(userDataFolder);
+        Controls.Add(_webView);
+        _webView.BringToFront();
     }
 
     private void TryCleanupWebView()
@@ -495,21 +581,7 @@ public sealed class MainForm : Form
         try
         {
             // Detach event handlers so nothing keeps references alive longer than necessary.
-            var core = _webView.CoreWebView2;
-            if (core is not null)
-            {
-                if (_newWindowRequestedHandler is not null)
-                {
-                    try { core.NewWindowRequested -= _newWindowRequestedHandler; } catch { }
-                    _newWindowRequestedHandler = null;
-                }
-
-                if (_navigationStartingHandler is not null)
-                {
-                    try { core.NavigationStarting -= _navigationStartingHandler; } catch { }
-                    _navigationStartingHandler = null;
-                }
-            }
+            DetachWebViewHandlers(_webView);
         }
         catch
         {
@@ -520,6 +592,31 @@ public sealed class MainForm : Form
         {
             // Disposing WebView2 is the most reliable way to ensure the runtime releases file handles.
             _webView.Dispose();
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private void DetachWebViewHandlers(WebView2 webView)
+    {
+        try
+        {
+            var core = webView.CoreWebView2;
+            if (core is null) return;
+
+            if (_newWindowRequestedHandler is not null)
+            {
+                try { core.NewWindowRequested -= _newWindowRequestedHandler; } catch { }
+                _newWindowRequestedHandler = null;
+            }
+
+            if (_navigationStartingHandler is not null)
+            {
+                try { core.NavigationStarting -= _navigationStartingHandler; } catch { }
+                _navigationStartingHandler = null;
+            }
         }
         catch
         {
@@ -574,29 +671,100 @@ public sealed class MainForm : Form
         }
     }
 
-    private static string GetBestEffortUserDataFolder()
+    private static string GetAppDataUserDataFolder()
     {
         if (_cachedUserDataFolder is not null)
         {
             return _cachedUserDataFolder;
         }
 
-        // First choice: keep user data beside the EXE (portable-friendly).
-        var portable = Path.Combine(AppContext.BaseDirectory, "userdata");
-        if (TryEnsureWritableFolder(portable))
+        // WebView2 cannot reliably create profiles beside the EXE when launched from
+        // network-like locations such as WSL's Z:\ mount. Keep Chromium state in AppData.
+        _cachedUserDataFolder = GetWritableAppDataFolder("WebView2");
+        return _cachedUserDataFolder;
+    }
+
+    private static string GetFreshLocalUserDataFolder()
+    {
+        var root = GetWritableAppDataFolder("WebView2Recovery");
+        var folder = Path.Combine(root, $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Environment.ProcessId}");
+
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    private static string PrepareWebRoot()
+    {
+        var bundledWebRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "web"));
+        if (!Directory.Exists(bundledWebRoot))
         {
-            _cachedUserDataFolder = portable;
-            return portable;
+            throw new DirectoryNotFoundException(
+                $"Missing web assets folder. Rebuild/publish the solution and ensure the project copies the 'web' folder to the output directory: {bundledWebRoot}");
         }
 
-        // Fallback: LocalAppData (always writable under normal user contexts).
-        var local = Path.Combine(
+        var stagedWebRoot = Path.GetFullPath(GetWritableAppDataFolder("Web"));
+        if (PathsEqual(bundledWebRoot, stagedWebRoot))
+        {
+            return bundledWebRoot;
+        }
+
+        CopyDirectoryIfChanged(bundledWebRoot, stagedWebRoot);
+        return stagedWebRoot;
+    }
+
+    private static string GetWritableAppDataFolder(string childFolder)
+    {
+        foreach (var basePath in GetAppDataBasePaths())
+        {
+            if (string.IsNullOrWhiteSpace(basePath))
+            {
+                continue;
+            }
+
+            var path = Path.Combine(basePath, "MatrixDesktop", childFolder);
+            if (TryEnsureWritableFolder(path))
+            {
+                return path;
+            }
+        }
+
+        throw new IOException("No writable AppData or temp folder was available.");
+    }
+
+    private static string[] GetAppDataBasePaths()
+    {
+        return
+        [
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MatrixDesktop",
-            "userdata");
-        Directory.CreateDirectory(local);
-        _cachedUserDataFolder = local;
-        return local;
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            Path.GetTempPath(),
+        ];
+    }
+
+    private static void CopyDirectoryIfChanged(string sourceRoot, string targetRoot)
+    {
+        Directory.CreateDirectory(targetRoot);
+
+        foreach (var sourceFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(sourceRoot, sourceFile);
+            var targetFile = Path.Combine(targetRoot, relativePath);
+            var targetDirectory = Path.GetDirectoryName(targetFile);
+            if (!string.IsNullOrEmpty(targetDirectory))
+            {
+                Directory.CreateDirectory(targetDirectory);
+            }
+
+            File.Copy(sourceFile, targetFile, overwrite: true);
+            File.SetLastWriteTimeUtc(targetFile, File.GetLastWriteTimeUtc(sourceFile));
+        }
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        var normalizedLeft = Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
+        var normalizedRight = Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
+        return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryEnsureWritableFolder(string path)

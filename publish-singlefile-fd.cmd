@@ -1,5 +1,7 @@
 @echo off
+setlocal EnableDelayedExpansion
 chcp 65001 >nul
+cd /d "%~dp0"
 echo ╔══════════════════════════════════════════════════════════════════════════╗
 echo ║  MatrixDesktop - Single File Publish (Framework-Dependent)               ║
 echo ╚══════════════════════════════════════════════════════════════════════════╝
@@ -22,7 +24,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Publishing...
-dotnet publish MatrixDesktop\MatrixDesktop.csproj -p:PublishProfile=SingleFile-FD -v quiet
+dotnet publish "MatrixDesktop\MatrixDesktop.csproj" -p:PublishProfile=SingleFile-FD -v quiet
 
 if %errorlevel% neq 0 (
     echo.
@@ -61,3 +63,4 @@ echo   - Windows 10 version 1809+ or Windows 11
 echo   - WebView2 Runtime (usually pre-installed on Windows)
 echo.
 pause
+endlocal

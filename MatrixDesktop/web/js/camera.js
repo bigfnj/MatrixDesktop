@@ -14,7 +14,9 @@ let _stream = null;
 const drawToCanvas = () => {
 	if (!_isDrawing) return;
 	_animationFrameId = requestAnimationFrame(drawToCanvas);
-	context.drawImage(video, 0, 0);
+	if (video.readyState >= 2) {
+		context.drawImage(video, 0, 0);
+	}
 };
 
 const stopCameraLoop = () => {
@@ -36,6 +38,7 @@ const stopCamera = () => {
 };
 
 const setupCamera = async () => {
+	stopCamera();
 	try {
 		_stream = await navigator.mediaDevices.getUserMedia({
 			video: {
@@ -43,9 +46,11 @@ const setupCamera = async () => {
 				frameRate: { ideal: 60 },
 			},
 			audio: false,
-		});
+			});
 		const videoTrack = _stream.getVideoTracks()[0];
-		const { width, height } = videoTrack.getSettings();
+		const settings = videoTrack.getSettings();
+		const width = Math.max(1, settings.width ?? 1);
+		const height = Math.max(1, settings.height ?? 1);
 
 		video.width = width;
 		video.height = height;
@@ -56,7 +61,7 @@ const setupCamera = async () => {
 		cameraSize[1] = height;
 
 		video.srcObject = _stream;
-		video.play();
+		await video.play();
 
 		_isDrawing = true;
 		drawToCanvas();

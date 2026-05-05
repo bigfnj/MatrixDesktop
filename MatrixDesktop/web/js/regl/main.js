@@ -7,7 +7,7 @@ import makeStripePass from "./stripePass.js";
 import makeImagePass from "./imagePass.js";
 import makeQuiltPass from "./quiltPass.js";
 import makeMirrorPass from "./mirrorPass.js";
-import { setupCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
+import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
 
 const effects = {
@@ -39,8 +39,8 @@ export default async (canvas, config) => {
 
 	const resize = () => {
 		const devicePixelRatio = window.devicePixelRatio ?? 1;
-		canvas.width = Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution);
-		canvas.height = Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution);
+		canvas.width = Math.max(1, Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution));
+		canvas.height = Math.max(1, Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution));
 	};
 	window.addEventListener("resize", resize);
 	
@@ -60,11 +60,22 @@ export default async (canvas, config) => {
 		canvas.addEventListener("dblclick", dblclickHandler);
 	}
 	
-	// Cleanup function for event listeners
+	let pipeline = [];
+	let cleanedUp = false;
 	const cleanup = () => {
+		if (cleanedUp) {
+			return;
+		}
+		cleanedUp = true;
 		window.removeEventListener("resize", resize);
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
+		}
+		for (const step of pipeline) {
+			step.cleanup?.();
+		}
+		if (config.useCamera) {
+			stopCamera();
 		}
 	};
 	resize();
@@ -97,7 +108,7 @@ export default async (canvas, config) => {
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	const effectName = config.effect in effects ? config.effect : "palette";
 	const context = { regl, config, lkg, cameraTex, cameraAspectRatio };
-	const pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
+	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };
 	const drawToScreen = regl({ uniforms: screenUniforms });
 	await Promise.all(pipeline.map((step) => step.ready));
@@ -108,7 +119,6 @@ export default async (canvas, config) => {
 	const tick = regl.frame(({ viewportWidth, viewportHeight }) => {
 		if (config.once) {
 			tick.cancel();
-			cleanup();
 		}
 
 		const now = regl.now() * 1000;
@@ -141,5 +151,8 @@ export default async (canvas, config) => {
 			}
 			drawToScreen();
 		});
+		if (config.once) {
+			cleanup();
+		}
 	});
 };

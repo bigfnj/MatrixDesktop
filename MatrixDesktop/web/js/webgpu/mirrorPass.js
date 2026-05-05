@@ -101,5 +101,5 @@ export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer }) =>
 		computePass.end();
 	};
 
-	return makePass("Mirror", loaded, build, run);
-};
+		return makePass("Mirror", loaded, build, run, () => window.removeEventListener("click", clickHandler));
+	};
