@@ -1,9 +1,12 @@
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeRenderTarget, loadTexture, loadShader, makeUniformBuffer, makeBindGroup, makePass } from "./utils.js";
+import createClickRipples from "../clickRipples.js";
 
 const rippleTypes = {
 	box: 0,
 	circle: 1,
+	triangle: 2,
+	star: 3,
 };
 
 const numVerticesPerQuad = 2 * 3;
@@ -15,6 +18,7 @@ const makeConfigBuffer = (device, configUniforms, config, density, gridSize, gly
 		density,
 		showDebugView: config.effect === "none",
 		rippleType: config.rippleTypeName in rippleTypes ? rippleTypes[config.rippleTypeName] : -1,
+		clickRippleType: config.clickRipples && config.effect !== "mirror" && config.clickRippleShape in rippleTypes ? rippleTypes[config.clickRippleShape] : -1,
 		slantScale: 1 / (Math.abs(Math.sin(2 * config.slant)) * (Math.sqrt(2) - 1) + 1),
 		slantVec: [Math.cos(config.slant), Math.sin(config.slant)],
 		msdfPxRange: 4,
@@ -25,8 +29,9 @@ const makeConfigBuffer = (device, configUniforms, config, density, gridSize, gly
 	return makeUniformBuffer(device, configUniforms, configData);
 };
 
-export default ({ config, device, timeBuffer }) => {
+export default ({ config, device, timeBuffer, canvas }) => {
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
+	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
 
 	const assets = [
 		loadTexture(device, config.glyphMSDFURL),
@@ -88,6 +93,8 @@ export default ({ config, device, timeBuffer }) => {
 	let configBuffer;
 	let sceneUniforms;
 	let sceneBuffer;
+	let clickRippleUniforms;
+	let clickRippleBuffer;
 	let introPipeline;
 	let computePipeline;
 	let renderPipeline;
@@ -115,6 +122,8 @@ export default ({ config, device, timeBuffer }) => {
 
 		sceneUniforms = rainShaderUniforms.Scene;
 		sceneBuffer = makeUniformBuffer(device, sceneUniforms);
+		clickRippleUniforms = rainShaderUniforms.ClickRipples;
+		clickRippleBuffer = makeUniformBuffer(device, clickRippleUniforms);
 
 		const additiveBlendComponent = {
 			operation: "add",
@@ -169,7 +178,7 @@ export default ({ config, device, timeBuffer }) => {
 		]);
 
 		introBindGroup = makeBindGroup(device, introPipeline, 0, [configBuffer, timeBuffer, introCellsBuffer]);
-		computeBindGroup = makeBindGroup(device, computePipeline, 0, [configBuffer, timeBuffer, cellsBuffer, introCellsBuffer]);
+		computeBindGroup = makeBindGroup(device, computePipeline, 0, [configBuffer, timeBuffer, cellsBuffer, introCellsBuffer, clickRippleBuffer]);
 		renderBindGroup = makeBindGroup(device, renderPipeline, 0, [
 			configBuffer,
 			timeBuffer,
@@ -186,6 +195,7 @@ export default ({ config, device, timeBuffer }) => {
 	const build = (size) => {
 		// Update scene buffer: camera and transform math for the volumetric mode
 		const aspectRatio = size[0] / size[1];
+		clickRipples.setAspectRatio(aspectRatio);
 		if (config.volumetric && config.isometric) {
 			if (aspectRatio > 1) {
 				mat4.orthoZO(camera, -1.5 * aspectRatio, 1.5 * aspectRatio, -1.5, 1.5, -1000, 1000);
@@ -197,6 +207,8 @@ export default ({ config, device, timeBuffer }) => {
 		}
 		const screenSize = aspectRatio > 1 ? [1, aspectRatio] : [1 / aspectRatio, 1];
 		device.queue.writeBuffer(sceneBuffer, 0, sceneUniforms.toBuffer({ screenSize, camera, transform }));
+		device.queue.writeBuffer(clickRippleBuffer, 0, clickRippleUniforms.toBuffer({ screenAspectRatio: clickRipples.aspectRatio, touches: clickRipples.touches }));
+		clickRipples.markClean();
 
 		// Update
 		output?.destroy();
@@ -213,6 +225,10 @@ export default ({ config, device, timeBuffer }) => {
 
 	const run = (encoder, shouldRender) => {
 		// We render the code into an Target using MSDFs: https://github.com/Chlumsky/msdfgen
+		if (clickRipples.changed) {
+			device.queue.writeBuffer(clickRippleBuffer, 0, clickRippleUniforms.toBuffer({ screenAspectRatio: clickRipples.aspectRatio, touches: clickRipples.touches }));
+			clickRipples.markClean();
+		}
 
 		const introPass = encoder.beginComputePass();
 		introPass.setPipeline(introPipeline);
@@ -237,5 +253,5 @@ export default ({ config, device, timeBuffer }) => {
 		}
 	};
 
-	return makePass("Rain", loaded, build, run);
+	return makePass("Rain", loaded, build, run, clickRipples.cleanup);
 };

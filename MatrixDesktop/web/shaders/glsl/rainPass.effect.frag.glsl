@@ -9,6 +9,8 @@ precision highp float;
 
 #define SQRT_2 1.4142135623730951
 #define SQRT_5 2.23606797749979
+#define PI 3.141592653589793
+#define TWO_PI 6.283185307179586
 
 uniform sampler2D previousEffectState;
 uniform float numColumns, numRows;
@@ -19,6 +21,9 @@ uniform bool hasThunder, loops;
 uniform float glyphHeightToWidth;
 uniform int rippleType;
 uniform float rippleScale, rippleSpeed, rippleThickness;
+uniform int clickRippleType;
+uniform float clickRippleAspectRatio;
+uniform vec3 clicks[5];
 
 // Helper functions for generating randomness, borrowed from elsewhere
 
@@ -78,12 +83,77 @@ float getRipple(float simTime, vec2 screenPos) {
 	return 0.;
 }
 
+float getTriangleDistance(vec2 pos) {
+	return max(
+		-pos.y,
+		max(
+			dot(pos, vec2(0.8660254037844386, 0.5)),
+			dot(pos, vec2(-0.8660254037844386, 0.5))
+		)
+	);
+}
+
+float getStarDistance(vec2 pos) {
+	float angle = atan(pos.y, pos.x) - PI * 0.5;
+	float wave = pow((cos(angle * 5.) + 1.) * 0.5, 1.8);
+	float radius = mix(0.45, 1., wave);
+	return length(pos) / radius;
+}
+
+float getClickRippleDistance(vec2 pos) {
+	if (clickRippleType == 0) {
+		vec2 boxDistance = abs(pos) * vec2(1., glyphHeightToWidth);
+		return max(boxDistance.x, boxDistance.y);
+	}
+	if (clickRippleType == 2) {
+		return getTriangleDistance(pos * vec2(1., glyphHeightToWidth));
+	}
+	if (clickRippleType == 3) {
+		return getStarDistance(pos * vec2(1., glyphHeightToWidth));
+	}
+	return length(pos);
+}
+
+float getClickRipples(float currentTime, vec2 screenPos) {
+	if (clickRippleType == -1) {
+		return 0.;
+	}
+
+	float ripples = 0.;
+	for (int i = 0; i < 5; i++) {
+		vec3 click = clicks[i];
+		float elapsedTime = currentTime - click.z;
+		if (elapsedTime < 0.) {
+			continue;
+		}
+
+		vec2 clickPos = (screenPos - click.xy) * vec2(clickRippleAspectRatio, 1.);
+		float rippleDistance = getClickRippleDistance(clickPos);
+
+		float clickRippleSpeed = max(0.2, rippleSpeed * 2.5);
+		float clickRippleDuration = 2.8;
+		if (elapsedTime > clickRippleDuration) {
+			continue;
+		}
+
+		float rippleRadius = elapsedTime * clickRippleSpeed;
+		float ringThickness = max(0.04, rippleThickness * 0.35);
+		float ringDistance = abs(rippleDistance - rippleRadius);
+		float ring = 1. - smoothstep(ringThickness * 0.3, ringThickness, ringDistance);
+		float fadeIn = smoothstep(0., 0.08, elapsedTime);
+		float fadeOut = 1. - smoothstep(clickRippleDuration * 0.75, clickRippleDuration, elapsedTime);
+		ripples += ring * fadeIn * fadeOut * 0.9;
+	}
+
+	return min(ripples, 2.);
+}
+
 // Main function
 
-vec4 computeResult(float simTime, bool isFirstFrame, vec2 glyphPos, vec2 screenPos, vec4 previous) {
+vec4 computeResult(float currentTime, float simTime, bool isFirstFrame, vec2 glyphPos, vec2 screenPos, vec4 previous) {
 
 	float multipliedEffects = 1. + getThunder(simTime, screenPos);
-	float addedEffects = getRipple(simTime, screenPos); // Round or square ripples across the grid
+	float addedEffects = getRipple(simTime, screenPos) + getClickRipples(currentTime, screenPos); // Round or square ripples across the grid
 
 	vec4 result = vec4(multipliedEffects, addedEffects, 0., 0.);
 	return result;
@@ -95,5 +165,5 @@ void main()	{
 	vec2 glyphPos = gl_FragCoord.xy;
 	vec2 screenPos = glyphPos / vec2(numColumns, numRows);
 	vec4 previous = texture2D( previousEffectState, screenPos );
-	gl_FragColor = computeResult(simTime, isFirstFrame, glyphPos, screenPos, previous);
+	gl_FragColor = computeResult(time, simTime, isFirstFrame, glyphPos, screenPos, previous);
 }

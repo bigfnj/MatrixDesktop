@@ -109,6 +109,8 @@ const defaults = {
 	rippleThickness: 0.2, // The thickness of the ripple effect
 	rippleScale: 30, // The size of the ripple effect
 	rippleSpeed: 0.2, // The rate at which the ripple effect progresses
+	clickRipples: false, // Whether clicks create ripples in non-mirror rain effects
+	clickRippleShape: "circle", // The shape of click-triggered ripples: circle, box, triangle, or star
 	numColumns: 80, // The maximum dimension of the glyph grid
 	density: 1, // In volumetric mode, the number of actual columns compared to the grid
 	palette: [
@@ -409,6 +411,10 @@ const parseClampedInt = (min, max) => (s) => {
 	const parsed = parseInt(s);
 	return Number.isFinite(parsed) ? range(parsed, min, max) : null;
 };
+const parseClickRippleShape = (s) => {
+	const shape = s.toLowerCase();
+	return ["circle", "box", "triangle", "star"].includes(shape) ? shape : null;
+};
 
 const parseColor = (isHSL) => (s) => {
 	const values = parseFiniteList(s);
@@ -518,6 +524,8 @@ const paramMapping = {
 
 	volumetric: { key: "volumetric", parser: isTrue },
 	glyphFlip: { key: "glyphFlip", parser: isTrue },
+	clickRipples: { key: "clickRipples", parser: isTrue },
+	clickRippleShape: { key: "clickRippleShape", parser: parseClickRippleShape },
 	glyphRotation: {
 		key: "glyphRotation",
 		parser: (s) => nullNaN(range(parseFloat(s), 0, Infinity)),

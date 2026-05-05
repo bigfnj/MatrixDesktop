@@ -4,11 +4,13 @@
 
 ### Add Click Ripples To Rain Effects
 
-Status: Planned
+Status: Completed; Windows runtime smoke passed
 
 ## Summary
 
-Add `clickRipples=true` as a web/query flag so click-triggered ripples can layer onto normal rain effects like `effect=stripes` without using `effect=mirror`. Default click ripple shape is circular, and the feature must work in both WebGPU and REGL/WebGL renderers.
+Added `clickRipples=true` as a web/query flag so click-triggered ripples can layer onto normal rain effects like `effect=stripes` without using `effect=mirror`. Default click ripple shape is circular, with box, triangle, and star options; the feature is wired for both WebGPU and REGL/WebGL renderers.
+
+Windows visual smoke testing confirmed the click ripple feature works after the triangle ripple was corrected to render as a straight-sided triangle.
 
 Example target command:
 
@@ -20,7 +22,7 @@ start "" /min "%EXE%" --hide-cursor font=resurrections fps=30 animationSpeed=0.5
 
 - Add web config support for:
   - `clickRipples=true|false`, default `false`.
-  - `clickRippleShape=circle|box`, default `circle`; invalid values fall back to `circle`.
+  - `clickRippleShape=circle|box|triangle|star`, default `circle`; invalid values fall back to `circle`.
 - Keep `effect=mirror` behavior unchanged.
 - Add click tracking to the rain pass, not the mirror pass, so the ripple brightness feeds into existing downstream effects: stripes, palette, image, etc.
 - Track the most recent 5 clicks on the canvas, storing normalized coordinates and elapsed age.

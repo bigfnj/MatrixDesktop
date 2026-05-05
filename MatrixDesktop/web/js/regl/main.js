@@ -107,7 +107,7 @@ export default async (canvas, config) => {
 	// All this takes place in a full screen quad.
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	const effectName = config.effect in effects ? config.effect : "palette";
-	const context = { regl, config, lkg, cameraTex, cameraAspectRatio };
+	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas };
 	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };
 	const drawToScreen = regl({ uniforms: screenUniforms });

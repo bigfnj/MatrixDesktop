@@ -13,6 +13,7 @@ internal static class MatrixArgs
         "camera",
         "volumetric",
         "glyphFlip",
+        "clickRipples",
         "loops",
         "skipIntro",
         "suppressWarnings",

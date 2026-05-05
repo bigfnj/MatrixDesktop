@@ -54,7 +54,7 @@ Numbers
   Example: "50%" becomes 50 (not 0.5). Avoid %.
 
 Booleans
-- For known boolean web flags (camera, volumetric, glyphFlip, loops, skipIntro, suppressWarnings, once, isometric):
+- For known boolean web flags (camera, volumetric, glyphFlip, clickRipples, loops, skipIntro, suppressWarnings, once, isometric):
   - Recommended: true / false
   - Also accepted via wrapper normalization: 1/0, yes/no, on/off (these get converted to true/false).
   - Bare boolean flags are treated as true.
@@ -424,8 +424,8 @@ glyphRotation (number; degrees)
   MatrixDesktop.exe --glyphRotation 90
 
 
-4.6 Camera and external image
------------------------------
+4.6 Camera, click ripples, and external image
+---------------------------------------------
 camera (boolean)
 - Key: camera
 - Default: false
@@ -435,6 +435,26 @@ camera (boolean)
 - Examples:
   MatrixDesktop.exe --effect mirror --camera true
   MatrixDesktop.exe --version updated --effect mirror --camera true
+
+clickRipples (boolean)
+- Key: clickRipples
+- Default: false
+- Meaning: enables click-triggered ripples in normal rain effects without using effect=mirror.
+- Notes:
+  - Applies to non-mirror effects such as stripes, palette, and image.
+  - effect=mirror keeps its existing click ripple behavior.
+- Examples:
+  MatrixDesktop.exe --windowed --effect stripes --clickRipples true
+  MatrixDesktop.exe --windowed --effect palette --clickRipples
+
+clickRippleShape (string)
+- Key: clickRippleShape
+- Default: circle
+- Accepted values: circle, box, triangle, star
+- Meaning: chooses the shape of click-triggered ripples for non-mirror rain effects.
+- Example:
+  MatrixDesktop.exe --windowed --effect stripes --clickRipples true --clickRippleShape box
+  MatrixDesktop.exe --windowed --effect stripes --clickRipples true --clickRippleShape star
 
 url (string)
 - Key: url
@@ -598,5 +618,5 @@ F) Image effect using a local bundled asset
 - forwardSpeed has no visible effect unless volumetric=true.
 - isometric has no visible effect unless volumetric=true.
 - Some internal config properties exist but are NOT exposed as URL params in this build
-  (e.g., glintIntensity, baseTexture, glintTexture, brightness/contrast controls, ripple knobs).
+  (e.g., glintIntensity, baseTexture, glintTexture, brightness/contrast controls, low-level ripple tuning knobs).
   Changing those requires editing web/js/config.js.

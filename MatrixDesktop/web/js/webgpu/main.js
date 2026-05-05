@@ -115,6 +115,7 @@ export default async (canvas, config) => {
 		cameraTex,
 		cameraAspectRatio,
 		cameraSize,
+		canvas,
 	};
 
 	const effectName = config.effect in effects ? config.effect : "palette";

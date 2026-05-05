@@ -25,6 +25,7 @@ struct Config {
 	rippleSpeed : f32,
 	rippleThickness : f32,
 	rippleType : i32,
+	clickRippleType : i32,
 
 	// render-specific properties
 	msdfPxRange : f32,
@@ -62,6 +63,11 @@ struct Scene {
 	transform : mat4x4<f32>,
 };
 
+struct ClickRipples {
+	screenAspectRatio : f32,
+	touches : array<vec4<f32>, 5>,
+};
+
 struct Cell {
 	raindrop : vec4<f32>,
 	symbol : vec4<f32>,
@@ -92,6 +98,7 @@ struct IntroCellData {
 // Compute-specific bindings
 @group(0) @binding(2) var<storage, read_write> cells_RW : CellData;
 @group(0) @binding(3) var<storage, read_write> introCells_RO : IntroCellData;
+@group(0) @binding(4) var<uniform> clickRipples : ClickRipples;
 
 // Render-specific bindings
 @group(0) @binding(2) var<uniform> scene : Scene;
@@ -219,6 +226,67 @@ fn getRipple(simTime : f32, screenPos : vec2<f32>) -> f32 {
 	return 0.0;
 }
 
+fn getTriangleDistance(pos : vec2<f32>) -> f32 {
+	return max(
+		-pos.y,
+		max(
+			dot(pos, vec2<f32>(0.8660254037844386, 0.5)),
+			dot(pos, vec2<f32>(-0.8660254037844386, 0.5))
+		)
+	);
+}
+
+fn getStarDistance(pos : vec2<f32>) -> f32 {
+	var angle = atan2(pos.y, pos.x) - PI * 0.5;
+	var wave = pow((cos(angle * 5.0) + 1.0) * 0.5, 1.8);
+	var radius = mix(0.45, 1.0, wave);
+	return length(pos) / radius;
+}
+
+fn getClickRippleDistance(pos : vec2<f32>) -> f32 {
+	if (config.clickRippleType == 0) {
+		var boxDistance = abs(pos) * vec2<f32>(1.0, config.glyphHeightToWidth);
+		return max(boxDistance.x, boxDistance.y);
+	}
+	if (config.clickRippleType == 2) {
+		return getTriangleDistance(pos * vec2<f32>(1.0, config.glyphHeightToWidth));
+	}
+	if (config.clickRippleType == 3) {
+		return getStarDistance(pos * vec2<f32>(1.0, config.glyphHeightToWidth));
+	}
+	return length(pos);
+}
+
+fn getClickRipples(currentTime : f32, screenPos : vec2<f32>) -> f32 {
+	if (config.clickRippleType == -1) {
+		return 0.0;
+	}
+
+	var ripples = 0.0;
+	for (var i = 0; i < 5; i++) {
+		var touch = clickRipples.touches[i];
+		var elapsedTime = currentTime - touch.z;
+		if (elapsedTime >= 0.0) {
+			var clickPos = (screenPos - touch.xy) * vec2<f32>(clickRipples.screenAspectRatio, 1.0);
+			var rippleDistance = getClickRippleDistance(clickPos);
+
+			var clickRippleSpeed = max(0.2, config.rippleSpeed * 2.5);
+			var clickRippleDuration = 2.8;
+			if (elapsedTime <= clickRippleDuration) {
+				var rippleRadius = elapsedTime * clickRippleSpeed;
+				var ringThickness = max(0.04, config.rippleThickness * 0.35);
+				var ringDistance = abs(rippleDistance - rippleRadius);
+				var ring = 1.0 - smoothstep(ringThickness * 0.3, ringThickness, ringDistance);
+				var fadeIn = smoothstep(0.0, 0.08, elapsedTime);
+				var fadeOut = 1.0 - smoothstep(clickRippleDuration * 0.75, clickRippleDuration, elapsedTime);
+				ripples += ring * fadeIn * fadeOut * 0.9;
+			}
+		}
+	}
+
+	return min(ripples, 2.0);
+}
+
 // Compute shader main functions
 
 fn computeIntroProgress (simTime : f32, isFirstFrame : bool, glyphPos : vec2<f32>, screenPos : vec2<f32>, previous : vec4<f32>) -> vec4<f32> {
@@ -294,10 +362,10 @@ fn computeSymbol (simTime : f32, isFirstFrame : bool, glyphPos : vec2<f32>, scre
 	return result;
 }
 
-fn computeEffect (simTime : f32, isFirstFrame : bool, glyphPos : vec2<f32>, screenPos : vec2<f32>, previous : vec4<f32>, raindrop : vec4<f32>) -> vec4<f32> {
+fn computeEffect (currentTime : f32, simTime : f32, isFirstFrame : bool, glyphPos : vec2<f32>, screenPos : vec2<f32>, previous : vec4<f32>, raindrop : vec4<f32>) -> vec4<f32> {
 
 	var multipliedEffects = 1.0 + getThunder(simTime, screenPos);
-	var addedEffects = getRipple(simTime, screenPos); // Round or square ripples across the grid
+	var addedEffects = getRipple(simTime, screenPos) + getClickRipples(currentTime, screenPos); // Round or square ripples across the grid
 
 	var result = vec4<f32>(multipliedEffects, addedEffects, 0.0, 0.0);
 	return result;
@@ -347,7 +415,7 @@ fn computeEffect (simTime : f32, isFirstFrame : bool, glyphPos : vec2<f32>, scre
 	var introCell = introCells_RO.cells[column];
 	cell.raindrop = computeRaindrop(simTime, isFirstFrame, glyphPos, screenPos, cell.raindrop, introCell.progress);
 	cell.symbol = computeSymbol(simTime, isFirstFrame, glyphPos, screenPos, cell.symbol, cell.raindrop);
-	cell.effect = computeEffect(simTime, isFirstFrame, glyphPos, screenPos, cell.effect, cell.raindrop);
+	cell.effect = computeEffect(time.seconds, simTime, isFirstFrame, glyphPos, screenPos, cell.effect, cell.raindrop);
 	cells_RW.cells[i] = cell;
 }
 

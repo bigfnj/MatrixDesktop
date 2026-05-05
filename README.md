@@ -139,7 +139,7 @@ Notes:
 - By default, key-exit only triggers when MatrixDesktop is the foreground app; use `--global-key-exit` to make it close on keypress even when not focused.
 - If both an enable and a disable flag are supplied for the same wrapper feature, the **last one wins**.
 - Boolean flags accept common forms like `true/false`, `1/0`, `yes/no`, `on/off`.
-- Bare boolean web flags such as `--camera`, `--volumetric`, or `--skipIntro` are treated as `true`.
+- Bare boolean web flags such as `--camera`, `--volumetric`, `--clickRipples`, or `--skipIntro` are treated as `true`.
 - Monitor indices are 0-based and come from `Screen.AllScreens`; their order can change if displays are rearranged in Windows.
 - Any unknown parameters are passed through but will be ignored by the web app.
 
@@ -181,9 +181,11 @@ The following arguments are recognized by the upstream `web/js/config.js` URL pa
 - `bloomStrength` (number) — bloom strength (0–1).
 - `ditherMagnitude` (number) — dithering amount (0–1).
 
-#### Feature toggles (booleans)
+#### Feature toggles and click controls
 
 - `camera` (bool) — enables webcam input (used by the mirror effect).
+- `clickRipples` (bool) — enables click-triggered ripples in non-mirror rain effects such as `stripes`, `palette`, or `image`.
+- `clickRippleShape` (string) — click ripple shape: `circle` (default), `box`, `triangle`, or `star`. Invalid values fall back to `circle`.
 - `volumetric` (bool) — enables volumetric/3D rendering.
 - `glyphFlip` (bool) — flips glyphs horizontally.
 - `loops` (bool) — loop mode (WIP).

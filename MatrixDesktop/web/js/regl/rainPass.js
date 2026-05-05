@@ -1,10 +1,13 @@
 import { loadImage, loadText, makePassFBO, makeDoubleBuffer, makePass } from "./utils.js";
+import createClickRipples from "../clickRipples.js";
 
 const extractEntries = (src, keys) => Object.fromEntries(Array.from(Object.entries(src)).filter(([key]) => keys.includes(key)));
 
 const rippleTypes = {
 	box: 0,
 	circle: 1,
+	triangle: 2,
+	star: 3,
 };
 
 // These compute buffers are used to compute the properties of cells in the grid.
@@ -30,8 +33,9 @@ const blVert = [1, 0];
 const brVert = [1, 1];
 const quadVertices = [tlVert, trVert, brVert, tlVert, brVert, blVert];
 
-export default ({ regl, config, lkg }) => {
+export default ({ regl, config, lkg, canvas }) => {
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
+	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
 
 	// The volumetric mode multiplies the number of columns
 	// to reach the desired density, and then overlaps them
@@ -47,6 +51,7 @@ export default ({ regl, config, lkg }) => {
 
 	// Various effect-related values
 	const rippleType = config.rippleTypeName in rippleTypes ? rippleTypes[config.rippleTypeName] : -1;
+	const clickRippleType = config.clickRipples && config.effect !== "mirror" && config.clickRippleShape in rippleTypes ? rippleTypes[config.clickRippleShape] : -1;
 	const slantVec = [Math.cos(config.slant), Math.sin(config.slant)];
 	const slantScale = 1 / (Math.abs(Math.sin(2 * config.slant)) * (Math.sqrt(2) - 1) + 1);
 	const showDebugView = config.effect === "none";
@@ -124,6 +129,9 @@ export default ({ regl, config, lkg }) => {
 			...effectUniforms,
 			raindropState: raindropDoubleBuffer.front,
 			previousEffectState: effectDoubleBuffer.back,
+			clickRippleType,
+			clickRippleAspectRatio: () => clickRipples.aspectRatio,
+			clicks: () => clickRipples.clicks,
 		},
 
 		framebuffer: effectDoubleBuffer.front,
@@ -247,12 +255,14 @@ export default ({ regl, config, lkg }) => {
 			rainPassIntro.loaded,
 			rainPassRaindrop.loaded,
 			rainPassSymbol.loaded,
+			rainPassEffect.loaded,
 			rainPassVert.loaded,
 			rainPassFrag.loaded,
 		]),
 		(w, h) => {
 			output.resize(w, h);
 			const aspectRatio = w / h;
+			clickRipples.setAspectRatio(aspectRatio);
 
 			const [numTileColumns, numTileRows] = [lkg.tileX, lkg.tileY];
 			const numVantagePoints = numTileRows * numTileColumns;
@@ -315,6 +325,7 @@ export default ({ regl, config, lkg }) => {
 					render({ ...vantagePoint, transform, screenSize, vert: rainPassVert.text(), frag: rainPassFrag.text() });
 				}
 			}
-		}
+		},
+		clickRipples.cleanup
 	);
 };
