@@ -5,7 +5,8 @@ Date: 2026-05-05
 ## Current State
 
 - Branch `main` is synced with `origin/main`.
-- Latest commit: `27e5760 Use multi-resolution Windows icon`.
+- Current head includes the committed backlog and session handoff notes.
+- Latest code-change commit: `27e5760 Use multi-resolution Windows icon`.
 - Previous release tag: `v0.1.0` points to `bd24373 Harden WebView2 startup and trim payload`.
 - Documentation files are ready to be committed:
   - `BACKLOG.md`
