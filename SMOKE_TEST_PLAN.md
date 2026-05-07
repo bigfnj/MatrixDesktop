@@ -33,6 +33,11 @@ Run commands from inside the artifact folder so relative paths and `web/` assets
 WebView2 profile/cache data is stored under `%LOCALAPPDATA%\MatrixDesktop\WebView2\` by default, not beside the EXE.
 Bundled web assets are staged under `%LOCALAPPDATA%\MatrixDesktop\Web\` before WebView2 loads them.
 
+Icon precheck:
+
+- In Explorer, both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe` should show the Matrix icon.
+- Launch each app and confirm the taskbar button also uses the Matrix icon while the window is open.
+
 ## Smoke Cases
 
 1. Default launch

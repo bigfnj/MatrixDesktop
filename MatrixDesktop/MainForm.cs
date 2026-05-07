@@ -35,15 +35,9 @@ public sealed class MainForm : Form
 
     private bool _isShuttingDown;
     private bool _webViewInitializationStarted;
-    private System.Drawing.Icon? _smallWindowIcon;
-    private System.Drawing.Icon? _largeWindowIcon;
+    private AppWindowIcon? _windowIcon;
 
     private static string? _cachedUserDataFolder;
-
-    private const int WmSetIcon = 0x0080;
-    private static readonly IntPtr IconSmall = new(0);
-    private static readonly IntPtr IconBig = new(1);
-    private static readonly IntPtr IconSmall2 = new(2);
 
     public MainForm(string[]? args)
     {
@@ -94,23 +88,8 @@ public sealed class MainForm : Form
     {
         try
         {
-            var iconPath = Path.Combine(AppContext.BaseDirectory, "Matrix.ico");
-            if (File.Exists(iconPath))
-            {
-                _smallWindowIcon = new System.Drawing.Icon(iconPath, 16, 16);
-                _largeWindowIcon = new System.Drawing.Icon(iconPath, 32, 32);
-            }
-            else
-            {
-                var icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                _smallWindowIcon = icon;
-                _largeWindowIcon = icon;
-            }
-
-            if (_largeWindowIcon is not null)
-            {
-                Icon = _largeWindowIcon;
-            }
+            _windowIcon ??= AppWindowIcon.Load();
+            _windowIcon.ApplyTo(this);
         }
         catch
         {
@@ -127,16 +106,7 @@ public sealed class MainForm : Form
 
         try
         {
-            if (_smallWindowIcon is not null)
-            {
-                SendMessage(Handle, WmSetIcon, IconSmall, _smallWindowIcon.Handle);
-                SendMessage(Handle, WmSetIcon, IconSmall2, _smallWindowIcon.Handle);
-            }
-
-            if (_largeWindowIcon is not null)
-            {
-                SendMessage(Handle, WmSetIcon, IconBig, _largeWindowIcon.Handle);
-            }
+            _windowIcon?.ApplyTo(this);
         }
         catch
         {
@@ -345,20 +315,14 @@ public sealed class MainForm : Form
     {
         try
         {
-            if (_smallWindowIcon is not null && !ReferenceEquals(_smallWindowIcon, _largeWindowIcon))
-            {
-                _smallWindowIcon.Dispose();
-            }
-
-            _largeWindowIcon?.Dispose();
+            _windowIcon?.Dispose();
         }
         catch
         {
             // Ignore.
         }
 
-        _smallWindowIcon = null;
-        _largeWindowIcon = null;
+        _windowIcon = null;
     }
 
     private void ApplyWindowModeAndBounds(bool initial)
@@ -994,7 +958,4 @@ public sealed class MainForm : Form
             return false;
         }
     }
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 }

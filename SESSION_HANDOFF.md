@@ -5,7 +5,7 @@ Date: 2026-05-05
 ## Current State
 
 - Branch `main` includes the completed click-ripples feature commit and standalone configurator feature work.
-- Current head includes the click-ripples implementation, standalone configurator, and updated smoke notes.
+- Current head includes the click-ripples implementation, standalone configurator, runtime icon hardening, and updated smoke notes.
 - Latest previous pushed code-change commit: `27e5760 Use multi-resolution Windows icon`.
 - Previous release tag: `v0.1.0` points to `bd24373 Harden WebView2 startup and trim payload`.
 - `clickRipples=true` is implemented for non-mirror rain effects and has passed Windows visual smoke testing.
@@ -41,21 +41,20 @@ Date: 2026-05-05
 - Added stripe-effect dependency handling: `Stripe colors` is disabled for non-stripe effects, and command generation suppresses `stripeColors` unless the selected effect can use it.
 - Added one-time starter preset seeding for `rainbow-haze`, `paradise`, and `stripe effects`; they use the three user-provided argument lines, update existing v1 seed presets, and remain deleted after the user removes them.
 - Added guarded configurator randomization scopes: Visual preset, Colors only, and Motion/Layout. Randomization preserves launch controls, avoids mirror/image/debug effects, caps stripe colors at 2-8, and caps palette stops at 3-6.
+- Embedded `Matrix.ico` as a runtime resource in both executables, kept the sidecar file fallback, and reapplied small/large Win32 window icons from the helper after handle creation.
+- Rebuilt the smoke package with Windows `dotnet` so apphost `.exe` files receive Windows icon resources reliably; the publish script now cleans stale `bin/`, `obj/`, and publish output first.
 
 ## Important Notes
 
-- Rebuild with:
+- Rebuild release/smoke artifacts from Windows with:
   ```cmd
   publish-portable-win-x64-fd.cmd
   ```
-  or from WSL:
-  ```bash
-  dotnet publish MatrixDesktop/MatrixDesktop.csproj -c Release /p:PublishProfile=Portable-win-x64-framework-dependent /p:EnableWindowsTargeting=true
-  ```
+- WSL `dotnet publish /p:EnableWindowsTargeting=true` remains useful for quick validation, but release/smoke artifacts should be produced by Windows `dotnet` so apphost icon metadata matches Windows behavior.
 - Current local artifact:
   - Folder: `publish/win-x64-fd/`
   - Smoke zip: `publish/MatrixDesktop-win-x64-fd-smoke.zip`
-  - SHA256: `aacc556a497f7fee70871961a095a9f5505f05b66f18b2dd42056d569e5bae98`
+  - SHA256: `09b83977b08b7365f59c8f2c1b4e19867710d789769f3f3882215894d1f715b0`
   - Folder size: about `6.3M`
   - Zip size: about `2.7M`
 - If releasing the current feature work, create a new tag such as `v0.2.0` or another version; do not move `v0.1.0`.
@@ -65,10 +64,12 @@ Date: 2026-05-05
 - `dotnet publish MatrixDesktop/MatrixDesktop.csproj -c Release /p:PublishProfile=Portable-win-x64-framework-dependent /p:EnableWindowsTargeting=true` passed.
 - `dotnet publish MatrixDesktopConfigurator/MatrixDesktopConfigurator.csproj -c Release /p:PublishProfile=Portable-win-x64-framework-dependent /p:EnableWindowsTargeting=true` passed.
 - `dotnet build MatrixDesktopApp.sln -c Release /p:EnableWindowsTargeting=true` passed with 0 warnings and 0 errors.
+- Windows `dotnet publish` through `publish-portable-win-x64-fd.cmd` passed for both projects after cleaning stale intermediates.
 - `unzip -t publish/MatrixDesktop-win-x64-fd-smoke.zip` passed.
 - Confirmed no `MatrixDesktopConfigurator.presets.json` user-state file is included in `publish/`.
 - `file publish/win-x64-fd/MatrixDesktop.exe publish/win-x64-fd/MatrixDesktopConfigurator.exe` reported Windows x64 GUI PE executables.
 - `llvm-readobj --coff-resources` confirmed embedded `ICON` and `GROUP_ICON` resources for both executables.
+- Windows `System.Drawing.Icon.ExtractAssociatedIcon` extracted the Matrix icon from both apphost executables after copying them to a local Windows temp folder.
 - Browser ES module syntax check passed with `node --input-type=module --check`.
 - Windows visual smoke testing passed for click ripples without mirror/camera, including the triangle shape.
 - Configurator JavaScript syntax check passed with `node --check MatrixDesktopConfigurator/configurator/js/app.js`.
@@ -78,6 +79,7 @@ Date: 2026-05-05
 
 ## Suggested Next Steps
 
-1. Run Windows runtime smoke for `MatrixDesktopConfigurator.exe`: preset create/save/rename/delete/reopen, command copy, and Test Argument replacement.
-2. Push `main` if the completed local commits have not already been shared.
-3. Tag/upload the refreshed smoke zip if releasing this feature build.
+1. Run Windows runtime smoke for `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe` icons: file icons in Explorer and taskbar icons while each app is open.
+2. Run Windows runtime smoke for `MatrixDesktopConfigurator.exe`: preset create/save/rename/delete/reopen, command copy, Test Argument replacement, and randomization scopes.
+3. Push `main` if the completed local commits have not already been shared.
+4. Tag/upload the refreshed smoke zip if releasing this feature build.

@@ -33,15 +33,7 @@ public sealed class ConfiguratorForm : Form
     private WebView2 _webView;
     private Process? _testProcess;
     private bool _isShuttingDown;
-    private System.Drawing.Icon? _smallWindowIcon;
-    private System.Drawing.Icon? _largeWindowIcon;
-    private PreviewWindow? _previewWindow;
-    private string? _cachedHelpText;
-
-    private const int WmSetIcon = 0x0080;
-    private static readonly IntPtr IconSmall = new(0);
-    private static readonly IntPtr IconBig = new(1);
-    private static readonly IntPtr IconSmall2 = new(2);
+    private AppWindowIcon? _windowIcon;
 
     public ConfiguratorForm()
     {
@@ -78,23 +70,8 @@ public sealed class ConfiguratorForm : Form
     {
         try
         {
-            var iconPath = Path.Combine(AppContext.BaseDirectory, "Matrix.ico");
-            if (File.Exists(iconPath))
-            {
-                _smallWindowIcon = new System.Drawing.Icon(iconPath, 16, 16);
-                _largeWindowIcon = new System.Drawing.Icon(iconPath, 32, 32);
-            }
-            else
-            {
-                var icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                _smallWindowIcon = icon;
-                _largeWindowIcon = icon;
-            }
-
-            if (_largeWindowIcon is not null)
-            {
-                Icon = _largeWindowIcon;
-            }
+            _windowIcon ??= AppWindowIcon.Load();
+            _windowIcon.ApplyTo(this);
         }
         catch
         {
@@ -111,16 +88,7 @@ public sealed class ConfiguratorForm : Form
 
         try
         {
-            if (_smallWindowIcon is not null)
-            {
-                SendMessage(Handle, WmSetIcon, IconSmall, _smallWindowIcon.Handle);
-                SendMessage(Handle, WmSetIcon, IconSmall2, _smallWindowIcon.Handle);
-            }
-
-            if (_largeWindowIcon is not null)
-            {
-                SendMessage(Handle, WmSetIcon, IconBig, _largeWindowIcon.Handle);
-            }
+            _windowIcon?.ApplyTo(this);
         }
         catch
         {
@@ -184,20 +152,14 @@ public sealed class ConfiguratorForm : Form
     {
         try
         {
-            if (_smallWindowIcon is not null && !ReferenceEquals(_smallWindowIcon, _largeWindowIcon))
-            {
-                _smallWindowIcon.Dispose();
-            }
-
-            _largeWindowIcon?.Dispose();
+            _windowIcon?.Dispose();
         }
         catch
         {
             // Ignore.
         }
 
-        _smallWindowIcon = null;
-        _largeWindowIcon = null;
+        _windowIcon = null;
     }
 
     private static WebView2 CreateWebView()
@@ -825,7 +787,4 @@ public sealed class ConfiguratorForm : Form
             MatrixDesktop.Shared.Logger.Warn($"Failed to open external URI '{uri}': {ex.Message}");
         }
     }
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 }

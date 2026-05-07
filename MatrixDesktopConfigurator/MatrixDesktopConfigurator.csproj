@@ -38,6 +38,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\MatrixDesktop\Matrix.ico" LogicalName="Matrix.ico" />
     <Content Include="..\MatrixDesktop\Matrix.ico" Link="Matrix.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
