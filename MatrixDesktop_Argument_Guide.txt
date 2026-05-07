@@ -14,6 +14,14 @@ B) Web flags (visualizer-level)
    - Forwarded to the embedded Matrix web app as URL query parameters.
    - These must match the web app’s expected parameter names EXACTLY (case-sensitive).
 
+Companion configurator
+----------------------
+MatrixDesktopConfigurator.exe provides a standalone UI for building these
+arguments, saving named presets, copying the generated command, and launching a
+safe windowed test run. It stores presets beside the executable when possible,
+or under LocalAppData\MatrixDesktop\Configurator when the publish folder is not
+writable.
+
 
 1) How to pass arguments
 ------------------------

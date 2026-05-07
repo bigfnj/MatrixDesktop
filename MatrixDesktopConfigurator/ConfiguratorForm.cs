@@ -1,0 +1,657 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace MatrixDesktopConfigurator;
+
+public sealed class ConfiguratorForm : Form
+{
+    private const string HostName = "configurator.local";
+    private const string HostOrigin = "https://configurator.local/";
+    private const int CatastrophicFailureHResult = unchecked((int)0x8000FFFF);
+
+    private readonly ConfiguratorMetadata _metadata = ArgumentCatalog.Create();
+    private readonly StorageService _storage = new();
+    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = false,
+    };
+
+    private readonly CommandBuilder _commandBuilder;
+    private readonly ArgumentImporter _argumentImporter;
+    private readonly DraftRandomizer _randomizer = new();
+    private ConfiguratorState _state;
+    private WebView2 _webView;
+    private Process? _testProcess;
+    private bool _isShuttingDown;
+    private System.Drawing.Icon? _smallWindowIcon;
+    private System.Drawing.Icon? _largeWindowIcon;
+
+    private const int WmSetIcon = 0x0080;
+    private static readonly IntPtr IconSmall = new(0);
+    private static readonly IntPtr IconBig = new(1);
+    private static readonly IntPtr IconSmall2 = new(2);
+
+    public ConfiguratorForm()
+    {
+        Text = "MatrixDesktop Configurator";
+        MinimumSize = new System.Drawing.Size(980, 720);
+        ClientSize = new System.Drawing.Size(1240, 820);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = System.Drawing.Color.FromArgb(12, 16, 18);
+        TryApplyWindowIcon();
+
+        _commandBuilder = new CommandBuilder(_metadata);
+        _argumentImporter = new ArgumentImporter(_metadata);
+        _state = _storage.Load();
+        if (_state.LastDraft.Count == 0)
+        {
+            _state.LastDraft = _commandBuilder.CreateDefaultDraft();
+        }
+
+        if (PresetSeeder.Seed(_state, _commandBuilder, _argumentImporter))
+        {
+            _storage.Save(_state);
+        }
+
+        _webView = CreateWebView();
+        Controls.Add(_webView);
+        Shown += async (_, _) =>
+        {
+            TryApplyNativeWindowIcons();
+            await InitializeWebViewAsync();
+        };
+    }
+
+    private void TryApplyWindowIcon()
+    {
+        try
+        {
+            var iconPath = Path.Combine(AppContext.BaseDirectory, "Matrix.ico");
+            if (File.Exists(iconPath))
+            {
+                _smallWindowIcon = new System.Drawing.Icon(iconPath, 16, 16);
+                _largeWindowIcon = new System.Drawing.Icon(iconPath, 32, 32);
+            }
+            else
+            {
+                var icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                _smallWindowIcon = icon;
+                _largeWindowIcon = icon;
+            }
+
+            if (_largeWindowIcon is not null)
+            {
+                Icon = _largeWindowIcon;
+            }
+        }
+        catch
+        {
+            // Cosmetic only; do not block the configurator if icon extraction fails.
+        }
+    }
+
+    private void TryApplyNativeWindowIcons()
+    {
+        if (!IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_smallWindowIcon is not null)
+            {
+                SendMessage(Handle, WmSetIcon, IconSmall, _smallWindowIcon.Handle);
+                SendMessage(Handle, WmSetIcon, IconSmall2, _smallWindowIcon.Handle);
+            }
+
+            if (_largeWindowIcon is not null)
+            {
+                SendMessage(Handle, WmSetIcon, IconBig, _largeWindowIcon.Handle);
+            }
+        }
+        catch
+        {
+            // Cosmetic only.
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        TryApplyNativeWindowIcons();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        _isShuttingDown = true;
+        StopTestProcess();
+
+        try
+        {
+            _storage.Save(_state);
+        }
+        catch
+        {
+            // Ignore last-moment save failures; normal save paths report errors to the UI.
+        }
+
+        try
+        {
+            _webView.Dispose();
+        }
+        catch
+        {
+            // Ignore.
+        }
+
+        base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        DisposeWindowIcons();
+        base.OnFormClosed(e);
+    }
+
+    private void DisposeWindowIcons()
+    {
+        try
+        {
+            if (_smallWindowIcon is not null && !ReferenceEquals(_smallWindowIcon, _largeWindowIcon))
+            {
+                _smallWindowIcon.Dispose();
+            }
+
+            _largeWindowIcon?.Dispose();
+        }
+        catch
+        {
+            // Ignore.
+        }
+
+        _smallWindowIcon = null;
+        _largeWindowIcon = null;
+    }
+
+    private static WebView2 CreateWebView()
+    {
+        return new WebView2
+        {
+            Dock = DockStyle.Fill,
+            BackColor = System.Drawing.Color.FromArgb(12, 16, 18),
+            DefaultBackgroundColor = System.Drawing.Color.FromArgb(12, 16, 18),
+            CreationProperties = new CoreWebView2CreationProperties
+            {
+                UserDataFolder = GetConfiguratorAppDataFolder("WebView2"),
+            },
+        };
+    }
+
+    private async Task InitializeWebViewAsync()
+    {
+        try
+        {
+            await InitializeCurrentWebViewAsync();
+        }
+        catch (WebView2RuntimeNotFoundException)
+        {
+            MessageBox.Show(
+                "Microsoft Edge WebView2 Runtime is not installed on this machine.\n\nInstall the Evergreen WebView2 Runtime and re-run this app.",
+                "MatrixDesktop Configurator",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            Close();
+        }
+        catch (COMException ex) when (ex.HResult == CatastrophicFailureHResult)
+        {
+            MessageBox.Show(
+                "WebView2 failed to initialize for the configurator.\n\n" + ex,
+                "MatrixDesktop Configurator",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            Close();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.ToString(), "MatrixDesktop Configurator", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Close();
+        }
+    }
+
+    private async Task InitializeCurrentWebViewAsync()
+    {
+        if (!_webView.IsHandleCreated)
+        {
+            _ = _webView.Handle;
+        }
+
+        await _webView.EnsureCoreWebView2Async();
+
+        TryTightenWebViewSettings();
+
+        _webView.CoreWebView2.WebMessageReceived += async (_, args) => await HandleWebMessageAsync(args.WebMessageAsJson);
+        _webView.CoreWebView2.NavigationStarting += (_, args) =>
+        {
+            var uri = args.Uri ?? string.Empty;
+            if (uri.StartsWith(HostOrigin, StringComparison.OrdinalIgnoreCase) || uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            args.Cancel = true;
+            TryOpenExternal(uri);
+        };
+        _webView.CoreWebView2.NewWindowRequested += (_, args) =>
+        {
+            args.Handled = true;
+            TryOpenExternal(args.Uri);
+        };
+
+        var root = GetConfiguratorWebRoot();
+        _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+            HostName,
+            root,
+            CoreWebView2HostResourceAccessKind.Allow);
+
+        _webView.CoreWebView2.Navigate($"{HostOrigin}index.html");
+    }
+
+    private async Task HandleWebMessageAsync(string json)
+    {
+        if (_isShuttingDown)
+        {
+            return;
+        }
+
+        string id = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            id = root.TryGetProperty("id", out var idElement) ? idElement.GetString() ?? string.Empty : string.Empty;
+            var type = root.TryGetProperty("type", out var typeElement) ? typeElement.GetString() ?? string.Empty : string.Empty;
+            var payload = root.TryGetProperty("payload", out var payloadElement) ? payloadElement : default;
+
+            var result = await DispatchAsync(type, payload);
+            await RespondAsync(id, true, result);
+        }
+        catch (Exception ex)
+        {
+            await RespondAsync(id, false, new { message = ex.Message });
+        }
+    }
+
+    private Task<object?> DispatchAsync(string type, JsonElement payload)
+    {
+        return Task.FromResult<object?>(type switch
+        {
+            "loadState" => LoadStatePayload(),
+            "saveDraft" => SaveDraft(payload),
+            "savePreset" => SavePreset(payload),
+            "deletePreset" => DeletePreset(payload),
+            "buildCommand" => BuildCommand(payload),
+            "importCommand" => ImportCommand(payload),
+            "randomizeDraft" => RandomizeDraft(payload),
+            "copyCommand" => CopyCommand(payload),
+            "testCommand" => TestCommand(payload),
+            "stopTest" => StopTest(),
+            _ => throw new InvalidOperationException($"Unknown configurator request: {type}"),
+        });
+    }
+
+    private object LoadStatePayload()
+    {
+        return new
+        {
+            metadata = _metadata,
+            defaultDraft = _commandBuilder.CreateDefaultDraft(),
+            state = _state,
+            storage = new
+            {
+                path = _storage.StoragePath,
+                portable = _storage.UsesPortablePath,
+            },
+        };
+    }
+
+    private object SaveDraft(JsonElement payload)
+    {
+        _state.LastDraft = ReadObject(payload, "draft");
+        _state.SelectedPresetId = ReadOptionalString(payload, "selectedPresetId");
+        _storage.Save(_state);
+        return new { saved = true };
+    }
+
+    private object SavePreset(JsonElement payload)
+    {
+        var presetPayload = payload.GetProperty("preset");
+        var id = ReadOptionalString(presetPayload, "id");
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            id = Guid.NewGuid().ToString("N");
+        }
+
+        var name = ReadOptionalString(presetPayload, "name");
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            name = "Untitled preset";
+        }
+
+        var values = ReadObject(presetPayload, "values");
+        var now = DateTimeOffset.UtcNow;
+        var existing = _state.UserPresets.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (existing is null)
+        {
+            existing = new UserPreset
+            {
+                Id = id,
+                CreatedUtc = now,
+            };
+            _state.UserPresets.Add(existing);
+        }
+
+        existing.Name = name;
+        existing.Values = values;
+        existing.UpdatedUtc = now;
+        _state.SelectedPresetId = id;
+        _state.LastDraft = StorageService.CloneObject(values);
+        _storage.Save(_state);
+
+        return new { preset = existing, state = _state };
+    }
+
+    private object DeletePreset(JsonElement payload)
+    {
+        var id = ReadOptionalString(payload, "id");
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            _state.UserPresets.RemoveAll(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
+            if (string.Equals(_state.SelectedPresetId, id, StringComparison.OrdinalIgnoreCase))
+            {
+                _state.SelectedPresetId = null;
+            }
+        }
+
+        _storage.Save(_state);
+        return new { state = _state };
+    }
+
+    private object BuildCommand(JsonElement payload)
+    {
+        var draft = ReadObject(payload, "draft");
+        var includeDefaults = ReadBool(payload, "includeDefaults");
+        var forTest = ReadBool(payload, "forTest");
+        return new
+        {
+            command = _commandBuilder.BuildCommand(draft, includeDefaults, forTest),
+        };
+    }
+
+    private object ImportCommand(JsonElement payload)
+    {
+        var command = ReadOptionalString(payload, "command") ?? string.Empty;
+        var result = _argumentImporter.Import(command, _commandBuilder.CreateDefaultDraft());
+
+        _state.SelectedPresetId = null;
+        _state.LastDraft = StorageService.CloneObject(result.Draft);
+        _storage.Save(_state);
+
+        return new
+        {
+            draft = result.Draft,
+            applied = result.Applied,
+            ignored = result.Ignored,
+            state = _state,
+        };
+    }
+
+    private object RandomizeDraft(JsonElement payload)
+    {
+        var draft = ReadObject(payload, "draft");
+        var scope = ReadOptionalString(payload, "scope") ?? "visual";
+        var randomized = _randomizer.Randomize(draft, scope);
+        return new
+        {
+            draft = randomized,
+            scope,
+        };
+    }
+
+    private object CopyCommand(JsonElement payload)
+    {
+        var command = ReadOptionalString(payload, "command") ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(command))
+        {
+            Clipboard.SetText(command);
+        }
+
+        return new { copied = true };
+    }
+
+    private object TestCommand(JsonElement payload)
+    {
+        var draft = ReadObject(payload, "draft");
+        StopTestProcess();
+
+        var exe = FindMatrixDesktopExe();
+        if (exe is null)
+        {
+            throw new FileNotFoundException("MatrixDesktop.exe was not found beside the configurator or in the local build output.");
+        }
+
+        var info = new ProcessStartInfo(exe)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory,
+        };
+
+        foreach (var argument in _commandBuilder.BuildArguments(draft, includeDefaults: false, forTest: true))
+        {
+            info.ArgumentList.Add(argument);
+        }
+
+        _testProcess = Process.Start(info);
+        if (_testProcess is null)
+        {
+            throw new InvalidOperationException("MatrixDesktop.exe did not start.");
+        }
+
+        return new
+        {
+            processId = _testProcess.Id,
+            command = _commandBuilder.BuildCommand(draft, includeDefaults: false, forTest: true),
+        };
+    }
+
+    private object StopTest()
+    {
+        StopTestProcess();
+        return new { stopped = true };
+    }
+
+    private void StopTestProcess()
+    {
+        var process = _testProcess;
+        _testProcess = null;
+
+        if (process is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            try
+            {
+                process.CloseMainWindow();
+            }
+            catch
+            {
+                // Ignore.
+            }
+
+            if (!process.WaitForExit(1500))
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(1500);
+            }
+        }
+        catch
+        {
+            // Ignore cleanup failures.
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private async Task RespondAsync(string id, bool ok, object? payload)
+    {
+        if (string.IsNullOrWhiteSpace(id) || _webView.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        var response = JsonSerializer.Serialize(new
+        {
+            id,
+            ok,
+            payload,
+        }, _jsonOptions);
+
+        await _webView.CoreWebView2.ExecuteScriptAsync($"window.configHost && window.configHost.receive({response});");
+    }
+
+    private static JsonObject ReadObject(JsonElement payload, string propertyName)
+    {
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(propertyName, out var element))
+        {
+            return JsonNode.Parse(element.GetRawText())?.AsObject() ?? [];
+        }
+
+        return [];
+    }
+
+    private static string? ReadOptionalString(JsonElement payload, string propertyName)
+    {
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(propertyName, out var element))
+        {
+            return element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString();
+        }
+
+        return null;
+    }
+
+    private static bool ReadBool(JsonElement payload, string propertyName)
+    {
+        return payload.ValueKind == JsonValueKind.Object
+               && payload.TryGetProperty(propertyName, out var element)
+               && element.ValueKind == JsonValueKind.True;
+    }
+
+    private static string GetConfiguratorWebRoot()
+    {
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "configurator"));
+        if (!Directory.Exists(root))
+        {
+            throw new DirectoryNotFoundException($"Missing configurator web assets folder: {root}");
+        }
+
+        return root;
+    }
+
+    private static string GetConfiguratorAppDataFolder(string childFolder)
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(appData))
+        {
+            appData = Path.GetTempPath();
+        }
+
+        var folder = Path.Combine(appData, "MatrixDesktop", "Configurator", childFolder);
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    private static string? FindMatrixDesktopExe()
+    {
+        var publishedCandidate = Path.Combine(AppContext.BaseDirectory, "MatrixDesktop.exe");
+        if (File.Exists(publishedCandidate))
+        {
+            return publishedCandidate;
+        }
+
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
+        {
+            var releaseCandidate = Path.Combine(current.FullName, "MatrixDesktop", "bin", "Release", "net10.0-windows", "MatrixDesktop.exe");
+            if (File.Exists(releaseCandidate))
+            {
+                return releaseCandidate;
+            }
+
+            var debugCandidate = Path.Combine(current.FullName, "MatrixDesktop", "bin", "Debug", "net10.0-windows", "MatrixDesktop.exe");
+            if (File.Exists(debugCandidate))
+            {
+                return debugCandidate;
+            }
+        }
+
+        return null;
+    }
+
+    private void TryTightenWebViewSettings()
+    {
+        try
+        {
+            var settings = _webView.CoreWebView2.Settings;
+            settings.IsGeneralAutofillEnabled = false;
+            settings.IsPasswordAutosaveEnabled = false;
+            settings.IsZoomControlEnabled = false;
+            settings.AreDefaultContextMenusEnabled = false;
+            settings.IsStatusBarEnabled = false;
+            settings.IsBuiltInErrorPageEnabled = false;
+            settings.AreBrowserAcceleratorKeysEnabled = false;
+        }
+        catch
+        {
+            // Settings availability varies by runtime.
+        }
+    }
+
+    private static void TryOpenExternal(string? uri)
+    {
+        if (string.IsNullOrWhiteSpace(uri))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+}

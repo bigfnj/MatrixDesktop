@@ -2,16 +2,15 @@ using System;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace MatrixDesktop;
+namespace MatrixDesktopConfigurator;
 
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args)
+    private static void Main()
     {
-        TrySetAppUserModelId("BigFnJ.MatrixDesktop");
+        TrySetAppUserModelId("BigFnJ.MatrixDesktop.Configurator");
 
-        // Prefer per-monitor DPI awareness so the WebView stays crisp across mixed-DPI displays.
         try
         {
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
@@ -23,18 +22,7 @@ internal static class Program
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-
-        if (AppCli.IsHelpRequested(args))
-        {
-            MessageBox.Show(
-                AppCli.GetHelpText(),
-                "MatrixDesktop - Help",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-            return;
-        }
-
-        Application.Run(new MainForm(args));
+        Application.Run(new ConfiguratorForm());
     }
 
     private static void TrySetAppUserModelId(string appId)

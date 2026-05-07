@@ -23,6 +23,12 @@ Primary executable:
 MatrixDesktop.exe
 ```
 
+Companion configurator:
+
+```cmd
+MatrixDesktopConfigurator.exe
+```
+
 Run commands from inside the artifact folder so relative paths and `web/` assets are present.
 WebView2 profile/cache data is stored under `%LOCALAPPDATA%\MatrixDesktop\WebView2\` by default, not beside the EXE.
 Bundled web assets are staged under `%LOCALAPPDATA%\MatrixDesktop\Web\` before WebView2 loads them.
@@ -99,10 +105,50 @@ Bundled web assets are staged under `%LOCALAPPDATA%\MatrixDesktop\Web\` before W
     - Inspect `%LOCALAPPDATA%\MatrixDesktop\Web\`.
     - Expected: bundled runtime assets are staged there.
 
+14. Argument configurator launch
+    - Run: `MatrixDesktopConfigurator.exe`
+    - Expected: configurator opens with grouped argument controls, named preset dropdown, and a generated command at the bottom.
+
+15. Argument configurator presets
+    - On a fresh configurator preset store, run `MatrixDesktopConfigurator.exe`.
+    - Expected: `rainbow-haze`, `paradise`, and `stripe effects` appear in the preset dropdown.
+    - In `MatrixDesktopConfigurator.exe`, change `version`, `effect`, and at least one color/palette value.
+    - Save as a named preset, close the configurator, and reopen it.
+    - Expected: last draft is restored and the named preset is available in the dropdown.
+    - Rename and delete the preset, then delete one starter preset.
+    - Expected: dropdown updates, the app remains responsive, and the deleted starter preset does not return on the next launch.
+
+16. Argument configurator test launch
+    - In `MatrixDesktopConfigurator.exe`, select `effect=stripes`, set custom stripe colors, and click `Test Argument`.
+    - Expected: MatrixDesktop launches windowed with the generated visual settings and does not exit on ordinary keypresses.
+    - Change the preset and click `Test Argument` again.
+    - Expected: previous test instance is replaced by the new one.
+    - Click `Stop Test`.
+    - Expected: test instance closes.
+
+17. Argument configurator import and stripe gating
+    - In `MatrixDesktopConfigurator.exe`, click `Import` and paste:
+      `--hide-cursor font=resurrections fps=30 animationSpeed=0.5 forwardSpeed=0.05 numColumns=220 density=2 effect=stripes renderer=webgpu stripeColors=0.5,0,0.5,0,0,1,0,1,0,0,1,0,0,0,1,0.5,0,0.5 raindropLength=0.5 version=3d`
+    - Expected: the draft updates to the pasted values, `Stripe colors` shows six editable rows, and the generated command includes `--stripeColors`.
+    - Change `Effect` to `palette`.
+    - Expected: `Stripe colors` is disabled and the generated command omits `--stripeColors`.
+
+18. Argument configurator randomize
+    - In `MatrixDesktopConfigurator.exe`, record the current Launch settings.
+    - Select `Visual preset` and click `Randomize` 10 times.
+    - Expected: version/font/renderer/effect/color/motion/layout settings change, Launch settings remain unchanged, and generated effects never select `mirror`, `image`, or `none`.
+    - Select `Colors only` and click `Randomize`.
+    - Expected: colors/palette/stripe colors change while motion/layout and Launch settings stay unchanged.
+    - Select `Motion/Layout` and click `Randomize`.
+    - Expected: FPS, columns, density, bloom, and motion values change while Launch settings stay unchanged.
+    - Expected: stripe effects generate 2-8 stripe colors, non-stripe effects omit `--stripeColors`, and palettes stay at 3-6 stops.
+
 ## Pass Criteria
 
 - All selected cases launch without unhandled exception dialogs.
+- `MatrixDesktopConfigurator.exe` is present in the artifact beside `MatrixDesktop.exe`.
 - The `web/` folder assets load offline from the artifact folder.
+- The `configurator/` folder assets load offline from the artifact folder.
 - Closing the app releases keyboard hook, WebView2, camera, and cursor state.
 - No obvious unbounded memory growth during 5 minutes of windowed animation and repeated resize.
 

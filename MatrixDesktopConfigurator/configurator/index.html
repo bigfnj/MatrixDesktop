@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>MatrixDesktop Configurator</title>
+		<link rel="stylesheet" href="styles.css" />
+	</head>
+	<body>
+		<div class="app-shell">
+			<header class="topbar">
+				<div class="brand">
+					<div class="mark">M</div>
+					<div>
+						<h1>MatrixDesktop Configurator</h1>
+						<div id="storageStatus" class="storage-status"></div>
+					</div>
+				</div>
+				<div class="preset-toolbar">
+					<select id="presetSelect" aria-label="Preset"></select>
+					<button id="newPresetButton" type="button">New</button>
+					<button id="savePresetButton" type="button">Save</button>
+					<button id="saveAsPresetButton" type="button">Save As</button>
+					<button id="renamePresetButton" type="button">Rename</button>
+					<button id="deletePresetButton" type="button">Delete</button>
+				</div>
+			</header>
+
+			<main class="workspace">
+				<nav id="groupNav" class="group-nav" aria-label="Argument groups"></nav>
+				<section class="editor">
+					<div id="fieldGrid" class="field-grid"></div>
+				</section>
+			</main>
+
+			<footer class="command-panel">
+				<div class="command-header">
+					<span>Generated command</span>
+					<span id="saveState" class="save-state"></span>
+				</div>
+				<div class="command-row">
+					<textarea id="commandOutput" spellcheck="false" readonly></textarea>
+					<div class="command-actions">
+						<select id="randomizeScope" aria-label="Randomize scope">
+							<option value="visual">Visual preset</option>
+							<option value="colors">Colors only</option>
+							<option value="motion">Motion/Layout</option>
+						</select>
+						<button id="randomizeButton" type="button">Randomize</button>
+						<button id="importButton" type="button">Import</button>
+						<button id="copyButton" type="button">Copy</button>
+						<button id="testButton" type="button">Test Argument</button>
+						<button id="stopButton" type="button" disabled>Stop Test</button>
+					</div>
+				</div>
+				<div id="importPanel" class="import-panel" hidden>
+					<div class="import-header">Paste command or arguments</div>
+					<textarea id="importInput" spellcheck="false"></textarea>
+					<div class="import-actions">
+						<button id="applyImportButton" type="button">Apply Import</button>
+						<button id="cancelImportButton" type="button">Cancel</button>
+					</div>
+				</div>
+				<div id="statusLine" class="status-line"></div>
+			</footer>
+		</div>
+
+		<script type="module" src="js/app.js"></script>
+	</body>
+</html>

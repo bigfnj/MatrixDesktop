@@ -72,6 +72,28 @@ The upstream project is configured via **URL query parameters** (e.g., `?version
 This desktop wrapper supports the same configuration by accepting command-line arguments and
 appending them to the internal `index.html` URL.
 
+## Standalone argument configurator
+
+The solution includes `MatrixDesktopConfigurator.exe`, a companion app for building MatrixDesktop launch arguments without hand-writing the command line.
+
+It provides grouped controls for wrapper flags and visualizer settings, color/palette/stripe editors, named presets, a live generated command, randomization controls, an `Import` button for pasted MatrixDesktop commands, and a `Test Argument` button. Test launches are kept windowed and use `--no-exit-on-any-key` by default so a generated argument can be checked without taking over the desktop.
+
+The importer accepts full `MatrixDesktop.exe ...` commands, raw argument lines, query strings, and simple `start "" /min ...` batch lines. Recognized settings populate the current draft, which can then be saved as a preset. Stripe colors are only editable and emitted when the selected effect is stripe-based: `stripes`, `customStripes`, `pride`, `trans`, or `transPride`.
+
+The randomizer has three scopes: `Visual preset`, `Colors only`, and `Motion/Layout`. It keeps launch/window controls untouched, avoids camera/image/mirror/debug effects, caps generated `stripeColors` at 2–8 colors, and caps generated palettes at 3–6 stops.
+
+On first launch, the configurator seeds three starter presets into the normal preset list: `rainbow-haze`, `paradise`, and `stripe effects`. They are regular user presets, so they can be edited, renamed, or deleted.
+
+Preset storage is portable-first:
+
+- If the publish folder is writable, presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`.
+- If the publish folder is not writable, presets are stored under `%LOCALAPPDATA%\MatrixDesktop\Configurator\`.
+
+In framework-dependent publish output, run:
+
+- `MatrixDesktopConfigurator.exe` to build/test/save arguments.
+- `MatrixDesktop.exe` to run a generated command directly.
+
 ### Desktop wrapper defaults
 
 By default, the WinForms wrapper launches in **borderless fullscreen across all attached monitors** and **any physical key press closes the app while MatrixDesktop is the foreground app** (software-injected key events are ignored).
@@ -225,6 +247,8 @@ Palettes and stripes are lists:
 - `stripeHSL` (H,S,L,H,S,L,...)
 - `colors` — alias of `stripeColors`
 
+`stripeColors` is used by stripe-based effects only: `stripes`, `customStripes`, `pride`, `trans`, and `transPride`.
+
 #### Image effect
 
 - `url` (string) — image URL to load when `effect=image`.
@@ -243,8 +267,10 @@ Palettes and stripes are lists:
 
 The output EXE will be in:
 
-- `MatrixDesktop\bin\Debug\net8.0-windows\MatrixDesktop.exe`
-- `MatrixDesktop\bin\Release\net8.0-windows\MatrixDesktop.exe`
+- `MatrixDesktop\bin\Debug\net10.0-windows\MatrixDesktop.exe`
+- `MatrixDesktop\bin\Release\net10.0-windows\MatrixDesktop.exe`
+- `MatrixDesktopConfigurator\bin\Debug\net10.0-windows\MatrixDesktopConfigurator.exe`
+- `MatrixDesktopConfigurator\bin\Release\net10.0-windows\MatrixDesktopConfigurator.exe`
 
 ## Publish (portable, single-folder output)
 
@@ -280,6 +306,8 @@ publish-portable-win-x64-fd.cmd
 Output:
 
 - `publish\win-x64-fd\`
+
+This output includes both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe`.
 
 ### Option C (experimental): smaller self-contained output using IL trimming
 

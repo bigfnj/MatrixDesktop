@@ -13,6 +13,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
+dotnet publish "MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj" -c Release /p:PublishProfile=Portable-win-x64-framework-dependent
+if errorlevel 1 (
+  echo.
+  echo Configurator publish failed.
+  exit /b 1
+)
+
 echo.
 echo Publish complete.
 echo Output: "%~dp0publish\win-x64-fd\"

@@ -35,6 +35,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="Matrix.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Ensure the web assets are treated as Content (not None) so they can be copied to output. -->
     <None Remove="web\**\*" />
   </ItemGroup>

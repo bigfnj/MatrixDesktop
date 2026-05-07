@@ -35,12 +35,20 @@ public sealed class MainForm : Form
 
     private bool _isShuttingDown;
     private bool _webViewInitializationStarted;
+    private System.Drawing.Icon? _smallWindowIcon;
+    private System.Drawing.Icon? _largeWindowIcon;
 
     private static string? _cachedUserDataFolder;
+
+    private const int WmSetIcon = 0x0080;
+    private static readonly IntPtr IconSmall = new(0);
+    private static readonly IntPtr IconBig = new(1);
+    private static readonly IntPtr IconSmall2 = new(2);
 
     public MainForm(string[]? args)
     {
         Text = "Matrix Digital Rain";
+        TryApplyWindowIcon();
 
         _appOptions = AppCli.Parse(args, out var passthroughArgs);
 
@@ -82,9 +90,64 @@ public sealed class MainForm : Form
         Shown += MainForm_Shown;
     }
 
+    private void TryApplyWindowIcon()
+    {
+        try
+        {
+            var iconPath = Path.Combine(AppContext.BaseDirectory, "Matrix.ico");
+            if (File.Exists(iconPath))
+            {
+                _smallWindowIcon = new System.Drawing.Icon(iconPath, 16, 16);
+                _largeWindowIcon = new System.Drawing.Icon(iconPath, 32, 32);
+            }
+            else
+            {
+                var icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                _smallWindowIcon = icon;
+                _largeWindowIcon = icon;
+            }
+
+            if (_largeWindowIcon is not null)
+            {
+                Icon = _largeWindowIcon;
+            }
+        }
+        catch
+        {
+            // The EXE icon is cosmetic; keep startup resilient.
+        }
+    }
+
+    private void TryApplyNativeWindowIcons()
+    {
+        if (!IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_smallWindowIcon is not null)
+            {
+                SendMessage(Handle, WmSetIcon, IconSmall, _smallWindowIcon.Handle);
+                SendMessage(Handle, WmSetIcon, IconSmall2, _smallWindowIcon.Handle);
+            }
+
+            if (_largeWindowIcon is not null)
+            {
+                SendMessage(Handle, WmSetIcon, IconBig, _largeWindowIcon.Handle);
+            }
+        }
+        catch
+        {
+            // Cosmetic only.
+        }
+    }
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        TryApplyNativeWindowIcons();
 
         try
         {
@@ -174,7 +237,28 @@ public sealed class MainForm : Form
             // Ignore.
         }
 
+        DisposeWindowIcons();
         base.OnFormClosed(e);
+    }
+
+    private void DisposeWindowIcons()
+    {
+        try
+        {
+            if (_smallWindowIcon is not null && !ReferenceEquals(_smallWindowIcon, _largeWindowIcon))
+            {
+                _smallWindowIcon.Dispose();
+            }
+
+            _largeWindowIcon?.Dispose();
+        }
+        catch
+        {
+            // Ignore.
+        }
+
+        _smallWindowIcon = null;
+        _largeWindowIcon = null;
     }
 
     private void ApplyWindowModeAndBounds(bool initial)
@@ -405,6 +489,7 @@ public sealed class MainForm : Form
 
     private async void MainForm_Shown(object? sender, EventArgs e)
     {
+        TryApplyNativeWindowIcons();
         TryApplyCursorVisibility();
 
         // Some launch contexts (shells, scripts, startup tasks) don't reliably
@@ -782,4 +867,7 @@ public sealed class MainForm : Form
             return false;
         }
     }
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 }

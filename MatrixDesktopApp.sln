@@ -4,6 +4,8 @@ VisualStudioVersion = 18.0.0.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MatrixDesktop", "MatrixDesktop\\MatrixDesktop.csproj", "{D58B8516-0FAA-4872-B7BC-B985A19AF047}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MatrixDesktopConfigurator", "MatrixDesktopConfigurator\\MatrixDesktopConfigurator.csproj", "{80A548A7-2809-44E5-9E8A-D2C9D1272CE4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{D58B8516-0FAA-4872-B7BC-B985A19AF047}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D58B8516-0FAA-4872-B7BC-B985A19AF047}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D58B8516-0FAA-4872-B7BC-B985A19AF047}.Release|Any CPU.Build.0 = Release|Any CPU
+		{80A548A7-2809-44E5-9E8A-D2C9D1272CE4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{80A548A7-2809-44E5-9E8A-D2C9D1272CE4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{80A548A7-2809-44E5-9E8A-D2C9D1272CE4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{80A548A7-2809-44E5-9E8A-D2C9D1272CE4}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

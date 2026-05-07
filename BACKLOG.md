@@ -2,6 +2,65 @@
 
 ## Future Features
 
+### Standalone Argument Configurator
+
+Status: Implemented; needs Windows runtime smoke testing
+
+## Summary
+
+Build a second executable, `MatrixDesktopConfigurator.exe`, that opens a WebView-based configuration UI for MatrixDesktop arguments. The configurator exposes desktop wrapper flags and visualizer web flags, groups controls by practical theme, shows the generated launch command live, and launches MatrixDesktop with the current draft through a safe `Test Argument` button.
+
+The configurator supports named presets in a dropdown and restores the last draft on relaunch. Presets are stored in a portable JSON file beside the executable when possible, with an AppData fallback.
+
+## Key Changes
+
+- Add a separate WinForms/WebView2 project that publishes beside `MatrixDesktop.exe`.
+- Add argument metadata and command generation for app flags, versions, effects, layout, motion, colors, palettes, stripes, image, mirror/camera, click ripples, and advanced toggles.
+- Generate concise commands by default, containing only values changed from defaults.
+- Add named preset actions: New, Save, Save As, Rename, Delete.
+- Add guarded randomization scopes: Visual preset, Colors only, and Motion/Layout.
+- Add command import so an existing MatrixDesktop command or argument line can populate the draft before saving as a preset.
+- Disable stripe color editing and suppress `stripeColors` output unless the selected effect is stripe-based.
+- Seed first-launch starter presets: `rainbow-haze`, `paradise`, and `stripe effects`.
+- Add a safe `Test Argument` flow that launches MatrixDesktop windowed with `--no-exit-on-any-key` unless the draft already chooses a conflicting test mode.
+- Replace an existing test process when a new test run starts.
+
+## Test Plan
+
+- Build the full solution in Release with Windows targeting enabled.
+- Run a JS module syntax check for the configurator UI.
+- Publish the framework-dependent Windows x64 folder and confirm both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe` are present.
+- Smoke test creating, saving, renaming, deleting, and reloading a named preset.
+- Smoke test randomizing all three scopes and confirm launch/window controls are unchanged.
+- Smoke test the starter presets appear once and remain deleted if the user removes them.
+- Smoke test importing an existing command line and saving the imported draft as a preset.
+- Smoke test generated commands for palette, stripes, image, mirror/camera, click ripples, windowed, monitor, and topmost settings.
+- Smoke test `stripeColors` is disabled and omitted for non-stripe effects, then enabled for `stripes`, `customStripes`, `pride`, `trans`, and `transPride`.
+- Smoke test repeated randomization keeps `stripeColors` to 2-8 colors and palettes to 3-6 stops.
+- Smoke test the `Test Argument` button replacing the previous test instance.
+
+## Current Verification
+
+- Release solution build passes with 0 warnings and 0 errors.
+- Configurator JavaScript syntax check passes.
+- Framework-dependent Windows x64 publish includes both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe`.
+- Smoke zip integrity check passes.
+
+## Follow-up UX Notes
+
+- Implemented launch-control clarification in the configurator:
+  - `Borderless all monitors` already spans every display.
+  - `Monitor index` is a 0-based target monitor number, not the number of monitors connected.
+  - `Monitor index` is disabled unless `Single monitor` is selected.
+  - `Use working area` is explained as taskbar-safe bounds and disabled for `Windowed` mode.
+- Implemented stripe color dependency:
+  - `Stripe colors` is disabled unless the selected effect is stripe-based.
+  - Command generation skips `stripeColors` when the effect cannot use it.
+- Implemented command import:
+  - Paste a full `MatrixDesktop.exe ...` command, raw argument line, query string, or simple batch `start` line.
+  - Recognized app/web flags populate the draft and can then be saved as a preset.
+  - Command generation ignores monitor and working-area values when their selected window mode cannot use them.
+
 ### Add Click Ripples To Rain Effects
 
 Status: Completed; Windows runtime smoke passed
