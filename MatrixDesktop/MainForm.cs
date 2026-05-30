@@ -489,15 +489,38 @@ public sealed class MainForm : Form
 
     private async void MainForm_Shown(object? sender, EventArgs e)
     {
-        TryApplyNativeWindowIcons();
-        TryApplyCursorVisibility();
+        // async void event handlers must never let an exception escape — doing so
+        // crashes the entire process via WindowsFormsSynchronizationContext rather
+        // than going through OnUnhandledException. InitializeWebViewAsync has its
+        // own internal try/catch, but the pre-init helpers (icon application,
+        // cursor visibility, foreground enforcement) can also throw and the async
+        // state machine would surface those as process-level UnhandledException.
+        try
+        {
+            TryApplyNativeWindowIcons();
+            TryApplyCursorVisibility();
 
-        // Some launch contexts (shells, scripts, startup tasks) don't reliably
-        // activate the new window. Make a best-effort attempt to become the
-        // foreground app.
-        TryBeginForegroundEnforce();
+            // Some launch contexts (shells, scripts, startup tasks) don't reliably
+            // activate the new window. Make a best-effort attempt to become the
+            // foreground app.
+            TryBeginForegroundEnforce();
 
-        await InitializeWebViewAsync();
+            await InitializeWebViewAsync();
+        }
+        catch (Exception ex)
+        {
+            Shared.Logger.Error("MainForm_Shown failed; closing form.", ex);
+            try
+            {
+                MessageBox.Show(
+                    $"MatrixDesktop failed to start:\n{ex.Message}",
+                    "MatrixDesktop",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch { /* dialog itself may fail in degraded states */ }
+            try { Close(); } catch { /* form may already be closing */ }
+        }
     }
 
     private async Task InitializeWebViewAsync()
@@ -748,11 +771,15 @@ public sealed class MainForm : Form
 
         try
         {
-            Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+            // Capture-and-dispose the returned Process so its handle is released
+            // immediately. With UseShellExecute=true the shell owns the actual
+            // process lifecycle; the returned wrapper here only holds an OS handle
+            // we don't need.
+            using var p = Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore failures to launch external browser.
+            Shared.Logger.Warn($"TryOpenExternal failed for '{uri}': {ex.Message}");
         }
     }
 

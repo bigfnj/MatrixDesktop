@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
+using MatrixDesktop.Shared;
 
 namespace MatrixDesktopConfigurator;
 
@@ -46,7 +47,7 @@ internal sealed class ArgumentImporter
         var draft = StorageService.CloneObject(defaultDraft);
         var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var ignored = new List<string>();
-        var tokens = TrimLauncherTokens(Tokenize(commandLine));
+        var tokens = TrimLauncherTokens(Tokenizer.Tokenize(commandLine));
 
         for (var i = 0; i < tokens.Count; i++)
         {
@@ -140,7 +141,7 @@ internal sealed class ArgumentImporter
                 return true;
 
             case "monitor":
-                if (!TryParseInt(value, out var monitor) || monitor < 0)
+                if (!FlagNormalization.TryParseInt(value, out var monitor) || monitor < 0)
                 {
                     return false;
                 }
@@ -152,12 +153,12 @@ internal sealed class ArgumentImporter
                 return true;
 
             case "workingarea":
-                draft["workingArea"] = ParseBool(value, true);
+                draft["workingArea"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("workingArea");
                 return true;
 
             case "topmost":
-                draft["topmost"] = ParseBool(value, true);
+                draft["topmost"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("topmost");
                 return true;
 
@@ -167,7 +168,7 @@ internal sealed class ArgumentImporter
                 return true;
 
             case "hidecursor":
-                draft["hideCursor"] = ParseBool(value, true);
+                draft["hideCursor"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("hideCursor");
                 return true;
 
@@ -178,7 +179,7 @@ internal sealed class ArgumentImporter
 
             case "exitonesc":
             case "escexit":
-                draft["exitOnEsc"] = ParseBool(value, true);
+                draft["exitOnEsc"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("exitOnEsc");
                 return true;
 
@@ -190,7 +191,7 @@ internal sealed class ArgumentImporter
 
             case "exitonanykey":
             case "anykeyexit":
-                draft["exitOnAnyKey"] = ParseBool(value, true);
+                draft["exitOnAnyKey"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("exitOnAnyKey");
                 return true;
 
@@ -203,7 +204,7 @@ internal sealed class ArgumentImporter
             case "globalkeyexit":
             case "globalexitonkey":
             case "backgroundkeyexit":
-                draft["globalKeyExit"] = ParseBool(value, true);
+                draft["globalKeyExit"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("globalKeyExit");
                 return true;
 
@@ -215,7 +216,7 @@ internal sealed class ArgumentImporter
                 return true;
 
             case "nodevtools":
-                draft["disableDevTools"] = ParseBool(value, true);
+                draft["disableDevTools"] = FlagNormalization.ParseBool(value, true);
                 applied.Add("disableDevTools");
                 return true;
 
@@ -233,7 +234,7 @@ internal sealed class ArgumentImporter
         switch (field.Kind)
         {
             case "bool":
-                return JsonValue.Create(ParseBool(value, true));
+                return JsonValue.Create(FlagNormalization.ParseBool(value, true));
 
             case "number":
                 return TryParseDouble(value, out var number)
@@ -274,7 +275,7 @@ internal sealed class ArgumentImporter
             return null;
         }
 
-        var rgb = isHsl ? HslToRgb(values[0], values[1], values[2]) : values;
+        var rgb = isHsl ? ColorConverter.HslToRgb(values[0], values[1], values[2]) : values;
         return ColorNode(rgb[0], rgb[1], rgb[2]);
     }
 
@@ -289,13 +290,13 @@ internal sealed class ArgumentImporter
         var result = new JsonArray();
         for (var i = 0; i < values.Length; i += 4)
         {
-            var rgb = isHsl ? HslToRgb(values[i], values[i + 1], values[i + 2]) : values[i..(i + 3)];
+            var rgb = isHsl ? ColorConverter.HslToRgb(values[i], values[i + 1], values[i + 2]) : values[i..(i + 3)];
             result.Add(new JsonObject
             {
-                ["r"] = Clamp01(rgb[0]),
-                ["g"] = Clamp01(rgb[1]),
-                ["b"] = Clamp01(rgb[2]),
-                ["at"] = Clamp01(values[i + 3]),
+                ["r"] = ColorConverter.Clamp01(rgb[0]),
+                ["g"] = ColorConverter.Clamp01(rgb[1]),
+                ["b"] = ColorConverter.Clamp01(rgb[2]),
+                ["at"] = ColorConverter.Clamp01(values[i + 3]),
             });
         }
 
@@ -313,7 +314,7 @@ internal sealed class ArgumentImporter
         var result = new JsonArray();
         for (var i = 0; i < values.Length; i += 3)
         {
-            var rgb = isHsl ? HslToRgb(values[i], values[i + 1], values[i + 2]) : values[i..(i + 3)];
+            var rgb = isHsl ? ColorConverter.HslToRgb(values[i], values[i + 1], values[i + 2]) : values[i..(i + 3)];
             result.Add(ColorNode(rgb[0], rgb[1], rgb[2]));
         }
 
@@ -324,9 +325,9 @@ internal sealed class ArgumentImporter
     {
         return new JsonObject
         {
-            ["r"] = Clamp01(r),
-            ["g"] = Clamp01(g),
-            ["b"] = Clamp01(b),
+            ["r"] = ColorConverter.Clamp01(r),
+            ["g"] = ColorConverter.Clamp01(g),
+            ["b"] = ColorConverter.Clamp01(b),
         };
     }
 
@@ -352,45 +353,7 @@ internal sealed class ArgumentImporter
         };
     }
 
-    private static List<string> Tokenize(string commandLine)
-    {
-        var tokens = new List<string>();
-        var current = new StringBuilder();
-        var inQuotes = false;
-        var tokenStarted = false;
-
-        foreach (var c in commandLine)
-        {
-            if (c == '"')
-            {
-                inQuotes = !inQuotes;
-                tokenStarted = true;
-                continue;
-            }
-
-            if (char.IsWhiteSpace(c) && !inQuotes)
-            {
-                if (tokenStarted)
-                {
-                    tokens.Add(current.ToString());
-                    current.Clear();
-                    tokenStarted = false;
-                }
-
-                continue;
-            }
-
-            current.Append(c);
-            tokenStarted = true;
-        }
-
-        if (tokenStarted)
-        {
-            tokens.Add(current.ToString());
-        }
-
-        return tokens;
-    }
+    // Tokenize moved to Tokenizer.cs.
 
     private static List<string> TrimLauncherTokens(List<string> tokens)
     {
@@ -542,20 +505,7 @@ internal sealed class ArgumentImporter
         return builder.ToString();
     }
 
-    private static bool ParseBool(string? value, bool defaultWhenMissing)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return defaultWhenMissing;
-        }
-
-        return value.Trim().ToLowerInvariant() switch
-        {
-            "1" or "true" or "y" or "yes" or "on" => true,
-            "0" or "false" or "n" or "no" or "off" => false,
-            var v => v.Contains("true", StringComparison.OrdinalIgnoreCase),
-        };
-    }
+    // ParseBool moved to MatrixDesktop.Shared.FlagNormalization.
 
     private static double[]? ParseFiniteList(string? value)
     {
@@ -587,10 +537,7 @@ internal sealed class ArgumentImporter
         return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out result);
     }
 
-    private static bool TryParseInt(string? value, out int result)
-    {
-        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out result);
-    }
+    // TryParseInt moved to MatrixDesktop.Shared.FlagNormalization.
 
     private static double Clamp(double value, double? min, double? max)
     {
@@ -607,50 +554,7 @@ internal sealed class ArgumentImporter
         return value;
     }
 
-    private static double Clamp01(double value)
-    {
-        if (value < 0)
-        {
-            return 0;
-        }
-
-        if (value > 1)
-        {
-            return 1;
-        }
-
-        return value;
-    }
-
-    private static double[] HslToRgb(double h, double s, double l)
-    {
-        h = ((h % 1) + 1) % 1;
-        s = Clamp01(s);
-        l = Clamp01(l);
-
-        if (s == 0)
-        {
-            return [l, l, l];
-        }
-
-        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-        var p = 2 * l - q;
-        return
-        [
-            HueToRgb(p, q, h + 1.0 / 3.0),
-            HueToRgb(p, q, h),
-            HueToRgb(p, q, h - 1.0 / 3.0),
-        ];
-    }
-
-    private static double HueToRgb(double p, double q, double t)
-    {
-        t = ((t % 1) + 1) % 1;
-        if (t < 1.0 / 6.0) return p + (q - p) * 6 * t;
-        if (t < 1.0 / 2.0) return q;
-        if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6;
-        return p;
-    }
+    // Clamp01 / HslToRgb / HueToRgb moved to ColorConverter.cs.
 
     private static string Unescape(string value)
     {

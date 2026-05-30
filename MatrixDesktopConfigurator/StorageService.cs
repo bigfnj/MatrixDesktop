@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MatrixDesktop.Shared;
 
 namespace MatrixDesktopConfigurator;
 
@@ -31,15 +32,28 @@ internal sealed class StorageService
             }
 
             var json = File.ReadAllText(StoragePath);
-            var state = JsonSerializer.Deserialize<ConfiguratorState>(json, _jsonOptions) ?? new ConfiguratorState();
+            var state = JsonSerializer.Deserialize<ConfiguratorState>(json, _jsonOptions);
+            if (state is null)
+            {
+                // Deserialize returning null means the file existed but its top-level
+                // JSON was literal `null`. Treat as fresh state but make it loud so the
+                // user understands their presets aren't gone — they're just unreadable.
+                Logger.Warn($"Configurator state file deserialized to null. Path='{StoragePath}'. Starting from fresh state.");
+                return new ConfiguratorState();
+            }
+
             state.SchemaVersion = Math.Max(1, state.SchemaVersion);
             state.PresetSeedVersion = Math.Max(0, state.PresetSeedVersion);
             state.LastDraft ??= [];
             state.UserPresets ??= [];
             return state;
         }
-        catch
+        catch (Exception ex)
         {
+            // Corrupt JSON, encoding error, partial write — previously this was a
+            // silent fallback that quietly dropped any user presets. Log so the user
+            // can investigate (and potentially restore from the preserved file).
+            Logger.Error($"Failed to load configurator state from '{StoragePath}'. Starting from fresh state.", ex);
             return new ConfiguratorState();
         }
     }

@@ -535,7 +535,17 @@ public sealed class ConfiguratorForm : Form
             payload,
         }, _jsonOptions);
 
-        await _webView.CoreWebView2.ExecuteScriptAsync($"window.configHost && window.configHost.receive({response});");
+        try
+        {
+            // Failures in the embedded JS (missing window.configHost, malformed payload,
+            // navigation in flight) used to swallow silently — log them so a stuck UI
+            // produces a diagnostic instead of vanishing.
+            await _webView.CoreWebView2.ExecuteScriptAsync($"window.configHost && window.configHost.receive({response});");
+        }
+        catch (Exception ex)
+        {
+            MatrixDesktop.Shared.Logger.Warn($"ExecuteScriptAsync failed for response id='{id}': {ex.Message}");
+        }
     }
 
     private static JsonObject ReadObject(JsonElement payload, string propertyName)
@@ -578,15 +588,39 @@ public sealed class ConfiguratorForm : Form
 
     private static string GetConfiguratorAppDataFolder(string childFolder)
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(appData))
+        // Mirror MainForm.GetWritableAppDataFolder: try LocalAppData, then RoamingAppData,
+        // then %TEMP%. The previous implementation only fell back on a missing LOCALAPPDATA
+        // env var; it would still throw on a restricted-access LOCALAPPDATA. WebView2 and
+        // the storage layer both need a writable directory, so multi-tier fallback matters.
+        string[] roots =
         {
-            appData = Path.GetTempPath();
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            Path.GetTempPath(),
+        };
+
+        foreach (var root in roots)
+        {
+            if (string.IsNullOrWhiteSpace(root)) continue;
+
+            var folder = Path.Combine(root, "MatrixDesktop", "Configurator", childFolder);
+            try
+            {
+                Directory.CreateDirectory(folder);
+                return folder;
+            }
+            catch (Exception ex)
+            {
+                MatrixDesktop.Shared.Logger.Warn($"Configurator AppData root not writable, trying next. Root='{root}' Error='{ex.Message}'.");
+            }
         }
 
-        var folder = Path.Combine(appData, "MatrixDesktop", "Configurator", childFolder);
-        Directory.CreateDirectory(folder);
-        return folder;
+        // Last-ditch: a fresh subdirectory under the system temp dir. If even that fails
+        // we let the exception propagate — the configurator genuinely cannot run without
+        // somewhere to store WebView2 state.
+        var lastResort = Path.Combine(Path.GetTempPath(), $"MatrixDesktop-Configurator-{Environment.ProcessId}", childFolder);
+        Directory.CreateDirectory(lastResort);
+        return lastResort;
     }
 
     private static string? FindMatrixDesktopExe()
@@ -644,11 +678,12 @@ public sealed class ConfiguratorForm : Form
 
         try
         {
-            Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+            // Capture-and-dispose so we don't retain a Process handle the shell already owns.
+            using var p = Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore.
+            MatrixDesktop.Shared.Logger.Warn($"Failed to open external URI '{uri}': {ex.Message}");
         }
     }
 

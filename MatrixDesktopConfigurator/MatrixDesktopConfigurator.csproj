@@ -7,16 +7,27 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Allow building on non-Windows hosts (CI, WSL). No-op on Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MatrixDesktopConfigurator</AssemblyName>
     <RootNamespace>MatrixDesktopConfigurator</RootNamespace>
+    <Version>0.2.0</Version>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <FileVersion>0.2.0.0</FileVersion>
     <ApplicationIcon>..\MatrixDesktop\Matrix.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3856.49" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared sources used by both MatrixDesktop and MatrixDesktopConfigurator. -->
+    <Compile Include="..\Shared\Logger.cs" Link="Shared\Logger.cs" />
+    <Compile Include="..\Shared\FlagNormalization.cs" Link="Shared\FlagNormalization.cs" />
   </ItemGroup>
 
   <ItemGroup>

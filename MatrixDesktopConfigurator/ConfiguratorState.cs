@@ -4,7 +4,11 @@ using System.Text.Json.Nodes;
 
 namespace MatrixDesktopConfigurator;
 
-internal sealed class ConfiguratorState
+// Records with mutable get/set properties — auto-generated equality/hash/ToString
+// help with debugging and reduce boilerplate vs the equivalent sealed classes.
+// We keep mutable setters because both types are populated by System.Text.Json
+// deserialisation and updated in-place as the user edits presets.
+internal sealed record ConfiguratorState
 {
     public int SchemaVersion { get; set; } = 1;
     public int PresetSeedVersion { get; set; } = 0;
@@ -13,7 +17,7 @@ internal sealed class ConfiguratorState
     public List<UserPreset> UserPresets { get; set; } = [];
 }
 
-internal sealed class UserPreset
+internal sealed record UserPreset
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Untitled preset";

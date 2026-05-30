@@ -104,7 +104,7 @@ internal static class AppCli
                 continue;
             }
 
-            var k = NormalizeKey(key);
+            var k = Shared.FlagNormalization.NormalizeKey(key);
             switch (k)
             {
                 case "windowed":
@@ -127,7 +127,7 @@ internal static class AppCli
                     break;
 
                 case "monitor":
-                    if (TryParseInt(value, out var idx) && idx >= 0)
+                    if (Shared.FlagNormalization.TryParseInt(value, out var idx) && idx >= 0)
                     {
                         mode = WindowMode.BorderlessSingleMonitor;
                         monitorIndex = idx;
@@ -326,33 +326,6 @@ internal static class AppCli
         return false;
     }
 
-    private static bool TryParseInt(string? value, out int result)
-    {
-        result = 0;
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        return int.TryParse(value.Trim(), out result);
-    }
-
-    private static string NormalizeKey(string key)
-    {
-        // Be forgiving with common CLI formatting variations.
-        // e.g. "--exit_on_esc" should behave like "--exit-on-esc".
-        // Single-pass: trim, lower-case, and replace '_' with '-' in one allocation.
-        var k = key ?? string.Empty;
-        var start = 0;
-        var end = k.Length;
-        while (start < end && char.IsWhiteSpace(k[start])) start++;
-        while (end > start && char.IsWhiteSpace(k[end - 1])) end--;
-        if (start >= end) return string.Empty;
-
-        return string.Create(end - start, (k, start), static (span, state) =>
-        {
-            var (src, offset) = state;
-            for (var i = 0; i < span.Length; i++)
-            {
-                var c = src[offset + i];
-                span[i] = c == '_' ? '-' : char.ToLowerInvariant(c);
-            }
-        });
-    }
+    // TryParseInt + NormalizeKey moved to MatrixDesktop.Shared.FlagNormalization
+    // so the configurator's ArgumentImporter shares the same canonicalisation rules.
 }
