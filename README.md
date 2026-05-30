@@ -4,6 +4,27 @@ This is a minimal Windows desktop wrapper around the original **Rezmason/matrix*
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
+Current version: **1.0.0** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+
+## v1.0 highlights
+
+- **Live preview in the configurator.** Open a second window from the configurator's
+  toolbar to see the rain effect update in-place as you tweak fields (debounced 250ms).
+- **Argument reference embedded.** `MatrixDesktop.exe --help-full` opens a scrollable
+  reference dialog with the full argument guide. The configurator's `?` button shows
+  the same content. No external file required.
+- **Sleep/lock aware.** When the workstation locks or the machine sleeps, the WebView
+  suspends (no GL / no audio / no timers). Resumes automatically on unlock / wake.
+- **Crash diagnostics.** Both EXEs install an unhandled-exception handler that writes
+  a `.dmp` to `%LOCALAPPDATA%\MatrixDesktop\dumps\` and surfaces the path in the error
+  dialog.
+- **Configurator polish.**
+  - Dark/light theme toggle (persisted).
+  - Out-of-range numeric inputs show a red border + allowed-range hint inline.
+  - "Export .ps1" button copies the current command as a runnable PowerShell script.
+- **Automated releases.** Push a `v*` tag and GitHub Actions builds, zips, and
+  publishes a Release with both EXEs + assets + SHA256.
+
 ## Build warning cleanup (NETSDK1137 / MSB3277)
 
 Some Visual Studio setups (especially those configured to treat warnings as errors) will balk at:

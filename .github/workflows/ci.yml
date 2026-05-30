@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build & Publish Smoke Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore MatrixDesktopApp.sln
+
+      - name: Build (Release)
+        run: dotnet build MatrixDesktopApp.sln --configuration Release --no-restore
+
+      - name: Publish MatrixDesktop (framework-dependent)
+        shell: pwsh
+        run: |
+          dotnet publish MatrixDesktop\MatrixDesktop.csproj `
+            -c Release `
+            -r win-x64 `
+            --no-self-contained `
+            -p:PublishSingleFile=false `
+            -p:PublishDir=bin\Publish\win-x64-fd\
+
+      - name: Publish MatrixDesktopConfigurator (framework-dependent)
+        shell: pwsh
+        run: |
+          dotnet publish MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj `
+            -c Release `
+            -r win-x64 `
+            --no-self-contained `
+            -p:PublishSingleFile=false `
+            -p:PublishDir=bin\Publish\win-x64-fd\
+
+      - name: Verify publish artefacts
+        shell: pwsh
+        run: |
+          $mdExe  = "MatrixDesktop\bin\Publish\win-x64-fd\MatrixDesktop.exe"
+          $cfgExe = "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\MatrixDesktopConfigurator.exe"
+          if (-not (Test-Path $mdExe))  { throw "Missing: $mdExe" }
+          if (-not (Test-Path $cfgExe)) { throw "Missing: $cfgExe" }
+          $mdSize  = (Get-Item $mdExe).Length
+          $cfgSize = (Get-Item $cfgExe).Length
+          Write-Host "OK: MatrixDesktop.exe ($('{0:N0}' -f $mdSize) bytes)"
+          Write-Host "OK: MatrixDesktopConfigurator.exe ($('{0:N0}' -f $cfgSize) bytes)"

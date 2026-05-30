@@ -15,6 +15,11 @@ internal sealed record ConfiguratorState
     public string? SelectedPresetId { get; set; }
     public JsonObject LastDraft { get; set; } = [];
     public List<UserPreset> UserPresets { get; set; } = [];
+
+    // v1.0: UI theme preference, persisted across launches.
+    // Valid values: "dark" (default), "light". Older state files without
+    // this field deserialize with the default and continue to work.
+    public string UiTheme { get; set; } = "dark";
 }
 
 internal sealed record UserPreset

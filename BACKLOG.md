@@ -1,6 +1,39 @@
 # MatrixDesktop Backlog
 
-## Future Features
+## v1.0 — Completed
+
+These features shipped in v1.0.0:
+
+- GitHub Actions CI + Release workflows (`.github/workflows/ci.yml`, `release.yml`).
+- `--help-full` opens an embedded argument reference (`<EmbeddedResource>` in both EXEs).
+- Configurator live preview window — debounced live update of a second WebView2.
+- `SystemEvents.SessionSwitch` + `PowerModeChanged` → WebView2 `TrySuspendAsync`/`Resume`.
+- Dark/light theme toggle in the configurator (persisted in `ConfiguratorState.UiTheme`).
+- Out-of-range numeric input validation feedback (red border + allowed-range hint).
+- "Export .ps1" button → `CommandBuilder.BuildPowerShellScript` → clipboard.
+- Crash dump writer: `Shared/CrashDumpWriter.cs`, MiniDumpWriteDump + unhandled-exception
+  handlers, writes to `%LOCALAPPDATA%\MatrixDesktop\dumps\`.
+
+## Future Features (deferred)
+
+These were considered for v1.0 but moved to a future release:
+
+- **Hot-reload window icon** — declined; the window icon is rarely visible since
+  the app runs borderless-fullscreen.
+- **First-run wizard** — declined; the configurator's discoverability story is
+  already covered by the new `?` button + help modal.
+- **Gist sync of presets** — dropped from v1.0 (OAuth/token storage too much
+  scope for an initial v1). Revisit with a Personal-Access-Token approach if
+  user demand surfaces.
+- **Multi-config "profile" support** (`--profile work`/`--profile home`) — declined.
+- **Native rendering path** — declined; WebView2 stays the canonical renderer.
+- **OBS/Spout/NDI integration** — backlogged for a future release.
+- **Community preset marketplace** — backlogged.
+- **Per-monitor argument overrides** — backlogged. Would either ship as a
+  configurator-generated `.bat` (multi-process) or require the wrapper to
+  spawn its own child instances; non-trivial scope.
+
+## Historical entries (kept for context)
 
 ### Standalone Argument Configurator
 

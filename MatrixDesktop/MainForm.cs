@@ -171,6 +171,97 @@ public sealed class MainForm : Form
         {
             // SystemEvents can fail in some restricted environments; ignore.
         }
+
+        // v1.0: pause the WebView when the workstation locks or the machine
+        // sleeps. This stops the GL animation loop + audio + timers, which
+        // matters on laptops (battery) and any system where the user expects
+        // the rain not to keep rendering while they're away.
+        try
+        {
+            SystemEvents.SessionSwitch += OnSessionSwitch;
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            _systemEventsAttached = true;
+        }
+        catch
+        {
+            // SystemEvents subscription can fail in services / sandboxed
+            // environments; not fatal.
+        }
+    }
+
+    private bool _systemEventsAttached;
+    private bool _isSuspended;
+
+    private async void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    {
+        switch (e.Reason)
+        {
+            case SessionSwitchReason.SessionLock:
+            case SessionSwitchReason.ConsoleDisconnect:
+            case SessionSwitchReason.RemoteDisconnect:
+                await TrySuspendWebViewAsync($"session {e.Reason}");
+                break;
+            case SessionSwitchReason.SessionUnlock:
+            case SessionSwitchReason.ConsoleConnect:
+            case SessionSwitchReason.RemoteConnect:
+                TryResumeWebView($"session {e.Reason}");
+                break;
+        }
+    }
+
+    private async void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        switch (e.Mode)
+        {
+            case PowerModes.Suspend:
+                await TrySuspendWebViewAsync("power suspend");
+                break;
+            case PowerModes.Resume:
+                TryResumeWebView("power resume");
+                break;
+        }
+    }
+
+    private async Task TrySuspendWebViewAsync(string reason)
+    {
+        if (_isSuspended) return;
+        if (_isShuttingDown) return;
+
+        try
+        {
+            if (_webView.CoreWebView2 is null) return;
+
+            // TrySuspendAsync requires the WebView to be hidden first
+            // (per https://learn.microsoft.com/microsoft-edge/webview2/concepts/process-model#sleeping-renderer-process).
+            // Hiding alone already pauses rendering; the explicit Suspend
+            // call releases additional renderer resources.
+            _webView.Visible = false;
+            var ok = await _webView.CoreWebView2.TrySuspendAsync();
+            _isSuspended = ok;
+            Shared.Logger.Info($"WebView suspended (reason='{reason}', TrySuspendAsync={ok}).");
+        }
+        catch (Exception ex)
+        {
+            Shared.Logger.Warn($"Failed to suspend WebView (reason='{reason}'): {ex.Message}");
+        }
+    }
+
+    private void TryResumeWebView(string reason)
+    {
+        try
+        {
+            if (_webView.CoreWebView2 is not null)
+            {
+                _webView.CoreWebView2.Resume();
+            }
+            _webView.Visible = true;
+            _isSuspended = false;
+            Shared.Logger.Info($"WebView resumed (reason='{reason}').");
+        }
+        catch (Exception ex)
+        {
+            Shared.Logger.Warn($"Failed to resume WebView (reason='{reason}'): {ex.Message}");
+        }
     }
 
     protected override void OnHandleDestroyed(EventArgs e)
@@ -196,6 +287,15 @@ public sealed class MainForm : Form
             {
                 // Ignore.
             }
+        }
+
+        // Unhook the v1.0 power/session listeners so they don't fire against
+        // a destroyed form's WebView.
+        if (_systemEventsAttached)
+        {
+            try { SystemEvents.SessionSwitch -= OnSessionSwitch; } catch { /* ignore */ }
+            try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch { /* ignore */ }
+            _systemEventsAttached = false;
         }
 
         // Ensure foreground enforcer is stopped to prevent timer ticks during disposal

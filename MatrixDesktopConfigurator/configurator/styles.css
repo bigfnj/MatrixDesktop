@@ -1,4 +1,7 @@
-:root {
+/* Default (dark) — also exposed via [data-theme="dark"] for explicit
+   selection. The light theme overrides these in the second block. */
+:root,
+html[data-theme="dark"] {
 	color-scheme: dark;
 	--bg: #0c1012;
 	--panel: #141a1d;
@@ -12,6 +15,32 @@
 	--danger: #db6d6d;
 	--input: #0f1517;
 	--focus: #8ce99f;
+	--button-bg: #202a2f;
+	--button-hover-bg: #243137;
+	--invalid-border: #db6d6d;
+	--invalid-bg: rgba(219, 109, 109, 0.08);
+	--modal-overlay: rgba(0, 0, 0, 0.55);
+}
+
+html[data-theme="light"] {
+	color-scheme: light;
+	--bg: #f4f5f6;
+	--panel: #ffffff;
+	--panel-2: #f0f2f4;
+	--line: #d6dade;
+	--text: #11181c;
+	--muted: #5c6770;
+	--green: #1b8a2f;
+	--teal: #0c7d8c;
+	--amber: #92710d;
+	--danger: #b21f1f;
+	--input: #ffffff;
+	--focus: #1f9e57;
+	--button-bg: #ffffff;
+	--button-hover-bg: #e8edf1;
+	--invalid-border: #b21f1f;
+	--invalid-bg: rgba(178, 31, 31, 0.06);
+	--modal-overlay: rgba(20, 25, 30, 0.45);
 }
 
 * {
@@ -41,7 +70,7 @@ button {
 	min-height: 34px;
 	border: 1px solid var(--line);
 	border-radius: 6px;
-	background: #202a2f;
+	background: var(--button-bg);
 	color: var(--text);
 	padding: 0 12px;
 	cursor: pointer;
@@ -49,7 +78,15 @@ button {
 
 button:hover:not(:disabled) {
 	border-color: var(--teal);
-	background: #243137;
+	background: var(--button-hover-bg);
+}
+
+.toolbar-sep {
+	display: inline-block;
+	width: 1px;
+	height: 22px;
+	margin: 0 6px;
+	background: var(--line);
 }
 
 button:disabled {
@@ -446,3 +483,75 @@ h1 {
 		grid-column: 1 / -1;
 	}
 }
+
+/* ─── v1.0 additions ─────────────────────────────────────────────── */
+
+/* Invalid input feedback — applied by app.js when a numeric value falls
+   outside the field's metadata min/max range. */
+.field input.invalid,
+.field select.invalid,
+.field textarea.invalid {
+	border-color: var(--invalid-border);
+	background: var(--invalid-bg);
+}
+
+.field .validation-hint {
+	color: var(--danger);
+	font-size: 11px;
+	margin-top: 2px;
+	display: block;
+}
+
+/* Help / argument-guide modal */
+.modal {
+	position: fixed;
+	inset: 0;
+	background: var(--modal-overlay);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 9999;
+}
+
+.modal[hidden] { display: none; }
+
+.modal-window {
+	background: var(--panel);
+	color: var(--text);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	width: min(900px, 92vw);
+	height: min(720px, 90vh);
+	display: flex;
+	flex-direction: column;
+	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+}
+
+.modal-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--line);
+}
+
+.modal-header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+
+.modal-header button {
+	min-height: 28px;
+	min-width: 28px;
+	padding: 0 8px;
+	font-size: 18px;
+	line-height: 1;
+}
+
+.modal-body {
+	flex: 1;
+	margin: 0;
+	padding: 16px 18px;
+	overflow: auto;
+	font: 12px/1.45 ui-monospace, "Cascadia Mono", "Consolas", monospace;
+	white-space: pre;
+	background: var(--input);
+}
+

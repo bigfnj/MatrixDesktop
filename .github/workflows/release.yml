@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+jobs:
+  release:
+    name: Build, Publish, and Release
+    runs-on: windows-latest
+    permissions:
+      contents: write   # required to create GitHub Releases on a public repo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Derive version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"     # e.g. v1.0.0
+          $ver = $tag.TrimStart('v')          # 1.0.0
+          $asm = "$ver.0"                     # 1.0.0.0 — AssemblyVersion needs 4-part
+          "version=$ver"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "assembly=$asm"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Tag: $tag | Version: $ver | AssemblyVersion: $asm"
+
+      - name: Restore
+        run: dotnet restore MatrixDesktopApp.sln
+
+      - name: Publish MatrixDesktop (framework-dependent)
+        shell: pwsh
+        run: |
+          dotnet publish MatrixDesktop\MatrixDesktop.csproj `
+            -c Release `
+            -r win-x64 `
+            --no-self-contained `
+            -p:PublishSingleFile=false `
+            -p:PublishDir=bin\Publish\win-x64-fd\ `
+            -p:Version=${{ steps.version.outputs.version }} `
+            -p:AssemblyVersion=${{ steps.version.outputs.assembly }} `
+            -p:FileVersion=${{ steps.version.outputs.assembly }}
+
+      - name: Publish MatrixDesktopConfigurator (framework-dependent)
+        shell: pwsh
+        run: |
+          dotnet publish MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj `
+            -c Release `
+            -r win-x64 `
+            --no-self-contained `
+            -p:PublishSingleFile=false `
+            -p:PublishDir=bin\Publish\win-x64-fd\ `
+            -p:Version=${{ steps.version.outputs.version }} `
+            -p:AssemblyVersion=${{ steps.version.outputs.assembly }} `
+            -p:FileVersion=${{ steps.version.outputs.assembly }}
+
+      - name: Stage payload and zip
+        id: package
+        shell: pwsh
+        run: |
+          $tag     = "${{ github.ref_name }}"
+          $stage   = "stage\MatrixDesktop-$tag-win-x64-fd"
+          $zipName = "MatrixDesktop-$tag-win-x64-fd.zip"
+
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          # Copy MatrixDesktop publish output (EXE + web assets + Matrix.ico)
+          Copy-Item -Recurse "MatrixDesktop\bin\Publish\win-x64-fd\*" $stage
+
+          # Copy Configurator EXE + configurator web assets into the same stage
+          # alongside MatrixDesktop.exe so the user gets a single drop.
+          Copy-Item "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\MatrixDesktopConfigurator.exe" $stage
+          Copy-Item -Recurse "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\configurator" $stage
+
+          # Top-level docs and license go into the zip too
+          Copy-Item README.md  $stage
+          Copy-Item LICENSE    $stage -ErrorAction SilentlyContinue
+          Copy-Item MatrixDesktop_Argument_Guide.txt $stage
+
+          # Final zip
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipName -CompressionLevel Optimal
+
+          $zip = Get-Item $zipName
+          Write-Host "Created $($zip.Name) — $('{0:N0}' -f $zip.Length) bytes"
+
+          "zip=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Compute SHA256
+        shell: pwsh
+        run: |
+          $zip = "${{ steps.package.outputs.zip }}"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Out-File -FilePath "$zip.sha256" -Encoding ascii
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MatrixDesktop ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256

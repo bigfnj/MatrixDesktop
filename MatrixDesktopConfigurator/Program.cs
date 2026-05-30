@@ -9,6 +9,10 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        // Crash dumps + unhandled exception triage. Must run first so even an
+        // early-startup failure gets captured.
+        MatrixDesktop.Shared.CrashDumpWriter.Install("MatrixDesktopConfigurator");
+
         TrySetAppUserModelId("BigFnJ.MatrixDesktop.Configurator");
 
         try

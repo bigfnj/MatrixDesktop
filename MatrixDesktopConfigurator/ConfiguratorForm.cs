@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -34,6 +35,8 @@ public sealed class ConfiguratorForm : Form
     private bool _isShuttingDown;
     private System.Drawing.Icon? _smallWindowIcon;
     private System.Drawing.Icon? _largeWindowIcon;
+    private PreviewWindow? _previewWindow;
+    private string? _cachedHelpText;
 
     private const int WmSetIcon = 0x0080;
     private static readonly IntPtr IconSmall = new(0);
@@ -135,6 +138,20 @@ public sealed class ConfiguratorForm : Form
     {
         _isShuttingDown = true;
         StopTestProcess();
+
+        // Close the live-preview window if one is open. We assigned a
+        // FormClosed handler when creating it that nulls _previewWindow,
+        // but explicitly closing here ensures no orphaned WebView2 process
+        // is left behind when the user dismisses the configurator.
+        try
+        {
+            if (_previewWindow is { IsDisposed: false })
+            {
+                _previewWindow.Close();
+            }
+        }
+        catch { /* ignore */ }
+        _previewWindow = null;
 
         try
         {
@@ -291,22 +308,144 @@ public sealed class ConfiguratorForm : Form
         }
     }
 
-    private Task<object?> DispatchAsync(string type, JsonElement payload)
+    private async Task<object?> DispatchAsync(string type, JsonElement payload)
     {
-        return Task.FromResult<object?>(type switch
+        return type switch
         {
-            "loadState" => LoadStatePayload(),
-            "saveDraft" => SaveDraft(payload),
-            "savePreset" => SavePreset(payload),
-            "deletePreset" => DeletePreset(payload),
-            "buildCommand" => BuildCommand(payload),
-            "importCommand" => ImportCommand(payload),
-            "randomizeDraft" => RandomizeDraft(payload),
-            "copyCommand" => CopyCommand(payload),
-            "testCommand" => TestCommand(payload),
-            "stopTest" => StopTest(),
+            "loadState"        => LoadStatePayload(),
+            "saveDraft"        => SaveDraft(payload),
+            "savePreset"       => SavePreset(payload),
+            "deletePreset"     => DeletePreset(payload),
+            "buildCommand"     => BuildCommand(payload),
+            "importCommand"    => ImportCommand(payload),
+            "randomizeDraft"   => RandomizeDraft(payload),
+            "copyCommand"      => CopyCommand(payload),
+            "testCommand"      => TestCommand(payload),
+            "stopTest"         => StopTest(),
+            // v1.0 additions
+            "setTheme"         => SetTheme(payload),
+            "exportPowerShell" => ExportPowerShell(payload),
+            "openPreview"      => await OpenPreviewAsync(),
+            "closePreview"     => ClosePreview(),
+            "previewCommand"   => await PreviewCommandAsync(payload),
+            "loadHelp"         => LoadHelp(),
             _ => throw new InvalidOperationException($"Unknown configurator request: {type}"),
-        });
+        };
+    }
+
+    // ─── v1.0 dispatchers ───────────────────────────────────────────────────
+
+    private object SetTheme(JsonElement payload)
+    {
+        var theme = ReadOptionalString(payload, "theme");
+        if (string.Equals(theme, "light", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(theme, "dark", StringComparison.OrdinalIgnoreCase))
+        {
+            _state.UiTheme = theme!.ToLowerInvariant();
+            _storage.Save(_state);
+            return new { saved = true, theme = _state.UiTheme };
+        }
+        return new { saved = false, message = "theme must be 'dark' or 'light'" };
+    }
+
+    private object ExportPowerShell(JsonElement payload)
+    {
+        var draft = ReadObject(payload, "draft");
+        var script = _commandBuilder.BuildPowerShellScript(draft, includeDefaults: false);
+
+        // Stash on the system clipboard so the user can paste anywhere. We
+        // also return the script body so the UI can show a confirmation
+        // preview / let the user save to file in a future release.
+        try
+        {
+            if (Clipboard.ContainsText() || !string.IsNullOrEmpty(script))
+            {
+                Clipboard.SetText(script);
+            }
+        }
+        catch (Exception ex)
+        {
+            MatrixDesktop.Shared.Logger.Warn($"ExportPowerShell clipboard set failed: {ex.Message}");
+        }
+
+        return new { script, copied = true };
+    }
+
+    private async Task<object?> OpenPreviewAsync()
+    {
+        if (_previewWindow is { IsDisposed: false })
+        {
+            // Already open — bring it forward and re-apply the latest query.
+            _previewWindow.BringToFront();
+            _previewWindow.Activate();
+            return new { opened = true, alreadyOpen = true };
+        }
+
+        var webRoot = PreviewWindow.FindWebRoot();
+        if (webRoot is null)
+        {
+            MatrixDesktop.Shared.Logger.Warn("Preview requested but no web/ folder was found beside the configurator.");
+            return new { opened = false, message = "web/ assets not found beside MatrixDesktopConfigurator.exe (or in dev tree)." };
+        }
+
+        var userDataFolder = GetConfiguratorAppDataFolder("PreviewWebView2");
+        var preview = new PreviewWindow(webRoot, userDataFolder);
+        preview.FormClosed += (_, _) => _previewWindow = null;
+        _previewWindow = preview;
+        preview.Show();
+
+        // First navigation uses the latest saved draft so the preview matches
+        // what's on screen immediately rather than showing defaults briefly.
+        var query = _commandBuilder.BuildWebQueryString(_state.LastDraft ?? _commandBuilder.CreateDefaultDraft());
+        await preview.NavigateWithQueryAsync(query);
+        return new { opened = true, alreadyOpen = false };
+    }
+
+    private object ClosePreview()
+    {
+        if (_previewWindow is { IsDisposed: false })
+        {
+            try { _previewWindow.Close(); } catch { /* ignore */ }
+        }
+        _previewWindow = null;
+        return new { closed = true };
+    }
+
+    private async Task<object?> PreviewCommandAsync(JsonElement payload)
+    {
+        if (_previewWindow is null || _previewWindow.IsDisposed) return new { applied = false, reason = "no-preview" };
+        if (!_previewWindow.IsReady) return new { applied = false, reason = "not-ready" };
+
+        var draft = ReadObject(payload, "draft");
+        var query = _commandBuilder.BuildWebQueryString(draft);
+        await _previewWindow.NavigateWithQueryAsync(query);
+        return new { applied = true };
+    }
+
+    private object LoadHelp()
+    {
+        if (_cachedHelpText is not null)
+        {
+            return new { text = _cachedHelpText };
+        }
+
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            using var stream = assembly.GetManifestResourceStream("MatrixDesktopConfigurator.ArgumentGuide.txt");
+            if (stream is not null)
+            {
+                using var reader = new StreamReader(stream);
+                _cachedHelpText = reader.ReadToEnd();
+                return new { text = _cachedHelpText };
+            }
+        }
+        catch (Exception ex)
+        {
+            MatrixDesktop.Shared.Logger.Warn($"LoadHelp failed: {ex.Message}");
+        }
+
+        return new { text = "Argument guide is not available in this build." };
     }
 
     private object LoadStatePayload()

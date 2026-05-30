@@ -12,6 +12,10 @@ const state = {
 	pending: new Map(),
 	saveTimer: 0,
 	commandTimer: 0,
+	// v1.0 additions
+	uiTheme: "dark",
+	previewOpen: false,
+	previewTimer: 0,
 };
 
 const el = {
@@ -37,6 +41,14 @@ const el = {
 	stopButton: document.querySelector("#stopButton"),
 	statusLine: document.querySelector("#statusLine"),
 	saveState: document.querySelector("#saveState"),
+	// v1.0 additions
+	exportPsButton: document.querySelector("#exportPsButton"),
+	themeButton: document.querySelector("#themeButton"),
+	previewButton: document.querySelector("#previewButton"),
+	helpButton: document.querySelector("#helpButton"),
+	helpModal: document.querySelector("#helpModal"),
+	helpBody: document.querySelector("#helpBody"),
+	helpCloseButton: document.querySelector("#helpCloseButton"),
 };
 
 window.configHost = {
@@ -150,6 +162,34 @@ const updateDraftValue = (field, value) => {
 	setDirty(true);
 	scheduleSaveDraft();
 	scheduleCommandBuild();
+	schedulePreviewPush();
+};
+
+// v1.0: live-preview debounce. We only push to the preview window if it's
+// actually open — when closed, the configurator's regular state machine is
+// untouched (no extra host roundtrips).
+const schedulePreviewPush = () => {
+	if (!state.previewOpen) return;
+	window.clearTimeout(state.previewTimer);
+	state.previewTimer = window.setTimeout(async () => {
+		try {
+			await requestHost("previewCommand", { draft: state.draft });
+		} catch (error) {
+			setStatus(`Preview push failed: ${error.message}`, "error");
+		}
+	}, 250);
+};
+
+const applyTheme = (theme) => {
+	const next = theme === "light" ? "light" : "dark";
+	state.uiTheme = next;
+	document.documentElement.setAttribute("data-theme", next);
+	if (el.themeButton) {
+		el.themeButton.textContent = next === "light" ? "☀️" : "🌙";
+		el.themeButton.title = next === "light"
+			? "Switch to dark theme"
+			: "Switch to light theme";
+	}
 };
 
 const renderPresetSelect = () => {
@@ -275,10 +315,50 @@ const renderNumberField = (field) => {
 	if (field.step != null) input.step = field.step;
 	input.disabled = Boolean(getDisabledReason(field));
 	input.value = state.draft[field.id] ?? "";
+
+	// v1.0 validation feedback — re-evaluate on every input.
+	let hint = null;
+	const applyValidation = () => {
+		const raw = input.value;
+		if (raw === "" || input.disabled) {
+			input.classList.remove("invalid");
+			input.removeAttribute("aria-invalid");
+			if (hint) { hint.remove(); hint = null; }
+			return;
+		}
+		const num = Number.parseFloat(raw);
+		const tooLow = field.min != null && Number.isFinite(num) && num < field.min;
+		const tooHigh = field.max != null && Number.isFinite(num) && num > field.max;
+		const notNumber = !Number.isFinite(num);
+		if (tooLow || tooHigh || notNumber) {
+			input.classList.add("invalid");
+			input.setAttribute("aria-invalid", "true");
+			if (!hint) {
+				hint = document.createElement("span");
+				hint.className = "validation-hint";
+				shell.append(hint);
+			}
+			const rangeText =
+				field.min != null && field.max != null ? `Allowed range: ${field.min} – ${field.max}`
+				: field.min != null ? `Minimum: ${field.min}`
+				: field.max != null ? `Maximum: ${field.max}`
+				: "Must be a number";
+			hint.textContent = rangeText;
+		} else {
+			input.classList.remove("invalid");
+			input.removeAttribute("aria-invalid");
+			if (hint) { hint.remove(); hint = null; }
+		}
+	};
+
 	input.addEventListener("input", () => {
 		const value = input.value === "" ? null : toNumber(input.value, field.defaultValue ?? 0);
 		updateDraftValue(field, value);
+		applyValidation();
 	});
+	input.addEventListener("blur", applyValidation);
+	applyValidation();
+
 	shell.append(input);
 	return shell;
 };
@@ -653,6 +733,75 @@ const bindEvents = () => {
 			setStatus(error.message, "error");
 		}
 	});
+
+	// ─── v1.0 button bindings ────────────────────────────────────────
+
+	if (el.exportPsButton) {
+		el.exportPsButton.addEventListener("click", async () => {
+			try {
+				await requestHost("exportPowerShell", { draft: state.draft });
+				setStatus("PowerShell script copied to clipboard.", "ok");
+			} catch (error) {
+				setStatus(`PowerShell export failed: ${error.message}`, "error");
+			}
+		});
+	}
+
+	if (el.themeButton) {
+		el.themeButton.addEventListener("click", async () => {
+			const next = state.uiTheme === "light" ? "dark" : "light";
+			applyTheme(next);
+			try {
+				await requestHost("setTheme", { theme: next });
+			} catch (error) {
+				setStatus(`Theme save failed: ${error.message}`, "error");
+			}
+		});
+	}
+
+	if (el.previewButton) {
+		el.previewButton.addEventListener("click", async () => {
+			try {
+				if (state.previewOpen) {
+					await requestHost("closePreview");
+					state.previewOpen = false;
+					el.previewButton.textContent = "Preview";
+					setStatus("Preview closed.", "ok");
+				} else {
+					const result = await requestHost("openPreview");
+					if (result?.opened) {
+						state.previewOpen = true;
+						el.previewButton.textContent = "Hide Preview";
+						setStatus(result.alreadyOpen ? "Preview already open." : "Preview opened.", "ok");
+					} else {
+						setStatus(`Preview could not open: ${result?.message ?? "unknown reason"}`, "error");
+					}
+				}
+			} catch (error) {
+				setStatus(`Preview toggle failed: ${error.message}`, "error");
+			}
+		});
+	}
+
+	if (el.helpButton && el.helpModal && el.helpBody && el.helpCloseButton) {
+		const closeHelp = () => { el.helpModal.hidden = true; };
+		el.helpButton.addEventListener("click", async () => {
+			try {
+				const result = await requestHost("loadHelp");
+				el.helpBody.textContent = result?.text ?? "Argument guide unavailable.";
+				el.helpModal.hidden = false;
+			} catch (error) {
+				setStatus(`Help failed: ${error.message}`, "error");
+			}
+		});
+		el.helpCloseButton.addEventListener("click", closeHelp);
+		el.helpModal.addEventListener("click", (event) => {
+			if (event.target === el.helpModal) closeHelp();
+		});
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape" && !el.helpModal.hidden) closeHelp();
+		});
+	}
 };
 
 const init = async () => {
@@ -666,6 +815,11 @@ const init = async () => {
 		state.draft = normalizeDraft(state.lastDraft);
 		state.activeGroupId = state.metadata.groups[0]?.id || null;
 		el.storageStatus.textContent = payload.storage?.portable ? "Portable preset storage" : "AppData preset storage";
+
+		// v1.0: apply the saved theme before the first render so the user
+		// never sees a flash of the wrong palette during cold start.
+		applyTheme(payload.state?.uiTheme || "dark");
+
 		bindEvents();
 		setDirty(false);
 		refreshAll();

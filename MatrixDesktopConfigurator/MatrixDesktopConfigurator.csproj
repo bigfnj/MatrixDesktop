@@ -13,9 +13,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MatrixDesktopConfigurator</AssemblyName>
     <RootNamespace>MatrixDesktopConfigurator</RootNamespace>
-    <Version>0.2.0</Version>
-    <AssemblyVersion>0.2.0.0</AssemblyVersion>
-    <FileVersion>0.2.0.0</FileVersion>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
     <ApplicationIcon>..\MatrixDesktop\Matrix.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
@@ -28,6 +28,13 @@
     <!-- Shared sources used by both MatrixDesktop and MatrixDesktopConfigurator. -->
     <Compile Include="..\Shared\Logger.cs" Link="Shared\Logger.cs" />
     <Compile Include="..\Shared\FlagNormalization.cs" Link="Shared\FlagNormalization.cs" />
+    <Compile Include="..\Shared\CrashDumpWriter.cs" Link="Shared\CrashDumpWriter.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Configurator embeds the same argument guide so its "?" button works
+         without needing the sibling MatrixDesktop.exe to be present. -->
+    <EmbeddedResource Include="..\MatrixDesktop_Argument_Guide.txt" LogicalName="MatrixDesktopConfigurator.ArgumentGuide.txt" />
   </ItemGroup>
 
   <ItemGroup>
