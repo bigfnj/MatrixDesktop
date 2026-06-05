@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/MatrixArgs.cs",
+  "sha1": "f06a9896ccdeb2525d7fc23fa8443bafeff3da75",
+  "purpose": "Converts command-line args (passed through from AppCli) into a URL query string for the embedded web app.",
+  "exports": [
+    "MatrixArgs.BuildQueryString",
+    "MatrixArgs.IsHelpRequested",
+    "MatrixArgs.IsHelpToken"
+  ],
+  "imports": [
+    "System",
+    "System.Collections.Frozen",
+    "System.Collections.Generic",
+    "System.Text"
+  ],
+  "called_by": [
+    "AppCli.cs \u2014 IsHelpToken in key detection",
+    "MainForm.cs \u2014 BuildQueryString"
+  ],
+  "calls_out_to": [
+    "Uri.EscapeDataString \u2014 URL-encodes keys and values"
+  ],
+  "invariants": [
+    "Last value wins for duplicate keys",
+    "Bool keys (camera, volumetric, etc.) are normalized: 1/y/yes/on\u2192true, 0/n/no/off\u2192false",
+    "A single argument starting with '?' is accepted as a raw query string and passed through as-is"
+  ],
+  "gotchas": [
+    "Unknown keys without a value are silently dropped (with a Debug.WriteLine warning) rather than passed through as empty-value params",
+    "BoolKeys uses FrozenSet for O(1) lookup \u2014 key membership determines whether a value-less flag gets value='true' or gets dropped"
+  ]
+}

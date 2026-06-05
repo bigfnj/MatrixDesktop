@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/AppCli.cs",
+  "sha1": "d6619a738031edb4f494ae8a7136381cc72a8204",
+  "purpose": "CLI argument parser for wrapper-level flags (windowing, exit behavior, cursor) and passthrough of unknown flags to MatrixArgs; also defines AppOptions and WindowMode.",
+  "exports": [
+    "AppOptions",
+    "WindowMode",
+    "AppCli.Parse",
+    "AppCli.IsHelpRequested",
+    "AppCli.GetHelpText"
+  ],
+  "imports": [
+    "System",
+    "System.Collections.Generic"
+  ],
+  "called_by": [
+    "MainForm.cs \u2014 Parse on construction",
+    "Program.cs \u2014 IsHelpRequested before Application.Run"
+  ],
+  "calls_out_to": [
+    "MatrixArgs.IsHelpRequested / IsHelpToken \u2014 delegates help detection"
+  ],
+  "invariants": [
+    "AppOptions is immutable (init-only properties)",
+    "Default: BorderlessSpanAll, exitOnEsc=true, exitOnAnyKey=true, globalKeyExit=false",
+    "Unknown flags are passed through to passthroughArgs rather than rejected"
+  ],
+  "gotchas": [
+    "NormalizeKey replaces underscores with hyphens so --exit_on_esc and --exit-on-esc are equivalent",
+    "--monitor N consumes the next token as the index value and switches mode to BorderlessSingleMonitor; invalid values fall through to passthrough",
+    "The --single-monitor flag leaves monitorIndex=null (primary monitor), not index 0"
+  ]
+}

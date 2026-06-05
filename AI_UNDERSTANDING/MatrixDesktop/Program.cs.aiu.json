@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/Program.cs",
+  "sha1": "b66e59e170b3446bc8414a6a93b0d8c43adeef18",
+  "purpose": "Application entry point: sets AppUserModelID for taskbar identity, configures DPI awareness, shows help if requested, then runs MainForm.",
+  "exports": [
+    "Program.Main"
+  ],
+  "imports": [
+    "System",
+    "System.Runtime.InteropServices",
+    "System.Windows.Forms"
+  ],
+  "called_by": [],
+  "calls_out_to": [
+    "shell32!SetCurrentProcessExplicitAppUserModelID \u2014 sets taskbar grouping/icon identity",
+    "Application.SetHighDpiMode(PerMonitorV2) with SystemAware fallback",
+    "AppCli.IsHelpRequested \u2014 shows help MessageBox and exits early",
+    "Application.Run(new MainForm(args)) \u2014 starts message loop"
+  ],
+  "invariants": [
+    "SetCurrentProcessExplicitAppUserModelID is called before any UI creation so Windows associates the correct icon with the process from the start",
+    "PerMonitorV2 DPI mode is preferred; falls back to SystemAware if unavailable"
+  ],
+  "gotchas": [
+    "SetCurrentProcessExplicitAppUserModelID must be called before the first HWND is created \u2014 calling it after window creation has no effect on taskbar pinning",
+    "AppUserModelID 'BigFnJ.MatrixDesktop' must match any pinned shortcut's AppUserModelID to show the correct taskbar icon"
+  ]
+}

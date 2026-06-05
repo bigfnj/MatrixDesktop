@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/ForegroundWindow.cs",
+  "sha1": "40484961f7010c9a681a0d5f123b75b6e7dd201b",
+  "purpose": "Best-effort foreground window acquisition: combines WinForms Activate/BringToFront, a TopMost toggle trick, and AttachThreadInput+SetForegroundWindow for maximum reliability across Windows policies.",
+  "exports": [
+    "ForegroundWindow.BestEffortBringToFront",
+    "ForegroundWindow.IsThisProcessForeground"
+  ],
+  "imports": [
+    "System",
+    "System.Runtime.InteropServices",
+    "System.Windows.Forms"
+  ],
+  "called_by": [
+    "MainForm.cs \u2014 startup foreground enforcer timer"
+  ],
+  "calls_out_to": [
+    "user32!SetForegroundWindow / BringWindowToTop / SetActiveWindow",
+    "user32!AttachThreadInput \u2014 temporarily attaches UI thread to foreground window's thread",
+    "user32!GetForegroundWindow / GetWindowThreadProcessId",
+    "user32!ShowWindow / IsIconic"
+  ],
+  "invariants": [
+    "BestEffortBringToFront restores TopMost to desiredTopMost after the brief bump",
+    "All Win32 calls are individually try/catched \u2014 never throws"
+  ],
+  "gotchas": [
+    "AttachThreadInput is a known Windows hack; attach+detach must be paired \u2014 the finally block ensures cleanup even if SetForegroundWindow fails",
+    "Windows may still refuse focus stealing if the user is actively typing in another process \u2014 this is OS-by-design, not a bug"
+  ]
+}

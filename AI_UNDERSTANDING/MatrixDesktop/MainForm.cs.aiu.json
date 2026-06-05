@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/MainForm.cs",
+  "sha1": "d2bf68010bf3d1a25898bf23e4c26e233a56a69c",
+  "purpose": "Main WinForms window hosting a WebView2 control that loads the Matrix Digital Rain web app; handles window sizing, foreground enforcement, keyboard exit, display change events, and WebView2 navigation security.",
+  "exports": [
+    "MainForm"
+  ],
+  "imports": [
+    "System",
+    "System.Windows.Forms",
+    "Microsoft.Web.WebView2.Core",
+    "Microsoft.Web.WebView2.WinForms"
+  ],
+  "called_by": [
+    "Program.cs \u2014 instantiated and passed to Application.Run"
+  ],
+  "calls_out_to": [
+    "AppCli.Parse \u2014 parses command-line flags into AppOptions",
+    "MatrixArgs.BuildQueryString \u2014 builds URL query string from passthrough args",
+    "WebView2.EnsureCoreWebView2Async \u2014 initializes WebView2 runtime",
+    "CoreWebView2.SetVirtualHostNameToFolderMapping \u2014 serves web/ assets from appassets.local",
+    "AppWindowIcon.Load / ApplyTo \u2014 sets window icon",
+    "LowLevelKeyboardExit.Install / Uninstall \u2014 keyboard hook lifecycle",
+    "ForegroundWindow.BestEffortBringToFront \u2014 startup foreground enforcement",
+    "SystemEvents.DisplaySettingsChanged \u2014 handles monitor configuration changes"
+  ],
+  "invariants": [
+    "WebView2 navigates to https://appassets.local/index.html with the query string appended",
+    "Navigation to external URLs is blocked (NewWindowRequestedEventArgs.Handled=true, NavigationStartingEventArgs.Cancel=true for non-appassets URLs)",
+    "Background is black to avoid bright flash during WebView2 initialization"
+  ],
+  "gotchas": [
+    "WebView2 initialization is async (EnsureCoreWebView2Async); window sizing and hook installation happen before WebView is ready",
+    "CatastrophicFailureHResult (0x8000FFFF) from WebView2 triggers a user-visible error and graceful exit rather than a crash",
+    "Foreground enforcer timer retries for a few ticks then self-disposes to avoid keeping the process alive longer than needed",
+    "_cachedUserDataFolder is static to reuse the same WebView2 user data folder across multiple MainForm instances (shouldn't normally be more than one)"
+  ]
+}

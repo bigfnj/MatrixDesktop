@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/MatrixDesktop.csproj",
+  "sha1": "5c4464749df6e696fb6a1663f2aa43cd34ef9e12",
+  "purpose": "MSBuild project file: configures .NET 10 WinForms app targeting Windows, embeds and copies Matrix.ico and web/ assets, references WebView2 NuGet package, and strips the unwanted WebView2 WPF assembly reference.",
+  "exports": [],
+  "imports": [],
+  "called_by": [],
+  "calls_out_to": [],
+  "invariants": [
+    "OutputType=WinExe, TargetFramework=net10.0-windows, UseWindowsForms=true",
+    "Matrix.ico is both an EmbeddedResource (for runtime icon loading) and a Content file (copied to output)",
+    "web/ assets are Content with CopyToOutputDirectory=PreserveNewest; large/dev-only subdirs excluded"
+  ],
+  "gotchas": [
+    "The _MatrixDesktop_RemoveWebView2WpfReference target removes Microsoft.Web.WebView2.Wpf from references to prevent MSB3277 WindowsBase version conflict",
+    "web/playdate, web/msdfgen, web/svg sources, screenshots, and source-only files are excluded from publish output to reduce artifact size"
+  ]
+}

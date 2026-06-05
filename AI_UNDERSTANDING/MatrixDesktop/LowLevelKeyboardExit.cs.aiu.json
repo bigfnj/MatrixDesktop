@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/LowLevelKeyboardExit.cs",
+  "sha1": "46a9dfeb4995dbcb6d654e87ac13d683547b744b",
+  "purpose": "Installs a WH_KEYBOARD_LL hook that exits the app on physical keyboard input (ESC only, or any key), ignoring software-injected events.",
+  "exports": [
+    "LowLevelKeyboardExit",
+    "LowLevelKeyboardExit.Install",
+    "LowLevelKeyboardExit.Uninstall"
+  ],
+  "imports": [
+    "System",
+    "System.Diagnostics",
+    "System.Runtime.InteropServices",
+    "System.Windows.Forms"
+  ],
+  "called_by": [
+    "MainForm.cs \u2014 constructed and installed/uninstalled around app lifetime"
+  ],
+  "calls_out_to": [
+    "user32!SetWindowsHookEx(WH_KEYBOARD_LL) \u2014 global keyboard hook",
+    "user32!UnhookWindowsHookEx \u2014 cleanup",
+    "user32!CallNextHookEx \u2014 passes events down the hook chain",
+    "user32!GetForegroundWindow / GetWindowThreadProcessId \u2014 foreground check",
+    "Form.BeginInvoke \u2014 defers Close to avoid re-entrancy during hook callback"
+  ],
+  "invariants": [
+    "_hookProc delegate is kept alive as a field to prevent GC collection while the native hook holds a callback thunk pointer",
+    "RequestClose fires only once (_closeRequested guard)",
+    "Close is always posted via BeginInvoke from the hook callback, never called directly"
+  ],
+  "gotchas": [
+    "When GlobalKeyExit=false, the hook only closes the app if IsOurProcessForeground() \u2014 prevents exiting when running in the background",
+    "Hardware-emulating HID drivers may not set LLKHF_INJECTED; those inputs will be treated as physical and trigger exit",
+    "vkCode 0x00 and 0xFF are phantom key events sent by some devices \u2014 explicitly ignored"
+  ]
+}

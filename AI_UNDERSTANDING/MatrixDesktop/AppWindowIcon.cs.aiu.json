@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "path": "MatrixDesktop/AppWindowIcon.cs",
+  "sha1": "02dcf9cba076716425e73b8df90028a7e0d7e956",
+  "purpose": "Loads and applies the Matrix.ico window icon to a Form, using WM_SETICON for small/big/small2 icon slots for correct taskbar icon display.",
+  "exports": [
+    "AppWindowIcon",
+    "AppWindowIcon.Load",
+    "AppWindowIcon.ApplyTo"
+  ],
+  "imports": [
+    "System.Drawing",
+    "System.IO",
+    "System.Reflection",
+    "System.Windows.Forms"
+  ],
+  "called_by": [
+    "MainForm.cs \u2014 TryApplyWindowIcon on startup"
+  ],
+  "calls_out_to": [
+    "Assembly.GetManifestResourceStream \u2014 loads embedded Matrix.ico",
+    "user32!SendMessage(WM_SETICON) \u2014 sets ICON_SMALL, ICON_BIG, ICON_SMALL2 on the HWND"
+  ],
+  "invariants": [
+    "Load tries: embedded resource \u2192 sidecar file in BaseDirectory \u2192 ExtractAssociatedIcon fallback",
+    "ApplyTo sets Form.Icon and then sends WM_SETICON for all three slots if handle is created",
+    "Dispose avoids double-disposing when small and large point to the same cloned Icon"
+  ],
+  "gotchas": [
+    "ICON_SMALL2 (index 2) must be set explicitly for correct taskbar grouping icon on Windows \u2014 Form.Icon alone does not set it",
+    "ApplyTo is a no-op for WM_SETICON if the form handle is not yet created; call it again after handle creation if needed"
+  ]
+}
