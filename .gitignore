@@ -78,3 +78,6 @@ coverage.*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+SESSION_LOG*.md
+SESSION_HANDOFF*.md
