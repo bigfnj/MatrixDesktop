@@ -31,10 +31,18 @@
 			</header>
 
 			<main class="workspace">
-				<nav id="groupNav" class="group-nav" aria-label="Argument groups"></nav>
+				<nav id="groupNav" class="group-nav" aria-label="Argument groups">
+					<input id="fieldFilter" class="field-filter" type="search" placeholder="Filter settings…" aria-label="Filter settings" />
+					<div id="sectionJump" class="section-jump"></div>
+				</nav>
 				<section class="editor">
-					<div id="fieldGrid" class="field-grid"></div>
+					<div id="fieldSurface" class="field-surface"></div>
 				</section>
+				<aside id="previewPane" class="preview-pane">
+					<div class="preview-header">Live preview</div>
+					<iframe id="previewFrame" class="preview-frame" title="Live matrix preview"
+						sandbox="allow-scripts allow-same-origin"></iframe>
+				</aside>
 			</main>
 
 			<footer class="command-panel">

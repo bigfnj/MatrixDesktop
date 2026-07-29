@@ -8,8 +8,9 @@ Current version: **1.0.0** — see [release notes](https://github.com/bigfnj/Mat
 
 ## v1.0 highlights
 
-- **Live preview in the configurator.** Open a second window from the configurator's
-  toolbar to see the rain effect update in-place as you tweak fields (debounced 250ms).
+- **Live preview in the configurator.** An embedded preview pane shows the rain effect
+  and refreshes as you tweak fields, change presets, import, or randomize (debounced
+  250ms). Toggle it from the toolbar.
 - **Argument reference embedded.** `MatrixDesktop.exe --help-full` opens a scrollable
   reference dialog with the full argument guide. The configurator's `?` button shows
   the same content. No external file required.
@@ -98,6 +99,24 @@ appending them to the internal `index.html` URL.
 The solution includes `MatrixDesktopConfigurator.exe`, a companion app for building MatrixDesktop launch arguments without hand-writing the command line.
 
 It provides grouped controls for wrapper flags and visualizer settings, color/palette/stripe editors, named presets, a live generated command, randomization controls, an `Import` button for pasted MatrixDesktop commands, and a `Test Argument` button. Test launches are kept windowed and use `--no-exit-on-any-key` by default so a generated argument can be checked without taking over the desktop.
+
+### Configurator UI
+
+The configurator UI (WinForms shell hosting a WebView2 page) presents all settings on a
+single scrollable surface rather than tabbed pages:
+
+- **Single-screen layout.** Every group (Launch, Theme, Effects, Colors, Motion, Layout,
+  Advanced) is shown at once under sticky section headers. A left-hand jump list scrolls to
+  a section, and a filter box narrows the visible fields by name.
+- **Custom color picker.** Color, palette-stop, and stripe swatches open an in-app popover
+  with a draggable saturation/value square, a hue bar, and precise hex / 0–1 RGB entry — no
+  OS color dialog, full float precision, and palette/stripe rows are directly editable.
+- **Embedded live preview.** A preview pane renders the matrix effect (served to an iframe
+  from the bundled `web/` assets) and refreshes on any change — field edits, preset
+  selection, import, or randomize. The preview query mirrors the actual launch command, so
+  what you see matches what `MatrixDesktop.exe` would render.
+- **Range enforcement.** Out-of-range numeric inputs clamp to their allowed min/max on
+  blur, and cleared fields revert to their default.
 
 The importer accepts full `MatrixDesktop.exe ...` commands, raw argument lines, query strings, and simple `start "" /min ...` batch lines. Recognized settings populate the current draft, which can then be saved as a preset. Stripe colors are only editable and emitted when the selected effect is stripe-based: `stripes`, `customStripes`, `pride`, `trans`, or `transPride`.
 

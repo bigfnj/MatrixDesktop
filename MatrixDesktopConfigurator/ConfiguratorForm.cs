@@ -17,6 +17,12 @@ public sealed class ConfiguratorForm : Form
 {
     private const string HostName = "configurator.local";
     private const string HostOrigin = "https://configurator.local/";
+
+    // Second virtual host that serves the bundled matrix web/ app to the
+    // embedded preview <iframe> inside the configurator page.
+    private const string PreviewHostName = "matrix-preview.local";
+    private const string PreviewOrigin = "https://matrix-preview.local/";
+
     private const int CatastrophicFailureHResult = unchecked((int)0x8000FFFF);
 
     private readonly ConfiguratorMetadata _metadata = ArgumentCatalog.Create();
@@ -34,6 +40,15 @@ public sealed class ConfiguratorForm : Form
     private Process? _testProcess;
     private bool _isShuttingDown;
     private AppWindowIcon? _windowIcon;
+
+    // Live-preview window (created on demand via OpenPreviewAsync, nulled on close).
+    private PreviewWindow? _previewWindow;
+
+    // Cached embedded argument-guide text for the "?" help modal.
+    private string? _cachedHelpText;
+
+    // Resolved matrix web/ root for the embedded preview (null if not found).
+    private string? _previewWebRoot;
 
     public ConfiguratorForm()
     {
@@ -242,6 +257,18 @@ public sealed class ConfiguratorForm : Form
             root,
             CoreWebView2HostResourceAccessKind.Allow);
 
+        // Map the matrix web/ app to its own origin so the configurator page
+        // can embed it in the live-preview iframe. If the assets aren't found,
+        // the preview stays unavailable and the UI hides the pane.
+        _previewWebRoot = PreviewWindow.FindWebRoot();
+        if (_previewWebRoot is not null)
+        {
+            _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                PreviewHostName,
+                _previewWebRoot,
+                CoreWebView2HostResourceAccessKind.Allow);
+        }
+
         _webView.CoreWebView2.Navigate($"{HostOrigin}index.html");
     }
 
@@ -279,6 +306,7 @@ public sealed class ConfiguratorForm : Form
             "savePreset"       => SavePreset(payload),
             "deletePreset"     => DeletePreset(payload),
             "buildCommand"     => BuildCommand(payload),
+            "buildWebQuery"    => BuildWebQuery(payload),
             "importCommand"    => ImportCommand(payload),
             "randomizeDraft"   => RandomizeDraft(payload),
             "copyCommand"      => CopyCommand(payload),
@@ -422,6 +450,11 @@ public sealed class ConfiguratorForm : Form
                 path = _storage.StoragePath,
                 portable = _storage.UsesPortablePath,
             },
+            preview = new
+            {
+                available = _previewWebRoot is not null,
+                origin = _previewWebRoot is not null ? PreviewOrigin : null,
+            },
         };
     }
 
@@ -496,6 +529,13 @@ public sealed class ConfiguratorForm : Form
         {
             command = _commandBuilder.BuildCommand(draft, includeDefaults, forTest),
         };
+    }
+
+    // Web-only query string ("?key=val&…") for the embedded preview iframe.
+    private object BuildWebQuery(JsonElement payload)
+    {
+        var draft = ReadObject(payload, "draft");
+        return new { query = _commandBuilder.BuildWebQueryString(draft) };
     }
 
     private object ImportCommand(JsonElement payload)

@@ -68,10 +68,6 @@ internal sealed partial class CommandBuilder
         {
             tokens.Add("--single-monitor");
         }
-        else if (forTest)
-        {
-            tokens.Add("--windowed");
-        }
         else if (includeDefaults)
         {
             tokens.Add("--borderless");
@@ -80,6 +76,13 @@ internal sealed partial class CommandBuilder
         foreach (var field in Fields.Where(static f => f.Scope == "app" && f.Kind == "bool"))
         {
             if (field.Id == "workingArea" && (forTest || windowMode == "windowed"))
+            {
+                continue;
+            }
+
+            // A quick windowed test shouldn't cover other windows or hide the
+            // cursor — those make the test window awkward to inspect and close.
+            if (forTest && (field.Id == "topmost" || field.Id == "hideCursor"))
             {
                 continue;
             }
@@ -323,12 +326,29 @@ internal sealed partial class CommandBuilder
             return "\"\"";
         }
 
-        if (!token.Any(char.IsWhiteSpace) && !token.Contains('"'))
+        if (!NeedsQuoting(token))
         {
             return token;
         }
 
         return "\"" + token.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+    }
+
+    // A copied command may be pasted into cmd.exe or PowerShell, where these
+    // characters are shell-significant (an unquoted '&' in an image URL, for
+    // instance, would truncate the command). Wrapping the token in double
+    // quotes makes the whole value literal in both shells.
+    private static bool NeedsQuoting(string token)
+    {
+        foreach (var c in token)
+        {
+            if (char.IsWhiteSpace(c) || c is '"' or '&' or '|' or '<' or '>' or '^' or '(' or ')' or '%' or '!')
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private IEnumerable<ArgumentDefinition> Fields => _metadata.Groups.SelectMany(static g => g.Fields);
@@ -359,6 +379,13 @@ internal sealed partial class CommandBuilder
     // Build a URL-style query string for the live preview window: ?key=val&key=val
     // Web-only fields are emitted (the app-level flags like --windowed don't
     // apply to the preview, which is always windowed). Values are URL-encoded.
+    //
+    // Defaults are SKIPPED, matching the actual launch command (AddWebTokens).
+    // This matters for correctness, not just size: the matrix app treats the
+    // mere presence of some params as an override. e.g. stripePass.js uses the
+    // effect's built-in colors (pride = rainbow, trans = flag) only when
+    // `stripeColors` is absent — so always emitting the default stripeColors
+    // would flatten pride/trans/stripes into the same look.
     public string BuildWebQueryString(JsonObject values)
     {
         var pairs = new List<string>();
@@ -373,6 +400,8 @@ internal sealed partial class CommandBuilder
 
             var value = values[field.Id];
             if (value is null) continue;
+
+            if (IsDefault(field, value)) continue;
 
             var serialized = SerializeWebValue(field, value);
             if (string.IsNullOrWhiteSpace(serialized)) continue;

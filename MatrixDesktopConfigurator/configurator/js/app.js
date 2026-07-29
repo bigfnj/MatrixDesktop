@@ -1,3 +1,5 @@
+import { openColorPicker } from "./colorPicker.js";
+
 const state = {
 	metadata: null,
 	defaultDraft: {},
@@ -6,6 +8,7 @@ const state = {
 	presets: [],
 	selectedPresetId: null,
 	activeGroupId: null,
+	filter: "",
 	dirty: false,
 	testRunning: false,
 	requestId: 0,
@@ -14,8 +17,12 @@ const state = {
 	commandTimer: 0,
 	// v1.0 additions
 	uiTheme: "dark",
-	previewOpen: false,
 	previewTimer: 0,
+	// Embedded live-preview pane (iframe of the matrix web app).
+	previewVisible: false,
+	previewAvailable: false,
+	previewOrigin: null,
+	previewLastUrl: "",
 };
 
 const el = {
@@ -27,7 +34,9 @@ const el = {
 	renamePresetButton: document.querySelector("#renamePresetButton"),
 	deletePresetButton: document.querySelector("#deletePresetButton"),
 	groupNav: document.querySelector("#groupNav"),
-	fieldGrid: document.querySelector("#fieldGrid"),
+	fieldFilter: document.querySelector("#fieldFilter"),
+	sectionJump: document.querySelector("#sectionJump"),
+	fieldSurface: document.querySelector("#fieldSurface"),
 	commandOutput: document.querySelector("#commandOutput"),
 	randomizeScope: document.querySelector("#randomizeScope"),
 	randomizeButton: document.querySelector("#randomizeButton"),
@@ -45,6 +54,8 @@ const el = {
 	exportPsButton: document.querySelector("#exportPsButton"),
 	themeButton: document.querySelector("#themeButton"),
 	previewButton: document.querySelector("#previewButton"),
+	previewPane: document.querySelector("#previewPane"),
+	previewFrame: document.querySelector("#previewFrame"),
 	helpButton: document.querySelector("#helpButton"),
 	helpModal: document.querySelector("#helpModal"),
 	helpBody: document.querySelector("#helpBody"),
@@ -103,8 +114,32 @@ const format01 = (value) => {
 	return Number.isInteger(number) ? String(number) : number.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
 
+const normalizeColor = (color) => ({
+	r: clamp01(Number(color?.r)),
+	g: clamp01(Number(color?.g)),
+	b: clamp01(Number(color?.b)),
+});
+
+// A clickable swatch that opens the shared popover picker. Replaces the native
+// <input type="color"> (OS dialog, 8-bit only, no inline dragging).
+const makeSwatchButton = (color, { disabled = false } = {}) => {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "color-swatch";
+	button.style.background = colorToHex(color);
+	button.disabled = disabled;
+	button.title = "Click to edit color";
+	button.setAttribute("aria-label", "Edit color");
+	return button;
+};
+
 const allFields = () => state.metadata.groups.flatMap((group) => group.fields);
 const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "transPride"]);
+
+// Fields whose value changes which *other* fields are gated (see
+// getDisabledReason). Editing one of these must re-render the whole group so
+// the dependent fields pick up their new enabled/disabled state.
+const gatingFields = new Set(["windowMode", "effect", "clickRipples"]);
 
 const normalizeDraft = (draft) => ({
 	...clone(state.defaultDraft),
@@ -165,19 +200,38 @@ const updateDraftValue = (field, value) => {
 	schedulePreviewPush();
 };
 
-// v1.0: live-preview debounce. We only push to the preview window if it's
-// actually open — when closed, the configurator's regular state machine is
-// untouched (no extra host roundtrips).
+// Live-preview debounce. Only refreshes the embedded iframe when the pane is
+// visible and the matrix assets were found — otherwise it's a no-op (no host
+// roundtrips). Per the chosen design, each settled change reloads the preview
+// with the new query string (debounced), rather than patching it live.
 const schedulePreviewPush = () => {
-	if (!state.previewOpen) return;
+	if (!state.previewVisible || !state.previewAvailable) return;
 	window.clearTimeout(state.previewTimer);
 	state.previewTimer = window.setTimeout(async () => {
 		try {
-			await requestHost("previewCommand", { draft: state.draft });
+			const result = await requestHost("buildWebQuery", { draft: state.draft });
+			const url = `${state.previewOrigin}index.html${result?.query || ""}`;
+			if (el.previewFrame && url !== state.previewLastUrl) {
+				state.previewLastUrl = url;
+				el.previewFrame.src = url;
+			}
 		} catch (error) {
-			setStatus(`Preview push failed: ${error.message}`, "error");
+			setStatus(`Preview update failed: ${error.message}`, "error");
 		}
 	}, 250);
+};
+
+const setPreviewVisible = (visible) => {
+	state.previewVisible = Boolean(visible) && state.previewAvailable;
+	document.body.classList.toggle("preview-hidden", !state.previewVisible);
+	if (el.previewButton) {
+		el.previewButton.textContent = state.previewVisible ? "Hide preview" : "Show preview";
+		el.previewButton.title = state.previewVisible ? "Hide the live preview pane" : "Show the live preview pane";
+	}
+	if (state.previewVisible) {
+		state.previewLastUrl = ""; // force a refresh on next push
+		schedulePreviewPush();
+	}
 };
 
 const applyTheme = (theme) => {
@@ -202,28 +256,93 @@ const renderPresetSelect = () => {
 	el.presetSelect.value = state.selectedPresetId || "";
 };
 
-const renderGroups = () => {
-	el.groupNav.replaceChildren();
+// Left-rail jump list: one button per group that scrolls its section into
+// view. Replaces the old tab behavior (which showed one group at a time).
+const renderNav = () => {
+	el.sectionJump.replaceChildren();
 	for (const group of state.metadata.groups) {
 		const button = document.createElement("button");
 		button.type = "button";
+		button.dataset.group = group.id;
 		button.textContent = group.title;
 		button.className = group.id === state.activeGroupId ? "active" : "";
 		button.addEventListener("click", () => {
 			state.activeGroupId = group.id;
-			renderGroups();
-			renderFields();
+			const section = document.getElementById(`section-${group.id}`);
+			if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+			highlightNav();
 		});
-		el.groupNav.append(button);
+		el.sectionJump.append(button);
 	}
 };
 
-const renderFields = () => {
-	const group = state.metadata.groups.find((item) => item.id === state.activeGroupId) || state.metadata.groups[0];
-	el.fieldGrid.replaceChildren();
-	for (const field of group.fields) {
-		el.fieldGrid.append(renderField(field));
+const highlightNav = () => {
+	for (const button of el.sectionJump.querySelectorAll("button")) {
+		button.classList.toggle("active", button.dataset.group === state.activeGroupId);
 	}
+};
+
+// Highlight the section nearest the top of the scroll surface as the user
+// scrolls, so the jump list acts as a position indicator too.
+const updateActiveOnScroll = () => {
+	const sections = [...el.fieldSurface.querySelectorAll(".field-section")];
+	if (sections.length === 0) return;
+	const surfaceTop = el.fieldSurface.getBoundingClientRect().top;
+	let current = sections[0].id.replace("section-", "");
+	for (const section of sections) {
+		if (section.getBoundingClientRect().top - surfaceTop <= 12) {
+			current = section.id.replace("section-", "");
+		}
+	}
+	if (current && current !== state.activeGroupId) {
+		state.activeGroupId = current;
+		highlightNav();
+	}
+};
+
+// Render every group as a section (sticky header + field grid) into one
+// scrollable surface. A non-empty filter keeps only fields whose label (or
+// group title) matches, and drops emptied sections. Scroll position is
+// preserved so a gating-triggered re-render doesn't jump the view.
+const renderFields = () => {
+	const surface = el.fieldSurface;
+	const prevScroll = surface.scrollTop;
+	surface.replaceChildren();
+
+	const filter = state.filter.trim().toLowerCase();
+	for (const group of state.metadata.groups) {
+		const matching = filter
+			? group.fields.filter((field) =>
+				field.label.toLowerCase().includes(filter) || group.title.toLowerCase().includes(filter))
+			: group.fields;
+		if (matching.length === 0) continue;
+
+		const section = document.createElement("section");
+		section.className = "field-section";
+		section.id = `section-${group.id}`;
+
+		const header = document.createElement("h2");
+		header.className = "section-title";
+		header.textContent = group.title;
+		section.append(header);
+
+		const grid = document.createElement("div");
+		grid.className = "field-grid";
+		for (const field of matching) {
+			grid.append(renderField(field));
+		}
+		section.append(grid);
+		surface.append(section);
+	}
+
+	if (surface.childElementCount === 0) {
+		const empty = document.createElement("div");
+		empty.className = "empty-hint";
+		empty.textContent = `No settings match “${state.filter}”.`;
+		surface.append(empty);
+	}
+
+	surface.scrollTop = prevScroll;
 };
 
 const renderField = (field) => {
@@ -257,6 +376,15 @@ const getDisabledReason = (field) => {
 	if (field.id === "stripeColors" && !stripeEffects.has(effect)) {
 		return "Only used by stripe-based effects: stripes, custom stripes, pride, trans, and trans pride.";
 	}
+	if (field.id === "url" && effect !== "image") {
+		return "Only used when Effect is Image.";
+	}
+	if (field.id === "camera" && effect !== "mirror") {
+		return "Only used by the Mirror effect (webcam input).";
+	}
+	if (field.id === "clickRippleShape" && !state.draft.clickRipples) {
+		return "Only used when Click ripples is enabled.";
+	}
 	return "";
 };
 
@@ -283,7 +411,12 @@ const renderBoolField = (field) => {
 	input.type = "checkbox";
 	input.disabled = Boolean(getDisabledReason(field));
 	input.checked = Boolean(state.draft[field.id]);
-	input.addEventListener("change", () => updateDraftValue(field, input.checked));
+	input.addEventListener("change", () => {
+		updateDraftValue(field, input.checked);
+		if (gatingFields.has(field.id)) {
+			renderFields();
+		}
+	});
 	shell.append(input);
 	return shell;
 };
@@ -298,7 +431,7 @@ const renderSelectField = (field) => {
 	select.disabled = Boolean(getDisabledReason(field));
 	select.addEventListener("change", () => {
 		updateDraftValue(field, select.value);
-		if (field.id === "windowMode" || field.id === "effect") {
+		if (gatingFields.has(field.id)) {
 			renderFields();
 		}
 	});
@@ -356,7 +489,34 @@ const renderNumberField = (field) => {
 		updateDraftValue(field, value);
 		applyValidation();
 	});
-	input.addEventListener("blur", applyValidation);
+
+	// B5: enforce the field's range on blur rather than only flagging it red.
+	// Empty reverts to the field default; out-of-range clamps to min/max. This
+	// runs on blur (not on each keystroke) so it never fights mid-typing.
+	input.addEventListener("blur", () => {
+		if (input.disabled) {
+			applyValidation();
+			return;
+		}
+		if (input.value === "") {
+			const fallback = field.defaultValue;
+			if (fallback == null) {
+				updateDraftValue(field, null);
+			} else {
+				input.value = fallback;
+				updateDraftValue(field, toNumber(fallback, 0));
+			}
+		} else {
+			let num = toNumber(input.value, field.defaultValue ?? 0);
+			if (field.min != null && num < field.min) num = field.min;
+			if (field.max != null && num > field.max) num = field.max;
+			if (String(num) !== input.value) {
+				input.value = num;
+				updateDraftValue(field, num);
+			}
+		}
+		applyValidation();
+	});
 	applyValidation();
 
 	shell.append(input);
@@ -378,32 +538,43 @@ const renderColorField = (field) => {
 	const shell = createFieldShell(field);
 	const editor = document.createElement("div");
 	editor.className = "color-editor";
-	const color = state.draft[field.id] || { r: 0, g: 0, b: 0 };
-	const swatch = document.createElement("input");
-	swatch.type = "color";
-	swatch.value = colorToHex(color);
+	let color = normalizeColor(state.draft[field.id]);
+
+	const swatch = makeSwatchButton(color);
 	const numbers = document.createElement("div");
 	numbers.className = "rgb-grid";
-	const numberInputs = ["r", "g", "b"].map((channel) => {
+	const inputs = {};
+	for (const channel of ["r", "g", "b"]) {
 		const input = document.createElement("input");
 		input.type = "number";
 		input.min = "0";
 		input.max = "1";
 		input.step = "0.01";
 		input.value = format01(color[channel]);
+		inputs[channel] = input;
 		numbers.append(input);
-		return [channel, input];
-	});
-	const push = (next) => {
-		updateDraftValue(field, next);
-		renderFields();
+	}
+
+	// In-place updates only — never renderFields() here, so focus is retained
+	// while typing (the old code rebuilt the whole grid on every keystroke).
+	const commit = (next, { syncInputs = true } = {}) => {
+		color = normalizeColor(next);
+		swatch.style.background = colorToHex(color);
+		if (syncInputs) {
+			inputs.r.value = format01(color.r);
+			inputs.g.value = format01(color.g);
+			inputs.b.value = format01(color.b);
+		}
+		updateDraftValue(field, color);
 	};
-	swatch.addEventListener("input", () => push(hexToColor(swatch.value)));
-	for (const [channel, input] of numberInputs) {
-		input.addEventListener("input", () => {
-			push({ ...color, [channel]: clamp01(toNumber(input.value, color[channel])) });
+
+	for (const channel of ["r", "g", "b"]) {
+		inputs[channel].addEventListener("input", () => {
+			commit({ ...color, [channel]: clamp01(toNumber(inputs[channel].value, color[channel])) }, { syncInputs: false });
 		});
 	}
+	swatch.addEventListener("click", () => openColorPicker(swatch, color, (next) => commit(next)));
+
 	editor.append(swatch, numbers);
 	shell.append(editor);
 	return shell;
@@ -432,49 +603,66 @@ const renderPaletteField = (field) => {
 const renderPaletteRow = (field, stops, stop, index) => {
 	const row = document.createElement("div");
 	row.className = "list-row";
-	const swatch = document.createElement("input");
-	swatch.type = "color";
-	swatch.value = colorToHex(stop);
-	const label = document.createElement("input");
-	label.type = "text";
-	label.value = `${format01(stop.r)}, ${format01(stop.g)}, ${format01(stop.b)}`;
-	label.readOnly = true;
+	let value = { ...normalizeColor(stop), at: clamp01(Number(stop.at)) };
+
+	const swatch = makeSwatchButton(value);
+	const hex = document.createElement("input");
+	hex.type = "text";
+	hex.className = "hex-input";
+	hex.spellcheck = false;
+	hex.maxLength = 7;
+	hex.value = colorToHex(value);
 	const at = document.createElement("input");
 	at.type = "number";
 	at.min = "0";
 	at.max = "1";
 	at.step = "0.01";
-	at.value = format01(stop.at);
+	at.value = format01(value.at);
 	const up = miniButton("↑");
 	const down = miniButton("↓");
 	const remove = miniButton("×");
-	const save = () => {
+
+	// Color/hex/at edits update in place (no renderFields → no focus loss).
+	const persist = () => {
+		stops[index] = { ...value };
+		updateDraftValue(field, stops);
+	};
+	// Reorder/remove are discrete clicks, so a group re-render is fine there.
+	const rebuild = () => {
 		updateDraftValue(field, stops);
 		renderFields();
 	};
-	swatch.addEventListener("input", () => {
-		stops[index] = { ...stops[index], ...hexToColor(swatch.value) };
-		save();
+
+	swatch.addEventListener("click", () => openColorPicker(swatch, value, (next) => {
+		value = { ...value, ...normalizeColor(next) };
+		swatch.style.background = colorToHex(value);
+		hex.value = colorToHex(value);
+		persist();
+	}));
+	hex.addEventListener("input", () => {
+		value = { ...value, ...hexToColor(hex.value) };
+		swatch.style.background = colorToHex(value);
+		persist();
 	});
 	at.addEventListener("input", () => {
-		stops[index] = { ...stops[index], at: clamp01(toNumber(at.value, stops[index].at)) };
-		save();
+		value = { ...value, at: clamp01(toNumber(at.value, value.at)) };
+		persist();
 	});
 	up.disabled = index === 0;
 	up.addEventListener("click", () => {
 		[stops[index - 1], stops[index]] = [stops[index], stops[index - 1]];
-		save();
+		rebuild();
 	});
 	down.disabled = index === stops.length - 1;
 	down.addEventListener("click", () => {
 		[stops[index + 1], stops[index]] = [stops[index], stops[index + 1]];
-		save();
+		rebuild();
 	});
 	remove.addEventListener("click", () => {
 		stops.splice(index, 1);
-		save();
+		rebuild();
 	});
-	row.append(swatch, label, at, up, down, remove);
+	row.append(swatch, hex, at, up, down, remove);
 	return row;
 };
 
@@ -503,41 +691,59 @@ const renderStripesField = (field) => {
 const renderStripeRow = (field, colors, color, index, disabled) => {
 	const row = document.createElement("div");
 	row.className = "list-row stripe-row";
-	const swatch = document.createElement("input");
-	swatch.type = "color";
-	swatch.value = colorToHex(color);
-	swatch.disabled = disabled;
-	const label = document.createElement("input");
-	label.type = "text";
-	label.value = `${format01(color.r)}, ${format01(color.g)}, ${format01(color.b)}`;
-	label.readOnly = true;
+	let value = normalizeColor(color);
+
+	const swatch = makeSwatchButton(value, { disabled });
+	const hex = document.createElement("input");
+	hex.type = "text";
+	hex.className = "hex-input";
+	hex.spellcheck = false;
+	hex.maxLength = 7;
+	hex.value = colorToHex(value);
+	hex.disabled = disabled;
 	const up = miniButton("↑");
 	const down = miniButton("↓");
 	const remove = miniButton("×");
-	const save = () => {
+
+	const persist = () => {
+		colors[index] = { ...value };
+		updateDraftValue(field, colors);
+	};
+	const rebuild = () => {
 		updateDraftValue(field, colors);
 		renderFields();
 	};
-	swatch.addEventListener("input", () => {
-		colors[index] = { ...colors[index], ...hexToColor(swatch.value) };
-		save();
+
+	swatch.addEventListener("click", () => {
+		if (disabled) return;
+		openColorPicker(swatch, value, (next) => {
+			value = normalizeColor(next);
+			swatch.style.background = colorToHex(value);
+			hex.value = colorToHex(value);
+			persist();
+		});
+	});
+	hex.addEventListener("input", () => {
+		value = normalizeColor(hexToColor(hex.value));
+		swatch.style.background = colorToHex(value);
+		persist();
 	});
 	up.disabled = disabled || index === 0;
 	up.addEventListener("click", () => {
 		[colors[index - 1], colors[index]] = [colors[index], colors[index - 1]];
-		save();
+		rebuild();
 	});
 	down.disabled = disabled || index === colors.length - 1;
 	down.addEventListener("click", () => {
 		[colors[index + 1], colors[index]] = [colors[index], colors[index + 1]];
-		save();
+		rebuild();
 	});
 	remove.disabled = disabled;
 	remove.addEventListener("click", () => {
 		colors.splice(index, 1);
-		save();
+		rebuild();
 	});
-	row.append(swatch, label, up, down, remove);
+	row.append(swatch, hex, up, down, remove);
 	return row;
 };
 
@@ -550,9 +756,13 @@ const miniButton = (text) => {
 
 const refreshAll = () => {
 	renderPresetSelect();
-	renderGroups();
+	renderNav();
 	renderFields();
 	scheduleCommandBuild();
+	// Wholesale draft changes (preset select, New, Import, Randomize) all route
+	// through here; push them to the live preview too — previously only
+	// per-field edits (updateDraftValue) refreshed it.
+	schedulePreviewPush();
 };
 
 const saveCurrentPreset = async (forceName = false) => {
@@ -676,6 +886,20 @@ const randomizeDraft = async () => {
 };
 
 const bindEvents = () => {
+	el.fieldFilter.addEventListener("input", () => {
+		state.filter = el.fieldFilter.value;
+		renderFields();
+	});
+
+	let scrollRaf = 0;
+	el.fieldSurface.addEventListener("scroll", () => {
+		if (scrollRaf) return;
+		scrollRaf = window.requestAnimationFrame(() => {
+			scrollRaf = 0;
+			updateActiveOnScroll();
+		});
+	});
+
 	el.presetSelect.addEventListener("change", () => {
 		const id = el.presetSelect.value || null;
 		const preset = state.presets.find((item) => item.id === id);
@@ -760,26 +984,13 @@ const bindEvents = () => {
 	}
 
 	if (el.previewButton) {
-		el.previewButton.addEventListener("click", async () => {
-			try {
-				if (state.previewOpen) {
-					await requestHost("closePreview");
-					state.previewOpen = false;
-					el.previewButton.textContent = "Preview";
-					setStatus("Preview closed.", "ok");
-				} else {
-					const result = await requestHost("openPreview");
-					if (result?.opened) {
-						state.previewOpen = true;
-						el.previewButton.textContent = "Hide Preview";
-						setStatus(result.alreadyOpen ? "Preview already open." : "Preview opened.", "ok");
-					} else {
-						setStatus(`Preview could not open: ${result?.message ?? "unknown reason"}`, "error");
-					}
-				}
-			} catch (error) {
-				setStatus(`Preview toggle failed: ${error.message}`, "error");
+		el.previewButton.addEventListener("click", () => {
+			if (!state.previewAvailable) {
+				setStatus("Live preview unavailable: matrix web assets not found next to the configurator.", "error");
+				return;
 			}
+			setPreviewVisible(!state.previewVisible);
+			setStatus(state.previewVisible ? "Preview shown." : "Preview hidden.", "ok");
 		});
 	}
 
@@ -820,9 +1031,21 @@ const init = async () => {
 		// never sees a flash of the wrong palette during cold start.
 		applyTheme(payload.state?.uiTheme || "dark");
 
+		// Embedded preview availability comes from the host (it locates the
+		// matrix web/ assets and exposes a virtual-host origin for the iframe).
+		const preview = payload.preview || {};
+		state.previewAvailable = Boolean(preview.available && preview.origin);
+		state.previewOrigin = preview.origin || null;
+		if (!state.previewAvailable && el.previewButton) {
+			el.previewButton.disabled = true;
+			el.previewButton.title = "Matrix web assets not found next to the configurator";
+		}
+
 		bindEvents();
 		setDirty(false);
 		refreshAll();
+		// Show the preview by default when it's available.
+		setPreviewVisible(state.previewAvailable);
 		setStatus("Ready.");
 	} catch (error) {
 		setStatus(error.message, "error");
