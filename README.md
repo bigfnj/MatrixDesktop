@@ -4,7 +4,24 @@ This is a minimal Windows desktop wrapper around the original **Rezmason/matrix*
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
-Current version: **1.0.0** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+Current version: **1.0.1** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+
+## Visual examples
+
+These screenshots are rendered by the same bundled offline web app that MatrixDesktop hosts in WebView2.
+
+<table>
+  <tr>
+    <td><img src="docs/images/default-rain.png" alt="Classic green Matrix digital rain" width="420"></td>
+    <td><img src="docs/images/paradise-theme.png" alt="Warm orange Paradise Matrix preset" width="420"></td>
+    <td><img src="docs/images/pride-stripes.png" alt="Rainbow pride stripe Matrix effect" width="420"></td>
+  </tr>
+  <tr>
+    <td><strong>Classic rain</strong><br><code>MatrixDesktop.exe --version classic</code></td>
+    <td><strong>Paradise preset</strong><br><code>MatrixDesktop.exe --version paradise</code></td>
+    <td><strong>Pride stripes</strong><br><code>MatrixDesktop.exe --effect pride</code></td>
+  </tr>
+</table>
 
 ## v1.0 highlights
 
@@ -389,3 +406,4 @@ Output:
 The `MatrixDesktop` wrapper code in this solution is provided as-is.
 
 The included `web/` folder is the upstream **matrix** project and remains under its original MIT license (see `web/LICENSE`).
+
