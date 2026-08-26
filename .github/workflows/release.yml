@@ -74,10 +74,27 @@ jobs:
           # Copy MatrixDesktop publish output (EXE + web assets + Matrix.ico)
           Copy-Item -Recurse "MatrixDesktop\bin\Publish\win-x64-fd\*" $stage
 
-          # Copy Configurator EXE + configurator web assets into the same stage
-          # alongside MatrixDesktop.exe so the user gets a single drop.
-          Copy-Item "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\MatrixDesktopConfigurator.exe" $stage
-          Copy-Item -Recurse "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\configurator" $stage
+          # Copy the complete framework-dependent Configurator publish output
+          # into the same stage. The EXE is an apphost and requires its sibling
+          # DLL, deps.json, runtimeconfig.json, and managed/native dependencies.
+          Copy-Item -Recurse -Force "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\*" $stage
+
+          # Do not publish a ZIP containing an apphost without its managed app.
+          $requiredFiles = @(
+            "MatrixDesktop.exe",
+            "MatrixDesktop.dll",
+            "MatrixDesktop.runtimeconfig.json",
+            "MatrixDesktopConfigurator.exe",
+            "MatrixDesktopConfigurator.dll",
+            "MatrixDesktopConfigurator.deps.json",
+            "MatrixDesktopConfigurator.runtimeconfig.json"
+          )
+          $missingFiles = $requiredFiles | Where-Object {
+            -not (Test-Path -LiteralPath (Join-Path $stage $_) -PathType Leaf)
+          }
+          if ($missingFiles) {
+            throw "Release payload is missing required files: $($missingFiles -join ', ')"
+          }
 
           # Top-level docs and license go into the zip too
           Copy-Item README.md  $stage
@@ -110,3 +127,4 @@ jobs:
           files: |
             ${{ steps.package.outputs.zip }}
             ${{ steps.package.outputs.zip }}.sha256
+
