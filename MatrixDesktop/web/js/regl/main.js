@@ -1,4 +1,4 @@
-import { makeFullScreenQuad, makePipeline } from "./utils.js";
+﻿import { makeFullScreenQuad, makePipeline } from "./utils.js";
 
 import makeRain from "./rainPass.js";
 import makeBloomPass from "./bloomPass.js";
@@ -79,6 +79,14 @@ export default async (canvas, config) => {
 		}
 	};
 	resize();
+
+	// MD-25: cleanup() was only reachable when config.once was set, so in normal operation
+	// none of the teardown this codebase already writes ever ran: the mirror pass's window
+	// click listener, the click-ripple canvas listener, the resize listener, and
+	// stopCamera(), which is what actually releases the webcam and turns its indicator off.
+	// pagehide covers navigation and window close, and it fires for the configurator's
+	// preview iframe every time that reloads.
+	window.addEventListener("pagehide", cleanup, { once: true });
 
 	if (config.useCamera) {
 		await setupCamera();

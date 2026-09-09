@@ -1,4 +1,4 @@
-import { loadText, makePassFBO, makePass } from "./utils.js";
+﻿import { loadText, makePassFBO, makePass } from "./utils.js";
 
 // The bloom pass is basically an added high-pass blur.
 // The blur approximation is the sum of a pyramid of downscaled, blurred textures.
@@ -55,8 +55,13 @@ export default ({ regl, config }, inputs) => {
 		uniforms: {
 			tex: regl.prop("tex"),
 			direction: regl.prop("direction"),
-			height: regl.context("viewportWidth"),
-			width: regl.context("viewportHeight"),
+			// MD-44 (upstream): these two were swapped. bloomPass.blur.frag.glsl computes
+			// `size = width > height ? vec2(width/height, 1.) : vec2(1., height/width)` and
+			// divides by max(width, height), so feeding the viewport's width in as `height`
+			// inverted the aspect correction and made the blur anisotropic in the wrong
+			// axis on any non-square target.
+			width: regl.context("viewportWidth"),
+			height: regl.context("viewportHeight"),
 		},
 		framebuffer: regl.prop("fbo"),
 	});
@@ -77,7 +82,12 @@ export default ({ regl, config }, inputs) => {
 			primary: inputs.primary,
 			bloom: output,
 		},
-		Promise.all([highPassFrag.loaded, blurFrag.loaded]),
+		// MD-43 (upstream): combineFrag was missing here, so the pass could report ready
+		// while its combine shader was still loading. loadText returns "" until the fetch
+		// resolves, and regl.frame starts as soon as every step's `ready` settles, so the
+		// first combine draw could compile an EMPTY fragment shader. Identical in kind to
+		// the rainPassEffect.loaded omission already fixed in the click-ripples commit.
+		Promise.all([highPassFrag.loaded, blurFrag.loaded, combineFrag.loaded]),
 		(w, h) => {
 			// The blur pyramids can be lower resolution than the screen.
 			resizePyramid(highPassPyramid, w, h, bloomSize);

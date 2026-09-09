@@ -29,7 +29,7 @@ const makeConfigBuffer = (device, configUniforms, config, density, gridSize, gly
 	return makeUniformBuffer(device, configUniforms, configData);
 };
 
-export default ({ config, device, timeBuffer, canvas }) => {
+export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
 	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
 
@@ -207,6 +207,7 @@ export default ({ config, device, timeBuffer, canvas }) => {
 		}
 		const screenSize = aspectRatio > 1 ? [1, aspectRatio] : [1 / aspectRatio, 1];
 		device.queue.writeBuffer(sceneBuffer, 0, sceneUniforms.toBuffer({ screenSize, camera, transform }));
+		clickRipples.syncTime(elapsedSeconds?.() ?? 0);
 		device.queue.writeBuffer(clickRippleBuffer, 0, clickRippleUniforms.toBuffer({ screenAspectRatio: clickRipples.aspectRatio, touches: clickRipples.touches }));
 		clickRipples.markClean();
 
@@ -225,6 +226,9 @@ export default ({ config, device, timeBuffer, canvas }) => {
 
 	const run = (encoder, shouldRender) => {
 		// We render the code into an Target using MSDFs: https://github.com/Chlumsky/msdfgen
+		// MD-04: sync every frame, not only when the buffer needs rewriting, so a click
+		// arriving between frames is stamped against a current clock.
+		clickRipples.syncTime(elapsedSeconds?.() ?? 0);
 		if (clickRipples.changed) {
 			device.queue.writeBuffer(clickRippleBuffer, 0, clickRippleUniforms.toBuffer({ screenAspectRatio: clickRipples.aspectRatio, touches: clickRipples.touches }));
 			clickRipples.markClean();

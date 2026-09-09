@@ -1,4 +1,4 @@
-const recordedDevice = {
+﻿const recordedDevice = {
 	buttons: [0, 0, 0, 0],
 	calibration: {
 		DPI: { value: 324 },
@@ -75,13 +75,35 @@ export default async (useHoloplay = false, useRecordedDevice = false) => {
 		return interpretDevice(null);
 	}
 	const HoloPlayCore = await import("../../lib/holoplaycore.module.js");
-	const device = await new Promise(
-		(resolve, reject) =>
+
+	// MD-46 (upstream): this promise had no timeout, and because its error callback also
+	// resolved rather than rejecting, a HoloPlay client that never invoked either callback
+	// left the caller awaiting forever. regl/main.js awaits this before building the
+	// pipeline, so the symptom was a permanently black window with no diagnostic.
+	const device = await new Promise((resolve) => {
+		let settled = false;
+		const settle = (value) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(value);
+		};
+
+		const timer = setTimeout(() => {
+			console.warn("HoloPlay service did not respond within 3s; continuing without a Looking Glass device.");
+			settle(null);
+		}, 3000);
+
+		try {
 			new HoloPlayCore.Client(
-				(data) => resolve(data.devices?.[0]),
-				(error) => resolve(null)
-			)
-	);
+				(data) => settle(data.devices?.[0]),
+				() => settle(null)
+			);
+		} catch (error) {
+			console.warn("HoloPlay client could not be created:", error);
+			settle(null);
+		}
+	});
 	if (device == null && useRecordedDevice) {
 		return interpretDevice(recordedDevice);
 	}

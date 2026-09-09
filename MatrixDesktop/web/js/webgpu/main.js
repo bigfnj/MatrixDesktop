@@ -49,9 +49,16 @@ export default async (canvas, config) => {
 		}
 	};
 	
-	if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
-		canvas.addEventListener("dblclick", dblclickHandler);
-	}
+	// MD-45: attach only once the device exists. This used to run before
+	// requestAdapter/requestDevice, which throw when WebGPU is unavailable, and cleanup()
+	// is not invoked on that path. js/main.js catches and falls through to the regl
+	// renderer, which attaches its OWN dblclick handler to the same canvas, so after a
+	// fallback a double-click toggled fullscreen twice.
+	const attachFullscreenToggle = () => {
+		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
+			canvas.addEventListener("dblclick", dblclickHandler);
+		}
+	};
 	
 	const cleanup = () => {
 		if (cleanedUp) {
@@ -66,6 +73,13 @@ export default async (canvas, config) => {
 			stopCamera();
 		}
 	};
+
+	// MD-25: cleanup() was only reachable when config.once was set, so in normal operation
+	// none of the teardown this codebase already writes ever ran: the mirror pass's window
+	// click listener, the click-ripple canvas listener, and stopCamera(), which is what
+	// actually releases the webcam and turns its indicator off. pagehide covers navigation
+	// and window close, and it fires for the configurator's preview iframe every reload.
+	window.addEventListener("pagehide", cleanup, { once: true });
 
 	if (config.useCamera) {
 		await setupCamera();
@@ -105,6 +119,16 @@ export default async (canvas, config) => {
 				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
 			});
 
+	// Safe now: the device exists, so this function cannot be reached by a fallback path.
+	attachFullscreenToggle();
+
+	// MD-04: one source of truth for "what time does the shader think it is". This value
+	// goes into the time buffer each frame AND is handed to the rain pass, so a click stamp
+	// and the shader clock cannot come from different origins. `start` is set on the first
+	// rAF frame, so before then this reads 0 rather than NaN.
+	let start = NaN;
+	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : (performance.now() - start) / 1000);
+
 	const context = {
 		config,
 		adapter,
@@ -116,6 +140,7 @@ export default async (canvas, config) => {
 		cameraAspectRatio,
 		cameraSize,
 		canvas,
+		elapsedSeconds,
 	};
 
 	const effectName = config.effect in effects ? config.effect : "palette";
@@ -123,8 +148,8 @@ export default async (canvas, config) => {
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
 	let frames = 0;
-	let start = NaN;
 	let last = NaN;
+
 	let outputs;
 	const canvasSize = [0, 0];
 
