@@ -11,7 +11,6 @@ html[data-theme="dark"] {
 	--muted: #99aaa4;
 	--green: #68d47c;
 	--teal: #63c7d1;
-	--amber: #d7b45c;
 	--danger: #db6d6d;
 	--input: #0f1517;
 	--focus: #8ce99f;
@@ -51,7 +50,6 @@ html[data-theme="light"] {
 	--muted: #5c6770;
 	--green: #1b8a2f;
 	--teal: #0c7d8c;
-	--amber: #92710d;
 	--danger: #b21f1f;
 	--input: #ffffff;
 	--focus: #1f9e57;
@@ -156,7 +154,22 @@ button:focus-visible {
 .app-shell {
 	display: grid;
 	grid-template-rows: auto 1fr auto;
-	min-height: 100%;
+
+	/* height, NOT min-height. With min-height the block size is indefinite, so CSS
+	   Grid sizes the 1fr track to its max-content contribution rather than to the
+	   leftover viewport space, and the workspace grows to the full unscrolled height
+	   of every field. Two visible consequences, both shipped in 1.0.2:
+
+	     - the command panel footer (generated command, Copy, Test Argument) was
+	       pushed off the bottom of the window entirely
+	     - the preview iframe became roughly 488x5200, aspect 0.094, and since
+	       numColumns sets the cell count along the LONGER axis the renderer drew
+	       about 7 enormous columns instead of ~80, at 8.4x the necessary fill rate
+
+	   min-height: 0 on .workspace sets that track's minimum to 0 but does nothing to
+	   max-content sizing, and overflow only zeroes the automatic minimum size. */
+	height: 100%;
+	overflow: hidden;
 }
 
 .topbar {
@@ -462,7 +475,6 @@ h1 {
 	width: 64px;
 }
 
-.mini-actions button,
 .list-row button {
 	width: 34px;
 	min-width: 34px;

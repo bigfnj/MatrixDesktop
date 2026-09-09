@@ -9,8 +9,10 @@ const state = {
 	selectedPresetId: null,
 	activeGroupId: null,
 	filter: "",
-	dirty: false,
-	testRunning: false,
+	// dirty and testRunning used to live here. Both were written and never read once:
+	// the save indicator is driven by setSaveState's argument, and the Stop Test button's
+	// own disabled property is the single source of truth for whether a test is running.
+	// Keeping a second copy of state that nothing consults is how the two get to disagree.
 	requestId: 0,
 	pending: new Map(),
 	saveTimer: 0,
@@ -156,7 +158,6 @@ const setSaveState = (text) => {
 };
 
 const setDirty = (dirty) => {
-	state.dirty = dirty;
 	setSaveState(dirty ? "Draft changed" : "Draft saved");
 };
 
@@ -957,7 +958,6 @@ const bindEvents = () => {
 	el.testButton.addEventListener("click", async () => {
 		try {
 			const result = await requestHost("testCommand", { draft: state.draft });
-			state.testRunning = true;
 			el.stopButton.disabled = false;
 			setStatus(`Launched test process ${result.processId}.`, "ok");
 		} catch (error) {
@@ -968,7 +968,6 @@ const bindEvents = () => {
 	el.stopButton.addEventListener("click", async () => {
 		try {
 			await requestHost("stopTest");
-			state.testRunning = false;
 			el.stopButton.disabled = true;
 			setStatus("Test process stopped.", "ok");
 		} catch (error) {
