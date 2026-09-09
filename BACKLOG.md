@@ -57,11 +57,18 @@ Found and verified during that pass, deliberately not fixed. Each says why.
   fix is `DebugType=embedded`, which emits no separate `.pdb` (so the payload stays clean and
   the gate still passes) while keeping stack traces symbolised. Not landed because two
   attempts to measure the size delta hit MSBuild incremental-build caching.
-- **`glyphIntensity` is a flag that cannot do anything.** Mapped in `config.js`, exposed in
-  the configurator, and read by nothing in `web/js` or `web/shaders`. Either implement it as
-  the base glyph brightness multiplier it appears to have been intended as, or remove it from
-  the mapping and the catalog. Documented as non-functional in the meantime, in both the
-  README and the guide.
+- ~~**`glyphIntensity` is a flag that cannot do anything.**~~ **Implemented in v1.0.4**, as the
+  glyph brightness multiplier its two siblings already were: `brightness.r` is the glyph
+  channel, `.g` the cursor, `.b` the glint, and only the glyph channel had no intensity
+  uniform. Applies to the palette and stripe effects in both renderers, exactly where
+  `cursorIntensity` and `glintIntensity` apply. Default 1 is a bare multiply with no clamp
+  added, so `x * 1.0` leaves every existing render bit-identical. Measured: palette luma
+  1.6 at 0, 22.7 at 1, 40.5 at 2. `tests/web-smoke.py` now asserts the flag changes the
+  output, which is the check whose absence let it ship inert through all of v1.0.x.
+
+  One consequence worth knowing: `DraftRandomizer` has always set `glyphIntensity` to
+  0.8 to 2.4, so a preset saved from Randomize before v1.0.4 carries a value that did
+  nothing then and does something now.
 - **CI and the gate now duplicate work.** `ci.yml` builds and publishes, and then the gate
   builds and publishes again. Consolidating means deciding whether CI keeps its own payload
   assertions or defers entirely to `tests/run-gate.ps1`.
@@ -118,10 +125,10 @@ left alone under the vendoring policy in `VENDORING.md`.
 
 ### Worth doing
 
-- **`gl-matrix.js` is the unminified 214,503-byte development build.** Loaded synchronously
-  by `loadJS` before either renderer starts, so it is on the critical path of every launch in
-  both backends. The minified build is roughly a quarter the size. It is a vendored `lib/`
-  file, so swapping it is a `VENDORING.md` entry, not a code change.
+- ~~**`gl-matrix.js` is the unminified 214,503-byte development build.**~~ **Done in v1.0.4.**
+  Replaced with upstream's own `dist/gl-matrix-min.js` for the same version 3.4.0, renamed to
+  `lib/gl-matrix.min.js` to match the existing `regl.min.js`. 214,503 to 52,494 bytes, down
+  75.5%. Provenance, hashes and the equivalence check are recorded in `VENDORING.md`.
 - **The Win32 icon resource inside each `.dll` is dead weight.** After the v1.0.3 repack the
   icon still ships six times: twice per `.dll` (managed `EmbeddedResource` plus the Win32
   resource `ApplicationIcon` stamps) and once per apphost `.exe`. Nothing displays a class

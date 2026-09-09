@@ -43,29 +43,52 @@ Until a fork point is established, an upstream refresh is a manual three-way mer
 file by file, against the 16 files listed below. Establishing one is cheap and worth doing
 once — see "Re-establishing a fork point".
 
-## Locally modified files (16)
+## Locally modified files (25)
 
 Every other file under `MatrixDesktop/web/` is byte-identical to what `927eb26` imported.
-These 16 are not, and each one is a hand-merge cost on any upstream update:
+These 25 are not, and each one is a hand-merge cost on any upstream update.
+
+**This table went stale once already.** It said 16 files from `v1.0.1` until `v1.0.4`, while
+the `v1.0.2` renderer-defect pass and the `v1.0.3` audit had quietly taken it to 22. Treat the
+regeneration command below as the source of truth and this table as a snapshot; if you change
+anything under `web/`, regenerate rather than appending by hand.
 
 | File | Changed by |
 | --- | --- |
-| `MatrixDesktop/web/js/camera.js` | `bd24373` |
-| `MatrixDesktop/web/js/clickRipples.js` | `1d61ace` (**added locally**, does not exist upstream) |
-| `MatrixDesktop/web/js/config.js` | `bd24373`, `1d61ace` |
-| `MatrixDesktop/web/js/main.js` | `bd24373` |
-| `MatrixDesktop/web/js/regl/bloomPass.js` | `bd24373` |
-| `MatrixDesktop/web/js/regl/main.js` | `bd24373`, `1d61ace` |
-| `MatrixDesktop/web/js/regl/mirrorPass.js` | `bd24373` |
-| `MatrixDesktop/web/js/regl/rainPass.js` | `1d61ace` |
-| `MatrixDesktop/web/js/regl/utils.js` | `bd24373` |
-| `MatrixDesktop/web/js/webgpu/bloomPass.js` | `bd24373` |
-| `MatrixDesktop/web/js/webgpu/main.js` | `bd24373`, `1d61ace` |
-| `MatrixDesktop/web/js/webgpu/mirrorPass.js` | `bd24373` |
-| `MatrixDesktop/web/js/webgpu/rainPass.js` | `1d61ace` |
-| `MatrixDesktop/web/js/webgpu/utils.js` | `bd24373` |
-| `MatrixDesktop/web/shaders/glsl/rainPass.effect.frag.glsl` | `1d61ace` |
-| `MatrixDesktop/web/shaders/wgsl/rainPass.wgsl` | `1d61ace` |
+| `js/camera.js` | `bd24373` |
+| `js/clickRipples.js` | `1d61ace`, `f9bbba2` (**added locally**, does not exist upstream) |
+| `js/config.js` | `bd24373`, `1d61ace`, `v1.0.4` |
+| `js/main.js` | `bd24373`, `6d91f2b` |
+| `js/regl/bloomPass.js` | `bd24373`, `f9bbba2`, `430463a` |
+| `js/regl/lkgHelper.js` | `f9bbba2` |
+| `js/regl/main.js` | `bd24373`, `1d61ace`, `f9bbba2`, `v1.0.4` |
+| `js/regl/mirrorPass.js` | `bd24373`, `f9bbba2` |
+| `js/regl/palettePass.js` | `v1.0.4` |
+| `js/regl/rainPass.js` | `1d61ace`, `f9bbba2` |
+| `js/regl/stripePass.js` | `v1.0.4` |
+| `js/regl/utils.js` | `bd24373` |
+| `js/webgpu/bloomPass.js` | `bd24373` |
+| `js/webgpu/main.js` | `bd24373`, `1d61ace`, `f9bbba2`, `v1.0.4` |
+| `js/webgpu/mirrorPass.js` | `bd24373`, `f9bbba2` |
+| `js/webgpu/palettePass.js` | `v1.0.4` |
+| `js/webgpu/rainPass.js` | `1d61ace`, `f9bbba2`, `6d91f2b` |
+| `js/webgpu/stripePass.js` | `v1.0.4` |
+| `js/webgpu/utils.js` | `bd24373` |
+| `shaders/glsl/palettePass.frag.glsl` | `v1.0.4` |
+| `shaders/glsl/rainPass.effect.frag.glsl` | `1d61ace`, `f9bbba2` |
+| `shaders/glsl/stripePass.frag.glsl` | `v1.0.4` |
+| `shaders/wgsl/palettePass.wgsl` | `v1.0.4` |
+| `shaders/wgsl/rainPass.wgsl` | `1d61ace`, `f9bbba2` |
+| `shaders/wgsl/stripePass.wgsl` | `v1.0.4` |
+
+Paths are relative to `MatrixDesktop/web/`. The commits beyond the original three:
+
+| Commit | What it did to `web/` |
+| --- | --- |
+| `f9bbba2` | `v1.0.2` renderer defects: MD-04, MD-19, MD-25, MD-43 to MD-48 |
+| `430463a` | `v1.0.3` reverted the MD-44 bloom "fix", which was itself the regression |
+| `6d91f2b` | `v1.0.3` operand ordering on the launch path, cached WebGPU texture views |
+| `v1.0.4` | implemented `glyphIntensity`, previously parsed and documented but read by no shader |
 
 Regenerate the list at any time. Any file whose log shows a commit other than `927eb26`
 is locally modified:
@@ -98,6 +121,39 @@ anything at all — that upstream folder was not part of the `927eb26` import.
 Note that `MatrixDesktop/web/LICENSE` has no file extension, so it is not caught by the
 `.md`/`.txt` exclusions and does ship into the payload. That is correct and required.
 
+## Third-party builds under `web/lib/`
+
+`lib/` holds upstream's vendored dependencies, which are themselves third-party. Where a
+library ships both a development and a production build, this fork takes the production one,
+matching what `bd24373` already did for regl:
+
+| File | Library | Build | Bytes |
+| --- | --- | --- | --- |
+| `lib/regl.min.js` | [regl](https://github.com/regl-project/regl) | minified | 87,062 |
+| `lib/gl-matrix.min.js` | [gl-matrix](https://github.com/toji/gl-matrix) 3.4.0 | minified, UMD | 52,494 |
+| `lib/gpu-buffer.js` | upstream's own WGSL struct layout helper | source | 8,256 |
+| `lib/holoplaycore.module.js` | Looking Glass HoloPlay Core | as shipped | 23,810 |
+
+`gl-matrix` was swapped from the 214,503-byte unminified build in `v1.0.4`. Provenance, so
+nobody has to trust that the swap was like for like:
+
+```
+source  https://cdn.jsdelivr.net/npm/gl-matrix@3.4.0/dist/gl-matrix-min.js
+sha256  c45c1001c99a73ea8b9fb08f1d77759be3191c1e3daefea1213c99e9859693ff
+```
+
+The replaced file was verified to be upstream's own `dist/gl-matrix.js` for the same version:
+byte-identical after newline normalisation, sha256
+`07855fa64096dbc30c3cf9088be433f29c8e344665c87b66c7463443d38c15a7`. The minified build was
+then checked to compute bit-identical results across 400 randomised inputs for each of the
+ten APIs this project calls (`mat4.create`, `ortho`, `orthoZO`, `perspective`,
+`perspectiveZO`, `rotateX`, `rotateY`, `scale`, `translate`, `vec3.fromValues`), including
+both infinite-far-plane branches and the composed volumetric camera transform.
+
+The file is renamed, not overwritten, so `lib/gl-matrix.js` no longer exists. Both call sites
+(`js/regl/main.js`, `js/webgpu/main.js`) were updated. The gate's "every referenced web asset
+resolves" check covers this: reverting one call site to the old name fails it.
+
 ## Re-establishing a fork point
 
 Do this once and the next upstream update becomes a normal merge instead of an archaeology
@@ -113,8 +169,13 @@ exercise:
 2. Identify which upstream commit `927eb26` corresponds to. The import is flattened, so
    match on content rather than history: compare an unmodified vendored file against
    upstream revisions of it. `MatrixDesktop/web/index.html` and
-   `MatrixDesktop/web/js/regl/palettePass.js` are both untouched locally, which makes them
+   `MatrixDesktop/web/js/regl/imagePass.js` are both untouched locally, which makes them
    good probes.
+
+   Pick a probe from the regeneration command above, never from memory. This paragraph used
+   to name `js/regl/palettePass.js`, which stopped being untouched in `v1.0.4`; a probe that
+   is silently locally-modified will never match any upstream revision and the search just
+   returns nothing, which reads like "no fork point exists" rather than "wrong probe".
 
    ```pwsh
    git rev-list upstream/master -- index.html | ForEach-Object {
