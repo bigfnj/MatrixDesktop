@@ -91,14 +91,28 @@ jobs:
           Copy-Item -Recurse -Force "MatrixDesktopConfigurator\bin\Publish\win-x64-fd\*" $stage
 
           # Do not publish a ZIP containing an apphost without its managed app.
+          #
+          # MatrixDesktop.deps.json was missing from this list while the
+          # configurator's was present. That file is how the host resolves the
+          # WebView2 assemblies and the win-x64 native WebView2Loader.dll, so a
+          # zip without it fails at startup with a FileNotFoundException the
+          # moment the MainForm touches WebView2 — and this job would still have
+          # gone green and published it.
+          #
+          # The two index.html entries assert that the Content globs actually
+          # copied: MatrixDesktop shows a blank window without web\index.html,
+          # and the configurator has no UI at all without configurator\index.html.
           $requiredFiles = @(
             "MatrixDesktop.exe",
             "MatrixDesktop.dll",
+            "MatrixDesktop.deps.json",
             "MatrixDesktop.runtimeconfig.json",
             "MatrixDesktopConfigurator.exe",
             "MatrixDesktopConfigurator.dll",
             "MatrixDesktopConfigurator.deps.json",
-            "MatrixDesktopConfigurator.runtimeconfig.json"
+            "MatrixDesktopConfigurator.runtimeconfig.json",
+            "web\index.html",
+            "configurator\index.html"
           )
           $missingFiles = $requiredFiles | Where-Object {
             -not (Test-Path -LiteralPath (Join-Path $stage $_) -PathType Leaf)
@@ -107,9 +121,12 @@ jobs:
             throw "Release payload is missing required files: $($missingFiles -join ', ')"
           }
 
-          # Top-level docs and license go into the zip too
+          # Top-level docs and license go into the zip too. LICENSE is no longer
+          # copied with -ErrorAction SilentlyContinue: MIT requires the notice to
+          # travel with the distribution, so a missing LICENSE must fail the
+          # release rather than ship a zip with no license in it.
           Copy-Item README.md  $stage
-          Copy-Item LICENSE    $stage -ErrorAction SilentlyContinue
+          Copy-Item LICENSE    $stage
           Copy-Item MatrixDesktop_Argument_Guide.txt $stage
 
           # Final zip
