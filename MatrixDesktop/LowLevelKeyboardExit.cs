@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -41,7 +41,10 @@ internal sealed class LowLevelKeyboardExit : IDisposable
     private const uint LLKHF_LOWER_IL_INJECTED = 0x00000002;
     private const uint LLKHF_INJECTED = 0x00000010;
 
-    private static readonly uint CurrentPid = (uint)Process.GetCurrentProcess().Id;
+    // Environment.ProcessId rather than Process.GetCurrentProcess().Id, which allocates a
+    // Process object holding an OS handle that nothing ever disposes. ForegroundWindow.cs
+    // already resolves the pid this way.
+    private static readonly uint CurrentPid = (uint)Environment.ProcessId;
 
     public LowLevelKeyboardExit(Form owner, bool exitOnEsc, bool exitOnAnyKey, bool globalKeyExit)
     {

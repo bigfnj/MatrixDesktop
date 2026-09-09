@@ -146,48 +146,86 @@ public sealed class MainForm : Form
         // sleeps. This stops the GL animation loop + audio + timers, which
         // matters on laptops (battery) and any system where the user expects
         // the rain not to keep rendering while they're away.
-        try
+        //
+        // The guard is not just tidiness. Nothing prevented a second subscription if the
+        // handle were ever recreated, and only one unsubscribe happens on teardown, so the
+        // surplus subscription would keep this form alive and fire against a disposed
+        // WebView.
+        if (!_systemEventsAttached)
         {
-            SystemEvents.SessionSwitch += OnSessionSwitch;
-            SystemEvents.PowerModeChanged += OnPowerModeChanged;
-            _systemEventsAttached = true;
-        }
-        catch
-        {
-            // SystemEvents subscription can fail in services / sandboxed
-            // environments; not fatal.
+            try
+            {
+                SystemEvents.SessionSwitch += OnSessionSwitch;
+                SystemEvents.PowerModeChanged += OnPowerModeChanged;
+                _systemEventsAttached = true;
+            }
+            catch
+            {
+                // SystemEvents subscription can fail in services / sandboxed
+                // environments; not fatal.
+            }
         }
     }
 
     private bool _systemEventsAttached;
     private bool _isSuspended;
 
-    private async void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    // SystemEvents raises its events on a private thread it owns, NOT on the UI thread.
+    // Measured on this machine: UI thread id 2, handler thread id 4. So every one of these
+    // handlers must marshal before it touches the form or the WebView, exactly as
+    // _displaySettingsChangedHandler above already does with BeginInvoke.
+    //
+    // Before this fix the handlers called _webView.Visible and CoreWebView2.TrySuspendAsync
+    // straight from that thread. With Control.CheckForIllegalCrossThreadCalls off, which is
+    // the default when no debugger is attached, the write silently proceeded as an
+    // unsynchronised cross-thread access to an apartment-bound COM object. With the check
+    // on it threw InvalidOperationException, which the handler's own catch swallowed as a
+    // WARN. Either way the feature did not work and said nothing.
+    private void MarshalToUiThread(Action action, string reason)
+    {
+        try
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated)
+            {
+                return;
+            }
+
+            BeginInvoke(action);
+        }
+        catch (Exception ex)
+        {
+            // Shutdown races are expected here: the handle can go away between the check
+            // and the post. Anything else is worth a line.
+            Shared.Logger.Warn($"Could not marshal '{reason}' to the UI thread: {ex.Message}");
+        }
+    }
+
+    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
     {
         switch (e.Reason)
         {
             case SessionSwitchReason.SessionLock:
             case SessionSwitchReason.ConsoleDisconnect:
             case SessionSwitchReason.RemoteDisconnect:
-                await TrySuspendWebViewAsync($"session {e.Reason}");
+                MarshalToUiThread(async void () => await TrySuspendWebViewAsync($"session {e.Reason}"), $"session {e.Reason}");
                 break;
             case SessionSwitchReason.SessionUnlock:
             case SessionSwitchReason.ConsoleConnect:
             case SessionSwitchReason.RemoteConnect:
-                TryResumeWebView($"session {e.Reason}");
+                MarshalToUiThread(() => TryResumeWebView($"session {e.Reason}"), $"session {e.Reason}");
                 break;
         }
     }
 
-    private async void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
     {
         switch (e.Mode)
         {
             case PowerModes.Suspend:
-                await TrySuspendWebViewAsync("power suspend");
+                MarshalToUiThread(async void () => await TrySuspendWebViewAsync("power suspend"), "power suspend");
                 break;
             case PowerModes.Resume:
-                TryResumeWebView("power resume");
+                MarshalToUiThread(() => TryResumeWebView("power resume"), "power resume");
                 break;
         }
     }
@@ -208,7 +246,18 @@ public sealed class MainForm : Form
             _webView.Visible = false;
             var ok = await _webView.CoreWebView2.TrySuspendAsync();
             _isSuspended = ok;
-            Shared.Logger.Info($"WebView suspended (reason='{reason}', TrySuspendAsync={ok}).");
+
+            if (!ok)
+            {
+                // Hiding is the precondition for suspending, so a failed suspend would
+                // otherwise leave a permanently blank window with _isSuspended false,
+                // meaning nothing would ever restore it until the next resume event.
+                _webView.Visible = true;
+                Shared.Logger.Warn($"TrySuspendAsync declined (reason='{reason}'); restored visibility.");
+                return;
+            }
+
+            Shared.Logger.Info($"WebView suspended (reason='{reason}').");
         }
         catch (Exception ex)
         {

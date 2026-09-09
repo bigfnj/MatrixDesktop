@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -37,15 +38,66 @@ internal static class CrashDumpWriter
     private static string _processLabel = AppName;
     private static volatile bool _installed;
 
+    // Per-process cap, so one bad frame cannot write dumps until the disk fills.
+    private const int MaxDumpsPerProcess = 3;
+
+    // Folder cap across all runs, oldest pruned first.
+    private const int MaxDumpsRetained = 10;
+
+    private static int _dumpsWritten;
+
+    private static bool TryReserveDumpSlot()
+        => System.Threading.Interlocked.Increment(ref _dumpsWritten) <= MaxDumpsPerProcess;
+
+    private static void PruneOldDumps(string dumpDir)
+    {
+        try
+        {
+            var existing = new DirectoryInfo(dumpDir)
+                .GetFiles("*.dmp")
+                .OrderByDescending(static file => file.LastWriteTimeUtc)
+                .Skip(MaxDumpsRetained - 1)
+                .ToArray();
+
+            foreach (var stale in existing)
+            {
+                try
+                {
+                    stale.Delete();
+                }
+                catch
+                {
+                    // A dump still open in a debugger is not worth failing over.
+                }
+            }
+
+            if (existing.Length > 0)
+            {
+                Logger.Info($"Pruned {existing.Length} old crash dump(s) from '{dumpDir}'.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Could not prune old crash dumps: {ex.Message}");
+        }
+    }
+
     public static void Install(string processLabel)
     {
         if (_installed) return;
         _installed = true;
         _processLabel = string.IsNullOrWhiteSpace(processLabel) ? AppName : processLabel;
 
-        // Ensure CLR-internal unhandled exceptions go through our handler too.
-        // Without ThrowException, WinForms swallows ThreadException before
-        // AppDomain.UnhandledException ever fires.
+        // CatchException routes exceptions escaping the WinForms message pump to
+        // Application.ThreadException, which is subscribed below. That is deliberate and it
+        // is the opposite of what a previous version of this comment claimed: with
+        // ThrowException, WinForms would NOT raise ThreadException and these handlers would
+        // never see a message-pump exception at all.
+        //
+        // Consequence worth knowing: after writing a dump and showing the dialog, the
+        // process keeps running. That is intentional for a visualiser, where a failed
+        // render pass should not take the window down, but it does mean a repeating
+        // exception would keep producing dumps, which is why WriteDump caps them.
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += OnThreadException;
         AppDomain.CurrentDomain.UnhandledException += OnAppDomainException;
@@ -119,7 +171,21 @@ internal static class CrashDumpWriter
             var dumpDir = Path.Combine(localAppData, AppName, "dumps");
             Directory.CreateDirectory(dumpDir);
 
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+            // The log rotates at 2 MB but nothing ever bounded this folder, and because the
+            // app deliberately keeps running after a fatal exception, a repeating fault
+            // could fill the disk one ~10 MB dump at a time.
+            if (!TryReserveDumpSlot())
+            {
+                Logger.Warn($"Dump suppressed: {MaxDumpsPerProcess} already written by this process. Reason='{reason}'.");
+                return null;
+            }
+
+            PruneOldDumps(dumpDir);
+
+            // Milliseconds, not just seconds. Two faults inside the same second produced an
+            // identical filename and the second dump silently overwrote the first, which
+            // was observed while verifying the retention cap.
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss.fff", CultureInfo.InvariantCulture);
             var path = Path.Combine(dumpDir, $"{_processLabel}-{stamp}-pid{Environment.ProcessId}.dmp");
 
             using var process = Process.GetCurrentProcess();

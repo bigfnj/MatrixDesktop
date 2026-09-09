@@ -18,7 +18,9 @@ internal static class MatrixArgsTests
         ("Help tokens are recognised in every documented spelling", HelpTokensRecognised),
         ("A help token is never forwarded as a query parameter", HelpTokenNotForwarded),
         ("Values are percent encoded on the key equals value path", PairPathEncodes),
-        ("A raw query string is passed through unencoded (MD-17)", RawQueryPathDoesNotEncode),
+        ("A raw query string is percent encoded like any other input", RawQueryPathEncodes),
+        ("An already encoded raw query is not encoded twice", RawQueryPathDoesNotDoubleEncode),
+        ("Boolean aliases normalise on the raw query path too", RawQueryNormalisesBooleans),
         ("An ampersand joined string without a leading question mark is accepted", BareAmpersandStringAccepted),
     ];
 
@@ -92,15 +94,28 @@ internal static class MatrixArgsTests
         => Check.Equal("url=a%20b", Build("--url", "a b"),
             "the key=value path percent encodes, so a space cannot corrupt the URL");
 
-    private static void RawQueryPathDoesNotEncode()
+    private static void RawQueryPathEncodes()
     {
-        // Current behaviour, recorded so the divergence is visible rather than folklore.
-        // The single-argument raw-query branch returns the string verbatim while the
-        // key=value branch percent encodes. A '#' in a raw query also truncates every
-        // parameter after it, because everything past it becomes a URL fragment.
-        Check.Equal("a=b c&d=e", Build("?a=b c&d=e"),
-            "MD-17: the raw query branch does not encode, unlike the pair branch. Flip this when MD-17 is fixed");
+        // MD-17 fixed. Both branches now encode, so a space cannot produce an invalid URL
+        // and a '#' cannot silently truncate every parameter after it by starting a
+        // fragment.
+        Check.Equal("a=b%20c&d=e", Build("?a=b c&d=e"),
+            "the raw query branch must encode exactly like the key=value branch");
+        Check.Contains(Build("?url=a#b&effect=stripes"), "effect=stripes",
+            "a '#' must be encoded rather than swallowing every later parameter as a fragment");
     }
+
+    private static void RawQueryPathDoesNotDoubleEncode()
+    {
+        // A pasted query is normally already encoded, so the value is decoded before being
+        // re-encoded. Without the decode step '%20' would become '%2520'.
+        Check.Equal("url=a%20b", Build("?url=a%20b"),
+            "an already encoded value must survive the round trip unchanged");
+    }
+
+    private static void RawQueryNormalisesBooleans()
+        => Check.Equal("camera=true", Build("?camera=yes"),
+            "boolean aliases are normalised on the raw query path too, not only on the pair path");
 
     private static void BareAmpersandStringAccepted()
         => Check.Equal("a=b&c=d", Build("a=b&c=d"),

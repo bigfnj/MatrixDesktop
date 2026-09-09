@@ -19,7 +19,8 @@ internal static class AppCliTests
         ("An empty string value survives for the web layer", EmptyStringValueSurvives),
         ("A raw query string argument is forwarded untouched", RawQueryForwarded),
         ("Wrapper flags are stripped from the forwarded arguments", WrapperFlagsStripped),
-        ("A boolean wrapper flag swallows an explicit value (MD-10)", BooleanFlagSwallowsValue),
+        ("A primary boolean wrapper flag honours an explicit value", BooleanFlagHonoursValue),
+        ("An explicitly negative wrapper flag is always false", NegativeFlagIsAlwaysFalse),
     ];
 
     private static AppOptions Parse(out IReadOnlyList<string> passthrough, params string[] args)
@@ -190,15 +191,27 @@ internal static class AppCliTests
         Check.Equal("--effect", rest[0], "the surviving token is the web flag");
     }
 
-    private static void BooleanFlagSwallowsValue()
+    private static void BooleanFlagHonoursValue()
     {
-        // Current behaviour, recorded so the divergence from the configurator's importer is
-        // visible. The guide documents app flags as bare switches with explicit negations,
-        // and the parser consumes a following value token then discards it, so
-        // '--topmost false' means topmost ON. ArgumentImporter honours the value instead,
-        // which is why an imported command can misrepresent what it does.
-        var o = Parse(out var rest, "--topmost", "false");
-        Check.True(o.TopMost, "MD-10: the value is consumed and ignored, so this reads as topmost ON. Flip when MD-10 is fixed");
-        Check.Equal(0, rest.Count, "MD-10: the swallowed value is not forwarded either, so it vanishes entirely");
+        // MD-10 fixed. A primary form takes an optional value defaulting to true, matching
+        // ArgumentImporter.ApplyAppPair, so an imported command can no longer disagree with
+        // what that command actually does.
+        Check.False(Parse(out var rest, "--topmost", "false").TopMost, "an explicit false must mean false");
+        Check.Equal(0, rest.Count, "the value belongs to the flag, so it is not forwarded");
+
+        Check.True(Parse(out _, "--topmost").TopMost, "a bare flag still means true");
+        Check.True(Parse(out _, "--topmost", "true").TopMost, "an explicit true still means true");
+        Check.True(Parse(out _, "--topmost", "yes").TopMost, "documented boolean aliases apply here too");
+        Check.False(Parse(out _, "--hide-cursor", "no").HideCursor, "the same rule applies to every primary boolean form");
+        Check.False(Parse(out _, "--exit-on-any-key", "0").ExitOnAnyKey, "and to the exit controls");
+    }
+
+    private static void NegativeFlagIsAlwaysFalse()
+    {
+        // An explicitly negative form always means false. "--no-topmost false" is a double
+        // negative, so the value is ignored and logged rather than honoured.
+        Check.False(Parse(out var rest, "--no-topmost", "false").TopMost, "a negative form means false regardless of the value");
+        Check.False(Parse(out _, "--no-topmost", "true").TopMost, "even when the value says otherwise");
+        Check.Equal(0, rest.Count, "the ignored value is still consumed rather than leaking to the web layer");
     }
 }
