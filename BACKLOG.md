@@ -6,7 +6,10 @@ These features shipped in v1.0.0:
 
 - GitHub Actions CI + Release workflows (`.github/workflows/ci.yml`, `release.yml`).
 - `--help-full` opens an embedded argument reference (`<EmbeddedResource>` in both EXEs).
-- Configurator live preview window — debounced live update of a second WebView2.
+- Configurator live preview — debounced refresh of the bundled `web/` app as the draft
+  changes. Shipped first as a second top-level WebView2 window, then replaced in commit
+  `808262a` by an in-page iframe. The window implementation was left in the tree but was
+  unreachable (nothing sent `openPreview`), and it was removed in the v1.0.2 pass.
 - `SystemEvents.SessionSwitch` + `PowerModeChanged` → WebView2 `TrySuspendAsync`/`Resume`.
 - Dark/light theme toggle in the configurator (persisted in `ConfiguratorState.UiTheme`).
 - Out-of-range numeric input validation feedback (red border + allowed-range hint).
@@ -32,6 +35,80 @@ These were considered for v1.0 but moved to a future release:
 - **Per-monitor argument overrides** — backlogged. Would either ship as a
   configurator-generated `.bat` (multi-process) or require the wrapper to
   spawn its own child instances; non-trivial scope.
+
+## Deferred from the v1.0.2 hardening pass
+
+Found and verified during that pass, deliberately not fixed. Each says why.
+
+### Worth doing
+
+- **Embedded live preview renders at the wrong scale.** The preview iframe shows roughly six
+  enormous blurred glyphs where the same config in a real window shows about eighty columns,
+  so its canvas backing store is tiny and being upscaled by CSS. Measured from a capture of
+  the running configurator. The preview is a v1.0 selling point and currently looks nothing
+  like what it is previewing.
+- **Release symbols are stripped, so crash diagnostics lost line numbers.** `DebugType=none`
+  in Release keeps the payload lean, but `CrashDumpWriter` writes `ex.ToString()` into the
+  log and that only carries line numbers when debug info is present at runtime. Recommended
+  fix is `DebugType=embedded`, which emits no separate `.pdb` (so the payload stays clean and
+  the gate still passes) while keeping stack traces symbolised. Not landed because two
+  attempts to measure the size delta hit MSBuild incremental-build caching.
+- **`glyphIntensity` is a flag that cannot do anything.** Mapped in `config.js`, exposed in
+  the configurator, and read by nothing in `web/js` or `web/shaders`. Either implement it as
+  the base glyph brightness multiplier it appears to have been intended as, or remove it from
+  the mapping and the catalog. Documented as non-functional in the meantime, in both the
+  README and the guide.
+- **CI and the gate now duplicate work.** `ci.yml` builds and publishes, and then the gate
+  builds and publishes again. Consolidating means deciding whether CI keeps its own payload
+  assertions or defers entirely to `tests/run-gate.ps1`.
+- **Generate the guide's flag reference from `ArgumentCatalog`.** Flag definitions live in
+  three places (`ArgumentCatalog`, `config.js`'s `paramMapping`, and the argument guide) and
+  currently agree only because they were checked by hand. The alias-parity test locks the
+  first two together; generating the third would make drift impossible.
+- **The two boolean parsers disagree.** A wrapper flag treats any value containing "true" as
+  true (`Shared/FlagNormalization.ParseBool`), while a web flag requires exactly "true"
+  (`web/js/config.js:402`). So `--topmost truthy` is true and `--camera truthy` is false.
+  Harmless for realistic input, but it is a real inconsistency now that wrapper flags honour
+  explicit values.
+
+### Upstream, reportable to Rezmason/matrix
+
+Neither has a user-visible effect on a supported MatrixDesktop path, which is why they were
+left alone under the vendoring policy in `VENDORING.md`.
+
+- `shaders/wgsl/bloomCombine.wgsl` samples mip levels 1 to 4 from textures created with a
+  single mip, left over from a superseded pyramid design, so the weighting is not what the
+  shader intends.
+- `js/regl/bloomPass.js` builds its no-bloom placeholder FBO without `config.useHalfFloat`
+  and never resizes or destroys it, so it stays a 1x1 uint8 target whose format can mismatch
+  the primary.
+
+### Renderer parity, larger scope
+
+- **No `quiltPass` in the WebGPU pipeline.** `--version holoplay --renderer webgpu` silently
+  drops the entire Looking Glass feature that `--renderer regl` engages. Fixing it means
+  porting the quilt pass; documenting it may be the better answer.
+- **`version=holoplay` on ordinary hardware renders garbage.** `lkgHelper` falls back to a
+  hardcoded recorded device, so the lenticular interlace is drawn onto a normal monitor. The
+  three-second timeout added in the v1.0.2 pass stops it hanging, but the fallback itself is
+  still wrong.
+- **Per-pass GPU disposal is incomplete.** `cleanup()` is now reachable (it runs on
+  `pagehide`), which makes the existing listener and camera teardown effective, but several
+  WebGPU one-shot allocations still pass no cleanup callback and there is no `.destroy()`
+  anywhere under `js/regl/`. The browser reclaims these on context loss, so this is hygiene
+  rather than a leak users can hit.
+
+### Deliberately declined
+
+- **Live preview without a reload.** Each settled change reassigns `iframe.src`, so the whole
+  page reloads and the renderer reinitialises. Patching config in place would need a message
+  channel into the vendored app and real divergence from upstream. Reviewed and kept.
+- **Relaxing the preview iframe `sandbox`.** It blocks `getUserMedia`, so the preview cannot
+  show the camera-backed mirror effect. Loosening a security boundary for one niche preview
+  is the wrong trade; documented instead.
+- **`suppressWarnings` on by default.** On software rendering the app shows a notice instead
+  of rain until dismissed, which is likely on RDP and in VMs. Defaulting the notice away would
+  hide a real hardware-acceleration problem from the people who need to know about it.
 
 ## Historical entries (kept for context)
 
@@ -77,7 +154,10 @@ The configurator supports named presets in a dropdown and restores the last draf
 - Release solution build passes with 0 warnings and 0 errors.
 - Configurator JavaScript syntax check passes.
 - Framework-dependent Windows x64 publish includes both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe`.
-- Smoke zip integrity check passes.
+- ~~Smoke zip integrity check passes.~~ This named a zip nothing in the repository
+  produces. Superseded by `tests/run-gate.ps1`, which publishes into
+  `artifacts\gate\win-x64-fd\` and asserts the payload contents directly. See
+  SMOKE_TEST_PLAN.md for which cases are automated and which stay manual.
 
 ## Follow-up UX Notes
 
@@ -156,7 +236,9 @@ start "" /min "%EXE%" --hide-cursor font=resurrections fps=30 animationSpeed=0.5
   ```
   Expected: no click ripples unless `clickRipples=true`.
 - Verify `effect=mirror` still produces its existing click ripple behavior.
-- Run static checks already used for this repo: `dotnet build`, JS module parse check, zip integrity check.
+- Run static checks already used for this repo: `dotnet build`, JS module parse check.
+  (The "zip integrity check" named here never existed; `tests/run-gate.ps1` is the
+  current equivalent and checks the publish payload rather than a zip.)
 
 ## Assumptions
 
