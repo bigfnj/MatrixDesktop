@@ -5,6 +5,10 @@ struct Config {
 	glintColor : vec3<f32>,
 	cursorIntensity : f32,
 	glintIntensity : f32,
+	// Appended rather than inserted, so every existing field keeps its offset. Per the WGSL
+	// layout rules this lands at offset 68 and the struct stays 80 bytes, unchanged.
+	// gpu-buffer.js derives the offsets from this source, so nothing is hardcoded.
+	glyphIntensity : f32,
 };
 
 struct Palette {
@@ -66,7 +70,7 @@ fn getBrightness(uv : vec2<f32>) -> vec4<f32> {
 	var paletteIndex = clamp(i32(brightness.r * 512.0), 0, 511);
 
 	textureStore(outputTex, coord, vec4<f32>(
-		palette.colors[paletteIndex]
+		palette.colors[paletteIndex] * config.glyphIntensity
 			+ min(config.cursorColor * config.cursorIntensity * brightness.g, vec3<f32>(1.0))
 			+ min(config.glintColor * config.glintIntensity * brightness.b, vec3<f32>(1.0))
 			+ config.backgroundColor,

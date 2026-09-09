@@ -8,6 +8,11 @@ uniform float ditherMagnitude;
 uniform float time;
 uniform vec3 backgroundColor, cursorColor, glintColor;
 uniform float cursorIntensity, glintIntensity;
+// See palettePass.frag.glsl for why this is a bare multiply and not a clamped term. It
+// matters more here: `color * brightness.r` is already unclamped and brightness is
+// primary+bloom, so it can legitimately exceed 1.0 and sum with the cursor and glint terms
+// before the framebuffer clamps. A min() here would quietly take that away.
+uniform float glyphIntensity;
 varying vec2 vUV;
 
 highp float rand( const in vec2 uv, const in float t ) {
@@ -31,7 +36,7 @@ void main() {
 	brightness -= rand( gl_FragCoord.xy, time ) * ditherMagnitude / 3.0;
 	
 	gl_FragColor = vec4(
-		color * brightness.r
+		color * brightness.r * glyphIntensity
 			+ min(cursorColor * cursorIntensity * brightness.g, vec3(1.0))
 			+ min(glintColor * glintIntensity * brightness.b, vec3(1.0))
 			+ backgroundColor,

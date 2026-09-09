@@ -5,6 +5,8 @@ struct Config {
 	glintColor : vec3<f32>,
 	cursorIntensity : f32,
 	glintIntensity : f32,
+	// Appended, not inserted, so existing field offsets are untouched. See palettePass.wgsl.
+	glyphIntensity : f32,
 };
 
 struct Time {
@@ -61,7 +63,7 @@ fn getBrightness(uv : vec2<f32>) -> vec4<f32> {
 	brightness -= randomFloat( uv + vec2<f32>(time.seconds) ) * config.ditherMagnitude / 3.0;
 
 	textureStore(outputTex, coord, vec4<f32>(
-		color * brightness.r
+		color * brightness.r * config.glyphIntensity
 			+ min(config.cursorColor * config.cursorIntensity * brightness.g, vec3<f32>(1.0))
 			+ min(config.glintColor * config.glintIntensity * brightness.b, vec3<f32>(1.0))
 			+ config.backgroundColor,

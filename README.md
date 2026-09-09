@@ -307,10 +307,12 @@ The following arguments are recognized by the upstream `web/js/config.js` URL pa
 
 - `glyphRotation` (number) — rotate glyphs (degrees).
 - `cursorIntensity` (number) — cursor glow intensity (>= 0).
-- `glyphIntensity` (number) — **accepted but inert in this build.** `web/js/config.js` parses
-  and clamps it (>= 0) and defaults it to 1, but no rendering pass reads it: it appears
-  nowhere under `web/js/regl`, `web/js/webgpu`, or `web/shaders`. Passing it has no visible
-  effect. The argument guide says the same.
+- `glyphIntensity` (number) — glyph brightness multiplier (>= 0), the third of the set with
+  `cursorIntensity` and `glintIntensity`. Default 1 leaves the render unchanged, 0 removes the
+  glyphs entirely, higher values brighten them until they clamp. Applies to the palette and
+  stripe effects in both renderers, which is exactly where its two siblings apply; the image
+  and mirror effects have no glyph colour term, so it does nothing there.
+  Inert until v1.0.4: it was parsed and documented but read by no shader.
 
 Color values are typically provided as comma-separated triples. RGB values are usually in the 0–1 range.
 

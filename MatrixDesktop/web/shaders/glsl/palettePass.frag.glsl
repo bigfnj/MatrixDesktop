@@ -8,6 +8,12 @@ uniform float ditherMagnitude;
 uniform float time;
 uniform vec3 backgroundColor, cursorColor, glintColor;
 uniform float cursorIntensity, glintIntensity;
+// Scales the glyph colour, completing the set: brightness.r is the glyph channel, .g the
+// cursor, .b the glint, and the other two already had an intensity. Deliberately a bare
+// multiply with no min() clamp, unlike the cursor and glint terms: at the default of 1.0
+// `x * 1.0` is bit-identical to `x` for every float, so adding this cannot change a single
+// pixel of an existing render, whereas introducing a clamp here would.
+uniform float glyphIntensity;
 varying vec2 vUV;
 
 highp float rand( const in vec2 uv, const in float t ) {
@@ -30,7 +36,7 @@ void main() {
 
 	// Map the brightness to a position in the palette texture
 	gl_FragColor = vec4(
-		texture2D( paletteTex, vec2(brightness.r, 0.0)).rgb
+		texture2D( paletteTex, vec2(brightness.r, 0.0)).rgb * glyphIntensity
 			+ min(cursorColor * cursorIntensity * brightness.g, vec3(1.0))
 			+ min(glintColor * glintIntensity * brightness.b, vec3(1.0))
 			+ backgroundColor,

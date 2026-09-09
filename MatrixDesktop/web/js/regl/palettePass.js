@@ -57,7 +57,7 @@ const makePalette = (regl, entries) => {
 export default ({ regl, config }, inputs) => {
 	const output = makePassFBO(regl, config.useHalfFloat);
 	const paletteTex = makePalette(regl, config.palette);
-	const { backgroundColor, cursorColor, glintColor, cursorIntensity, glintIntensity, ditherMagnitude } = config;
+	const { backgroundColor, cursorColor, glintColor, cursorIntensity, glintIntensity, glyphIntensity, ditherMagnitude } = config;
 
 	const palettePassFrag = loadText("shaders/glsl/palettePass.frag.glsl");
 
@@ -70,6 +70,7 @@ export default ({ regl, config }, inputs) => {
 			glintColor: colorToRGB(glintColor),
 			cursorIntensity,
 			glintIntensity,
+			glyphIntensity,
 			ditherMagnitude,
 			tex: inputs.primary,
 			bloomTex: inputs.bloom,

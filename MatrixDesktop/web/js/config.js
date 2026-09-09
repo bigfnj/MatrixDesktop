@@ -80,6 +80,11 @@ const defaults = {
 	isolateGlint: false, // Whether the "glint"— highlights on certain symbols in the font— should appear
 	glintColor: hsl(0, 0, 1), // The color of the glint
 	glintIntensity: 1, // The intensity of the glint
+	// The intensity of the glyphs themselves. MUST live here, not only in the
+	// `validParams.effect != null` block further down: that block only runs when the caller
+	// named an effect explicitly, so on a default launch config.glyphIntensity would be
+	// undefined and the passes below would hand undefined to a uniform.
+	glyphIntensity: 1,
 	volumetric: false, // A mode where the raindrops appear in perspective
 	animationSpeed: 1, // The global rate that all animations progress
 	fps: 60, // The target frame rate (frames per second) of the effect

@@ -541,9 +541,15 @@ cursorIntensity (number)
 glyphIntensity (number)
 - Key: glyphIntensity
 - Range: clamped to >= 0
-- Meaning: accepted by the config parser.
-- Note: in this specific build, glyphIntensity is not currently referenced by the rendering passes,
-  so it may have little to no visible effect.
+- Meaning: brightness multiplier for the glyphs themselves, completing the set alongside
+  cursorIntensity and glintIntensity. 1 is the default and leaves the render unchanged;
+  0 removes the glyphs entirely, leaving only the cursor, glint and background; values
+  above 1 brighten the glyphs until they clamp at white.
+- Applies to: the palette and stripe effects, in both renderers. This is exactly where
+  cursorIntensity and glintIntensity apply. The image and mirror effects have no glyph
+  colour term to scale, so it has no effect there.
+- Example:
+  MatrixDesktop.exe --glyphIntensity 2
 
 palette (RGB gradient)
 - Key: palette

@@ -102,6 +102,7 @@ export default ({ config, device, timeBuffer }) => {
 			glintColor: colorToRGB(config.glintColor),
 			cursorIntensity: config.cursorIntensity,
 			glintIntensity: config.glintIntensity,
+			glyphIntensity: config.glyphIntensity,
 		});
 
 		const paletteUniforms = paletteShaderUniforms.Palette;
