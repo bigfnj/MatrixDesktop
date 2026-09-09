@@ -74,7 +74,27 @@
 
   <ItemGroup>
     <!--
-      Matrix.ico ships exactly once, as an embedded resource (361,102 bytes).
+      Matrix.ico ships exactly once, as an embedded resource (57,485 bytes; it was
+      361,102 until every entry was uncompressed BMP, including a 256x256 costing
+      270 KB on its own. The 128 and 256 entries are now PNG-compressed, which the
+      ICO format has allowed since Vista, and 16 through 64 stay BMP because those
+      are the sizes the taskbar, title bar and alt-tab actually pull. Verified
+      pixel-identical to the original at every size, RMSE 0, and verified loadable
+      through System.Drawing.Icon at every size, which is what AppWindowIcon uses.
+      Measured, not estimated: the icon appears SIX times in the publish output,
+      twice in each .dll (the managed EmbeddedResource plus the Win32 icon resource
+      the SDK stamps from ApplicationIcon) and once in each apphost .exe. So the
+      saving lands six times, and the payload went 6,960,895 -> 5,137,381 bytes,
+      down 1,823,514 or 26.2%.
+
+      Note the release ZIP barely moves, because Deflate already squeezed the old
+      uncompressed BMP down to roughly its PNG size. The win is installed footprint
+      and PE size, not download size; do not expect the release asset to shrink.
+
+      Still redundant: the Win32 icon resource inside each .dll is dead weight,
+      since nothing displays a library's icon and only the apphost .exe matters to
+      Explorer. ApplicationIcon drives both and the SDK offers no switch to split
+      them, so two of the six copies stay. That is 115 KB, and left in BACKLOG.)
       Shared/AppWindowIcon.cs reads the embedded copy first and only falls back
       to an on-disk Matrix.ico beside the EXE if that lookup returns null, so
       the loose <Content> copy that used to live here was dead weight in every
