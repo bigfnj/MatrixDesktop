@@ -422,9 +422,23 @@ pwsh -File tests\run-gate.ps1              # adds the runtime smoke tiers
 ```
 
 `-Tier1Only` is the flag CI uses. It covers everything that does not need an interactive
-desktop session: build, unit tests, web bundle integrity, embedded resources, and publish
-payload contents. The runtime tiers create real windows and capture frames, so they need an
-attached interactive session and cannot run on a headless runner.
+desktop session: build, unit tests, web bundle integrity, a headless DOM smoke, embedded
+resources, and publish payload contents. The runtime tiers create real windows and capture
+frames, so they need an attached interactive session and cannot run on a headless runner.
+
+The headless DOM smoke (`tests/web-smoke.py`, Playwright + Chromium) is worth calling out,
+because it exists to catch the one thing the runtime tiers structurally cannot. Those tiers
+photograph the real windows and measure pixel statistics, and a window whose footer has been
+pushed off-screen still measures perfectly healthy — which is exactly how v1.0.2 shipped a
+configurator with its whole command panel out of view. So these assertions are geometric:
+bounding boxes inside the viewport, shell height equal to the viewport, the field list
+actually scrolling, the preview pane's aspect ratio, and WCAG contrast in both themes. It
+needs no GPU, no window station and no WebView2, which makes it the only configurator UI
+coverage that runs in CI.
+
+If Playwright is not installed for the interpreter it finds, the gate reports the smoke as
+not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific
+interpreter to override the search.
 
 Exit codes:
 

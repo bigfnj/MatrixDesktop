@@ -42,11 +42,15 @@ Found and verified during that pass, deliberately not fixed. Each says why.
 
 ### Worth doing
 
-- **Embedded live preview renders at the wrong scale.** The preview iframe shows roughly six
-  enormous blurred glyphs where the same config in a real window shows about eighty columns,
-  so its canvas backing store is tiny and being upscaled by CSS. Measured from a capture of
-  the running configurator. The preview is a v1.0 selling point and currently looks nothing
-  like what it is previewing.
+- ~~**Embedded live preview renders at the wrong scale.**~~ **Fixed in v1.0.3.** The
+  diagnosis above was wrong about the mechanism: the backing store was not tiny and CSS was
+  not upscaling it. `.app-shell` used `min-height: 100%` instead of `height: 100%`, which
+  leaves the block size indefinite, so the `1fr` grid track sized to max-content and the
+  workspace grew to the full unscrolled height of every field. The shell measured 5569px in
+  an 860px viewport and the preview pane came out 512x5140, aspect 0.100. `numColumns` sets
+  the cell count along the *longer* axis, so the renderer drew about seven columns instead
+  of eighty. The same one line was also pushing the entire command panel off the bottom of
+  the window, which nobody had noticed. See `tests/web-smoke.py`.
 - **Release symbols are stripped, so crash diagnostics lost line numbers.** `DebugType=none`
   in Release keeps the payload lean, but `CrashDumpWriter` writes `ex.ToString()` into the
   log and that only carries line numbers when debug info is present at runtime. Recommended
@@ -109,6 +113,49 @@ left alone under the vendoring policy in `VENDORING.md`.
 - **`suppressWarnings` on by default.** On software rendering the app shows a notice instead
   of rain until dismissed, which is likely on RDP and in VMs. Defaulting the notice away would
   hide a real hardware-acceleration problem from the people who need to know about it.
+
+## Deferred from the v1.0.3 audit pass
+
+### Worth doing
+
+- **`gl-matrix.js` is the unminified 214,503-byte development build.** Loaded synchronously
+  by `loadJS` before either renderer starts, so it is on the critical path of every launch in
+  both backends. The minified build is roughly a quarter the size. It is a vendored `lib/`
+  file, so swapping it is a `VENDORING.md` entry, not a code change.
+- **The Win32 icon resource inside each `.dll` is dead weight.** After the v1.0.3 repack the
+  icon still ships six times: twice per `.dll` (managed `EmbeddedResource` plus the Win32
+  resource `ApplicationIcon` stamps) and once per apphost `.exe`. Nothing displays a class
+  library's icon. The SDK drives both from the same property and exposes no way to split
+  them, so removing the two dead copies needs a post-build resource edit. 115 KB.
+- **The command panel takes about a third of the configurator's height for a one-line
+  command.** `#commandOutput` has `min-height: 68px`, but `.command-row` is a grid whose row
+  height is set by the seven-button action column: 7 x 34px plus 6 x 7px = 280px, and the
+  textarea stretches to match. Now visible for the first time, since before v1.0.3 the whole
+  panel was off-screen. Laying the actions out in two columns would give roughly 120px back
+  to the field list. Left alone because it is a visible design change rather than a defect.
+- **Generate the guide's flag reference from `ArgumentCatalog`.** Flag definitions live in
+  three places. `AliasListIsNotStale` and `AliasParity` now lock two of them together in both
+  directions, and the catalogue-vs-`config.js` default sweep caught two real drifts, but the
+  argument guide is still maintained by hand and can still drift silently.
+
+### Watching, not acting
+
+- **WebGPU reads `canvas.clientWidth` every frame.** `webgpu/main.js:172` recomputes the
+  canvas size per frame where `regl/main.js:42` correctly does it on a `resize` event. Real,
+  but it is the non-default renderer, the read is cheap while layout is clean, and rewiring
+  the frame loop's resize path risks more than it saves. Revisit if WebGPU becomes default.
+
+### Investigated and dismissed
+
+Recorded so nobody re-opens them. Both were reported by the audit and neither survived
+reading the code.
+
+- **"Mirror passes still use the unfixed click-ripple clock."** They cannot. Both renderers
+  construct ripples as `config.clickRipples && config.effect !== "mirror"`, so ripples are
+  disabled outright in mirror mode. MD-04 does not reach it.
+- **"`pagehide` is registered before `pipeline` is assigned."** Harmless. `cleanup` reads the
+  closure variable at call time and uses `pipeline?.cleanup?.()`, so an early `pagehide`
+  short-circuits on `null` rather than throwing.
 
 ## Historical entries (kept for context)
 
