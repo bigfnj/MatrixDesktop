@@ -17,9 +17,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MatrixDesktop</AssemblyName>
     <RootNamespace>MatrixDesktop</RootNamespace>
-    <Version>1.0.2</Version>
-    <AssemblyVersion>1.0.2.0</AssemblyVersion>
-    <FileVersion>1.0.2.0</FileVersion>
+    <!-- Local-build default only. release.yml overrides all three from the pushed tag, which
+         is why the shipped 1.0.3 and 1.0.4 binaries stamped correctly while this said 1.0.2.
+         Keep it current anyway: it is what a developer's own build reports, and
+         tests\run-gate.ps1 holds the argument guide's header to this value. -->
+    <Version>1.0.4</Version>
+    <AssemblyVersion>1.0.4.0</AssemblyVersion>
+    <FileVersion>1.0.4.0</FileVersion>
     <!-- Icon for the compiled EXE -->
     <ApplicationIcon>Matrix.ico</ApplicationIcon>
 

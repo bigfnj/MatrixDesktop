@@ -4,7 +4,20 @@ This is a minimal Windows desktop wrapper around the original **Rezmason/matrix*
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
-Current version: **1.0.2** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+Current version: **1.0.4** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+
+### Since 1.0.2
+
+- **1.0.4** — `glyphIntensity` now works. It had been parsed, documented, offered in the
+  configurator and set by Randomize since v1.0 while being read by no shader. It is now the
+  glyph brightness multiplier alongside `cursorIntensity` and `glintIntensity`, in the palette
+  and stripe effects, both renderers. `gl-matrix` swapped for upstream's minified build
+  (214,503 → 52,494 bytes).
+- **1.0.3** — the configurator's command panel was off the bottom of the window, taking Copy,
+  Export .ps1, Randomize, Import and Test Argument with it, and the live preview was drawing
+  about seven enormous columns instead of eighty. Both were one CSS property. Also reverted a
+  v1.0.2 bloom change that was itself the regression, corrected two configurator colour
+  defaults, and repacked `Matrix.ico` (−1.8 MB installed).
 
 ## Visual examples
 

@@ -1,4 +1,4 @@
-﻿MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.0.2)
+﻿MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.0.4)
 =====================================================
 
 This file is embedded in both MatrixDesktop.exe and MatrixDesktopConfigurator.exe.

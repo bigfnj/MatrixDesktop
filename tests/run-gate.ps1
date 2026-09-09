@@ -634,6 +634,55 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         }
     }
 
+    # The guide's header version has now gone stale TWICE: it read "desktop wrapper build v9"
+    # against an actual 1.0.1 (MD-59), was corrected, then read 1.0.2 against a shipped 1.0.4.
+    # It is embedded in both EXEs and shown by --help-full and the configurator's ? button, so
+    # a wrong number here is the first thing a user reads. Twice is a pattern, not an accident.
+    #
+    # Asserts the two values are EQUAL, not that a version line exists: a regex that merely
+    # matched "v1.0.something" would have passed happily on the stale 1.0.2.
+    Test-Hdr 'tier 1: version consistency'
+    $guidePath = Join-Path $RepoRoot 'MatrixDesktop_Argument_Guide.txt'
+    $csprojPaths = @{
+        'MatrixDesktop'             = Join-Path $RepoRoot 'MatrixDesktop\MatrixDesktop.csproj'
+        'MatrixDesktopConfigurator' = Join-Path $RepoRoot 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj'
+    }
+    $missing = @($guidePath) + @($csprojPaths.Values) | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
+    if (@($missing).Count -gt 0) {
+        Test-Fail 'guide header version matches the project version' "not found: $($missing -join ', ')"
+    } else {
+        $versions = @{}
+        foreach ($name in $csprojPaths.Keys) {
+            $text = Get-Content -LiteralPath $csprojPaths[$name] -Raw
+            $m = [regex]::Match($text, '<Version>([^<]+)</Version>')
+            $versions[$name] = if ($m.Success) { $m.Groups[1].Value.Trim() } else { $null }
+        }
+        $guideText = Get-Content -LiteralPath $guidePath -Raw
+        $gm = [regex]::Match($guideText, 'ARGUMENT GUIDE \(desktop wrapper v([0-9][^)]*)\)')
+        $guideVersion = if ($gm.Success) { $gm.Groups[1].Value.Trim() } else { $null }
+
+        $problems = @()
+        foreach ($name in ($versions.Keys | Sort-Object)) {
+            if (-not $versions[$name]) { $problems += "$name.csproj has no <Version> element" }
+        }
+        if (-not $guideVersion) {
+            $problems += 'the guide header does not match "ARGUMENT GUIDE (desktop wrapper vX.Y.Z)", so its version cannot be read'
+        }
+        if ($problems.Count -eq 0) {
+            $distinct = @($versions.Values | Sort-Object -Unique)
+            if ($distinct.Count -ne 1) {
+                $problems += "the two csproj disagree: $(($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
+            } elseif ($guideVersion -ne $distinct[0]) {
+                $problems += "guide says v$guideVersion, csproj says $($distinct[0])"
+            }
+        }
+        if ($problems.Count -gt 0) {
+            Test-Fail 'guide header version matches the project version' ($problems -join '; ')
+        } else {
+            Test-Ok "guide header version matches the project version (v$guideVersion in both csproj and the guide)"
+        }
+    }
+
     Test-Hdr 'tier 1: publish payload'
     if (Test-Path -LiteralPath $GatePublishDir) { Remove-Item -LiteralPath $GatePublishDir -Recurse -Force }
 
