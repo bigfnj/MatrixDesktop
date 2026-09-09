@@ -498,6 +498,53 @@ try {
         Test-Ok 'every referenced web asset resolves'
     }
 
+    # Both executables load their window icon and their argument guide from an embedded
+    # resource, with an on-disk fallback that succeeds. So if the embedding ever breaks,
+    # nothing visibly changes until someone prunes the loose copy from the publish output,
+    # and then the icon quietly degrades. Asserting the resource directly is the only way
+    # to see it. Runs in a child process because LoadFrom locks the file.
+    Test-Hdr 'tier 1: embedded resources'
+    $probeDlls = @(
+        (Join-Path $RepoRoot 'MatrixDesktop\bin\Release\net10.0-windows\MatrixDesktop.dll'),
+        (Join-Path $RepoRoot 'MatrixDesktopConfigurator\bin\Release\net10.0-windows\MatrixDesktopConfigurator.dll')
+    )
+    if (@($probeDlls | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -gt 0) {
+        Test-Unchecked 'both executables embed the icon and the argument guide' 'build output not present, so the assemblies cannot be inspected'
+    } else {
+        # The paths are embedded into the script text as single-quoted literals rather than
+        # passed with -args, which does not bind when pwsh is invoked with -Command <string>.
+        # The first version of this check did use -args, so it inspected an empty list and
+        # reported OK: a check that passed without looking at anything. The inspected count
+        # is asserted below so that cannot recur.
+        $literals = ($probeDlls | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
+        $resourceProbe = @"
+`$bad = @()
+`$seen = 0
+foreach (`$dll in @($literals)) {
+    try {
+        `$asm = [Reflection.Assembly]::LoadFrom(`$dll)
+        `$seen++
+        foreach (`$name in 'Matrix.ico', 'MatrixDesktop.ArgumentGuide.txt') {
+            `$stream = `$asm.GetManifestResourceStream(`$name)
+            if (-not `$stream) { `$bad += "`$([IO.Path]::GetFileName(`$dll)) is missing `$name" } else { `$stream.Dispose() }
+        }
+    } catch {
+        `$bad += "`$([IO.Path]::GetFileName(`$dll)) could not be inspected: `$(`$_.Exception.Message)"
+    }
+}
+if (`$bad.Count -gt 0) { `$bad -join '; ' } else { "OK:`$seen" }
+"@
+        $probeResult = (& pwsh -NoProfile -Command $resourceProbe 2>&1) | Select-Object -Last 1
+        if ($probeResult -eq "OK:$($probeDlls.Count)") {
+            Test-Ok "both executables embed the icon and the argument guide ($($probeDlls.Count) assemblies inspected)"
+        } elseif ($probeResult -like 'OK:*') {
+            Test-Fail 'both executables embed the icon and the argument guide' `
+                "the probe only inspected $($probeResult -replace 'OK:','') of $($probeDlls.Count) assemblies, so the result is not trustworthy"
+        } else {
+            Test-Fail 'both executables embed the icon and the argument guide' $probeResult
+        }
+    }
+
     Test-Hdr 'tier 1: publish payload'
     if (Test-Path -LiteralPath $GatePublishDir) { Remove-Item -LiteralPath $GatePublishDir -Recurse -Force }
     $publishOk = $true

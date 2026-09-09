@@ -29,12 +29,13 @@
     <Compile Include="..\Shared\Logger.cs" Link="Shared\Logger.cs" />
     <Compile Include="..\Shared\FlagNormalization.cs" Link="Shared\FlagNormalization.cs" />
     <Compile Include="..\Shared\CrashDumpWriter.cs" Link="Shared\CrashDumpWriter.cs" />
+    <Compile Include="..\Shared\AppWindowIcon.cs" Link="Shared\AppWindowIcon.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Configurator embeds the same argument guide so its "?" button works
          without needing the sibling MatrixDesktop.exe to be present. -->
-    <EmbeddedResource Include="..\MatrixDesktop_Argument_Guide.txt" LogicalName="MatrixDesktopConfigurator.ArgumentGuide.txt" />
+    <EmbeddedResource Include="..\MatrixDesktop_Argument_Guide.txt" LogicalName="MatrixDesktop.ArgumentGuide.txt" />
   </ItemGroup>
 
   <ItemGroup>

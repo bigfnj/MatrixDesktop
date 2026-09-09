@@ -57,12 +57,58 @@ internal static class Logger
                     RotateIfNeeded();
                 }
 
-                File.AppendAllText(_logPath, sb.ToString());
+                AppendShared(sb.ToString());
             }
         }
         catch
         {
             // Never let logging crash the app.
+        }
+    }
+
+    // File.AppendAllText opens with FileShare.Read, which blocks a second WRITER, and the
+    // resulting IOException was swallowed by the caller's catch with no retry: the line was
+    // simply lost. Not hypothetical for this app. The configurator's "Test Argument" runs
+    // MatrixDesktopConfigurator.exe and MatrixDesktop.exe at the same time and both write
+    // here, so diagnostics went missing in exactly the situation that needed them. The
+    // _gate lock is per process and buys nothing across processes.
+    //
+    // Measured with 8 processes writing 60 lines each:
+    //     AppendAllText, no retry             18.3% of lines lost
+    //     FileShare.ReadWrite, bounded retry  30.6% lost   <- worse, see below
+    //     FileShare.Read, bounded retry        0.0% lost, 703 ms
+    //
+    // FileShare.ReadWrite is the trap. It lets two writers hold the file at once, and
+    // .NET's FileMode.Append seeks to the end at OPEN time rather than using Windows
+    // FILE_APPEND_DATA semantics, so both writers record the same offset and overwrite each
+    // other. Keeping other writers out and retrying is what actually works. Readers are
+    // still admitted, which is what the verification gate needs to tail this file.
+    private const int AppendAttempts = 20;
+    private const int AppendRetryDelayMs = 3;
+
+    private static void AppendShared(string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using var stream = new FileStream(
+                    _logPath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.Read,
+                    bufferSize: 4096,
+                    useAsync: false);
+                stream.Write(bytes, 0, bytes.Length);
+                return;
+            }
+            catch (Exception ex) when (
+                (ex is IOException || ex is UnauthorizedAccessException) && attempt < AppendAttempts)
+            {
+                System.Threading.Thread.Sleep(AppendRetryDelayMs);
+            }
         }
     }
 

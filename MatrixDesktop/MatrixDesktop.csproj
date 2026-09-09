@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   NOTE:
   - NETSDK1137 warns that Microsoft.NET.Sdk.WindowsDesktop is unnecessary for .NET 5+.
     Using Microsoft.NET.Sdk + <UseWindowsForms>true</UseWindowsForms> is the modern approach.
@@ -44,6 +44,7 @@
     <Compile Include="..\Shared\Logger.cs" Link="Shared\Logger.cs" />
     <Compile Include="..\Shared\FlagNormalization.cs" Link="Shared\FlagNormalization.cs" />
     <Compile Include="..\Shared\CrashDumpWriter.cs" Link="Shared\CrashDumpWriter.cs" />
+    <Compile Include="..\Shared\AppWindowIcon.cs" Link="Shared\AppWindowIcon.cs" />
   </ItemGroup>
 
   <ItemGroup>

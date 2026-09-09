@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -39,7 +39,7 @@ public sealed class ConfiguratorForm : Form
     private WebView2 _webView;
     private Process? _testProcess;
     private bool _isShuttingDown;
-    private AppWindowIcon? _windowIcon;
+    private MatrixDesktop.Shared.AppWindowIcon? _windowIcon;
 
     // Live-preview window (created on demand via OpenPreviewAsync, nulled on close).
     private PreviewWindow? _previewWindow;
@@ -85,7 +85,7 @@ public sealed class ConfiguratorForm : Form
     {
         try
         {
-            _windowIcon ??= AppWindowIcon.Load();
+            _windowIcon ??= MatrixDesktop.Shared.AppWindowIcon.Load(typeof(ConfiguratorForm).Assembly);
             _windowIcon.ApplyTo(this);
         }
         catch
@@ -422,7 +422,7 @@ public sealed class ConfiguratorForm : Form
         try
         {
             var assembly = Assembly.GetExecutingAssembly();
-            using var stream = assembly.GetManifestResourceStream("MatrixDesktopConfigurator.ArgumentGuide.txt");
+            using var stream = assembly.GetManifestResourceStream("MatrixDesktop.ArgumentGuide.txt");
             if (stream is not null)
             {
                 using var reader = new StreamReader(stream);
@@ -772,19 +772,36 @@ public sealed class ConfiguratorForm : Form
             return publishedCandidate;
         }
 
+        // Search under bin rather than naming the framework folder. The old version
+        // hardcoded bin\{Release,Debug}\net10.0-windows, so it was already blind to the
+        // bin\Release\net10.0-windows\win-x64 layout that any RID-specific build produces,
+        // and it would break outright on a framework bump. Newest wins, because a developer
+        // running this has just built something and means that one.
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
         {
-            var releaseCandidate = Path.Combine(current.FullName, "MatrixDesktop", "bin", "Release", "net10.0-windows", "MatrixDesktop.exe");
-            if (File.Exists(releaseCandidate))
+            var binRoot = Path.Combine(current.FullName, "MatrixDesktop", "bin");
+            if (!Directory.Exists(binRoot))
             {
-                return releaseCandidate;
+                continue;
             }
 
-            var debugCandidate = Path.Combine(current.FullName, "MatrixDesktop", "bin", "Debug", "net10.0-windows", "MatrixDesktop.exe");
-            if (File.Exists(debugCandidate))
+            try
             {
-                return debugCandidate;
+                var newest = Directory
+                    .EnumerateFiles(binRoot, "MatrixDesktop.exe", SearchOption.AllDirectories)
+                    .Select(static path => new FileInfo(path))
+                    .OrderByDescending(static file => file.LastWriteTimeUtc)
+                    .FirstOrDefault();
+
+                if (newest is not null)
+                {
+                    return newest.FullName;
+                }
+            }
+            catch (Exception ex)
+            {
+                MatrixDesktop.Shared.Logger.Warn($"Could not search '{binRoot}' for MatrixDesktop.exe: {ex.Message}");
             }
         }
 

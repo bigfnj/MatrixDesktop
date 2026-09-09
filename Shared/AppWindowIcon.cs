@@ -5,8 +5,23 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace MatrixDesktopConfigurator;
+namespace MatrixDesktop.Shared;
 
+// Window icon loading, shared by both executables. Previously this file existed twice,
+// byte-identical apart from its namespace line.
+//
+// The resource assembly is an explicit parameter rather than an ambient
+// Assembly.GetExecutingAssembly() call, and that is load-bearing. Both csproj embed
+// Matrix.ico under the logical name "Matrix.ico", so an ambient lookup only works while
+// the loading code lives in the same assembly as the resource. Move this type into a
+// class library and GetExecutingAssembly() would resolve to the library, which embeds
+// nothing, and the icon would silently fall through to the on-disk copy. That fallback
+// currently succeeds, so the regression would be invisible in every smoke test right up
+// until someone pruned the duplicate icon from the publish output. Passing the assembly in
+// makes the dependency explicit and impossible to break by relocating the file.
+//
+// Do not switch to Assembly.GetEntryAssembly(): it is null under some native hosts and
+// returns the test host when running under a test runner.
 internal sealed class AppWindowIcon : IDisposable
 {
     private const string IconResourceName = "Matrix.ico";
@@ -24,10 +39,12 @@ internal sealed class AppWindowIcon : IDisposable
         _large = large;
     }
 
-    public static AppWindowIcon Load()
+    public static AppWindowIcon Load(Assembly resourceAssembly)
     {
-        var small = LoadIcon(16, 16);
-        var large = LoadIcon(32, 32);
+        ArgumentNullException.ThrowIfNull(resourceAssembly);
+
+        var small = LoadIcon(resourceAssembly, 16, 16);
+        var large = LoadIcon(resourceAssembly, 32, 32);
 
         if (small is null && large is not null)
         {
@@ -84,18 +101,18 @@ internal sealed class AppWindowIcon : IDisposable
         _large?.Dispose();
     }
 
-    private static Icon? LoadIcon(int width, int height)
+    private static Icon? LoadIcon(Assembly resourceAssembly, int width, int height)
     {
-        return LoadEmbeddedIcon(width, height)
+        return LoadEmbeddedIcon(resourceAssembly, width, height)
             ?? LoadFileIcon(width, height)
-            ?? LoadExecutableIcon();
+            ?? LoadExecutableIcon(width, height);
     }
 
-    private static Icon? LoadEmbeddedIcon(int width, int height)
+    private static Icon? LoadEmbeddedIcon(Assembly resourceAssembly, int width, int height)
     {
         try
         {
-            using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(IconResourceName);
+            using var stream = resourceAssembly.GetManifestResourceStream(IconResourceName);
             return stream is null ? null : new Icon(stream, width, height);
         }
         catch
@@ -108,6 +125,8 @@ internal sealed class AppWindowIcon : IDisposable
     {
         try
         {
+            // AppContext.BaseDirectory is process scoped, so this fallback behaves the same
+            // regardless of which assembly this code is compiled into.
             var iconPath = Path.Combine(AppContext.BaseDirectory, IconResourceName);
             return File.Exists(iconPath) ? new Icon(iconPath, width, height) : null;
         }
@@ -117,11 +136,20 @@ internal sealed class AppWindowIcon : IDisposable
         }
     }
 
-    private static Icon? LoadExecutableIcon()
+    private static Icon? LoadExecutableIcon(int width, int height)
     {
         try
         {
-            return Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            using var extracted = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (extracted is null)
+            {
+                return null;
+            }
+
+            // ExtractAssociatedIcon ignores the size request and returns a single size, so
+            // the requested variant is selected here. Without this the 16x16 title-bar slot
+            // received a downscaled 32x32, which is a quality regression with no error.
+            return new Icon(extracted, width, height);
         }
         catch
         {

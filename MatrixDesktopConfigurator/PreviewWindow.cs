@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -138,33 +138,51 @@ internal sealed class PreviewWindow : Form
         base.OnFormClosed(e);
     }
 
-    // Locate the web/ folder using the same resilience pattern MainForm uses.
-    // Tries: 1) sibling to the EXE (publish layout), 2) the dev-side
-    // MatrixDesktop project folder (bin/Debug layout). Returns null if neither
-    // exists — caller is responsible for showing an error message.
+    // Locates the web/ folder for the embedded preview.
+    //
+    // First the publish layout, where web/ sits beside the executable. Otherwise walk up
+    // looking for the MatrixDesktop project's own web/ folder. The previous version used
+    // fixed "..\..\..\.." hops, which encoded an exact output depth and therefore silently
+    // returned null for any RID-specific build, where the output gains a win-x64 level.
     public static string? FindWebRoot()
     {
-        string?[] candidates =
+        var beside = Path.Combine(AppContext.BaseDirectory, "web");
+        if (IsWebRoot(beside))
         {
-            Path.Combine(AppContext.BaseDirectory, "web"),
-            Path.Combine(AppContext.BaseDirectory, "..", "MatrixDesktop", "web"),
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "MatrixDesktop", "web"),
-        };
+            return Path.GetFullPath(beside);
+        }
 
-        foreach (var candidate in candidates)
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
         {
-            if (string.IsNullOrWhiteSpace(candidate)) continue;
-            try
+            foreach (var candidate in new[]
+                     {
+                         Path.Combine(current.FullName, "MatrixDesktop", "web"),
+                         Path.Combine(current.FullName, "web"),
+                     })
             {
-                var full = Path.GetFullPath(candidate);
-                if (Directory.Exists(full) && File.Exists(Path.Combine(full, "index.html")))
+                if (IsWebRoot(candidate))
                 {
-                    return full;
+                    return Path.GetFullPath(candidate);
                 }
             }
-            catch { /* try the next one */ }
         }
 
         return null;
     }
+
+    private static bool IsWebRoot(string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate)) return false;
+        try
+        {
+            var full = Path.GetFullPath(candidate);
+            return Directory.Exists(full) && File.Exists(Path.Combine(full, "index.html"));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
 }
