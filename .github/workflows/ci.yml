@@ -6,19 +6,42 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default. Nothing in this workflow writes to the repository,
+# so the token it gets should not be able to. Without this block the job token
+# inherits whatever the repository default is, which for older repos is
+# read-write on everything.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build & Publish Smoke Test
-    runs-on: windows-latest
+    # Pinned image rather than windows-latest, so a GitHub image rollover cannot
+    # change the toolchain under a green build without a commit here.
+    runs-on: windows-2025
+    # A hung WebView2 or dotnet process would otherwise burn the 6h default.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+        # actions/checkout v4.4.0, pinned to a full commit SHA. A tag is mutable:
+        # whoever controls the action repo can repoint v4 at different code, and
+        # this workflow would run it with no diff here. A SHA cannot be repointed.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          dotnet-version: '10.0.x'
+          # Do not leave GITHUB_TOKEN in .git/config after checkout. Nothing here
+          # pushes or fetches again, so no later step needs it, and a compromised
+          # build step should not find credentials lying in the working tree.
+          persist-credentials: false
+
+      - name: Setup .NET SDK
+        # actions/setup-dotnet v4.3.1, pinned for the same reason.
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          # Must match global.json. global.json is what actually selects the SDK,
+          # so if these two disagree the resolved SDK wins and this input becomes
+          # decoration. Change both together.
+          dotnet-version: '10.0.302'
 
       - name: Restore
         run: dotnet restore MatrixDesktopApp.sln
@@ -80,3 +103,53 @@ jobs:
           $cfgSize = (Get-Item $cfgExe).Length
           Write-Host "OK: MatrixDesktop.exe ($('{0:N0}' -f $mdSize) bytes)"
           Write-Host "OK: MatrixDesktopConfigurator.exe ($('{0:N0}' -f $cfgSize) bytes)"
+
+      - name: Verification gate (tier 1)
+        shell: pwsh
+        run: |
+          # tests\run-gate.ps1 has four outcomes, not two:
+          #   0  pass
+          #   1  real failure          -> fail the build
+          #   2  could not verify      -> tolerated HERE, but never silently
+          #   3  the gate itself broke -> fail the build
+          #
+          # 2 is tolerated because a hosted runner has no interactive desktop
+          # session, and a tier 1 check that needs one (or needs node on PATH)
+          # reports UNCHECKED rather than failing. Treating that as red would
+          # make CI permanently broken for an environmental reason. Treating it
+          # as a plain green would let checks quietly stop running, which is the
+          # exact failure the gate's four-outcome design exists to prevent -- so
+          # every unchecked item is re-surfaced as a GitHub warning annotation
+          # and shows up in the run summary.
+          #
+          # 3 is kept distinct from 1 on purpose: "the harness broke" must never
+          # be reported as "your change broke it".
+          # RUNNER_TEMP only exists on a GitHub runner. Falling back keeps this
+          # block runnable, and testable, off a runner; without the fallback
+          # Join-Path throws on a null path and the failure surfaces as an empty
+          # exit code, which reads like a gate failure rather than a step bug.
+          $tmp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+          $log = Join-Path $tmp 'gate-tier1.log'
+          pwsh -File tests\run-gate.ps1 -Tier1Only 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          Write-Host "gate exit code: $code"
+
+          if ($code -eq 0) { exit 0 }
+
+          if ($code -eq 2) {
+            $unchecked = @(
+              Get-Content -LiteralPath $log |
+                Select-String -Pattern '^\s*UNCHECKED\s+(.+)$' |
+                ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+            )
+            if ($unchecked.Count -eq 0) {
+              # Exit 2 with no UNCHECKED line means the gate's own reporting is
+              # inconsistent, which is a harness problem, not an acceptable pass.
+              throw "Gate exited 2 but printed no UNCHECKED item. Treating as a harness fault; see $log."
+            }
+            Write-Host "::warning title=Verification gate could not verify $($unchecked.Count) check(s)::$($unchecked -join ' | ')"
+            foreach ($u in $unchecked) { Write-Host "  not verified: $u" }
+            exit 0
+          }
+
+          throw "Verification gate failed with exit $code (1 = a real failure, 3 = the gate itself broke)."
