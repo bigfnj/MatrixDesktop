@@ -1,4 +1,4 @@
-﻿import { makeFullScreenQuad, makePipeline } from "./utils.js";
+import { makeFullScreenQuad, makePipeline } from "./utils.js";
 
 import makeRain from "./rainPass.js";
 import makeBloomPass from "./bloomPass.js";
@@ -35,7 +35,7 @@ const loadJS = (src) =>
 	});
 
 export default async (canvas, config) => {
-	await Promise.all([loadJS("lib/regl.min.js"), loadJS("lib/gl-matrix.js")]);
+	await Promise.all([loadJS("lib/regl.min.js"), loadJS("lib/gl-matrix.min.js")]);
 
 	const resize = () => {
 		const devicePixelRatio = window.devicePixelRatio ?? 1;

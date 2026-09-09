@@ -33,7 +33,7 @@ const effects = {
 };
 
 export default async (canvas, config) => {
-	await loadJS("lib/gl-matrix.js");
+	await loadJS("lib/gl-matrix.min.js");
 	let pipeline = null;
 	let cleanedUp = false;
 
