@@ -53,7 +53,19 @@ internal sealed class DraftRandomizer
     ];
 
     private static readonly double[] FrameRates = [30, 45, 60];
-    private readonly Random _random = new();
+    private readonly Random _random;
+
+    public DraftRandomizer()
+        : this(null)
+    {
+    }
+
+    // A seed makes the randomizer reproducible, which is what lets the regression harness
+    // assert anything about it at all. Production keeps the parameterless constructor.
+    public DraftRandomizer(int? seed)
+    {
+        _random = seed.HasValue ? new Random(seed.Value) : new Random();
+    }
 
     public JsonObject Randomize(JsonObject values, string? scope)
     {
@@ -164,7 +176,11 @@ internal sealed class DraftRandomizer
         return result;
     }
 
-    private JsonObject ColorFromHsl(double h, double s, double l)
+    // Internal and static so the regression harness can assert it agrees with
+    // ColorConverter.HslToRgb. The two implementations are duplicates: this one predates
+    // the extraction of ColorConverter and was not migrated with the importer. Proving
+    // they agree is the precondition for deleting this copy.
+    internal static JsonObject ColorFromHsl(double h, double s, double l)
     {
         h = WrapHue(h);
         s = Clamp01(s);

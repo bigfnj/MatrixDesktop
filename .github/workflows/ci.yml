@@ -26,6 +26,17 @@ jobs:
       - name: Build (Release)
         run: dotnet build MatrixDesktopApp.sln --configuration Release --no-restore
 
+      - name: Run the regression harness
+        # Console EXE whose exit code is the result, so no test-framework packages and no
+        # `dotnet test`. Start-Process -Wait is not needed here because this is a console
+        # subsystem binary, unlike the two GUI executables.
+        shell: pwsh
+        run: |
+          $harness = 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
+          if (-not (Test-Path $harness)) { throw "Harness was not produced: $harness" }
+          & $harness
+          if ($LASTEXITCODE -ne 0) { throw "Regression harness failed (exit $LASTEXITCODE)." }
+
       - name: Publish MatrixDesktop (framework-dependent)
         shell: pwsh
         run: |
