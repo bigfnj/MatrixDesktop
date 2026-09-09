@@ -37,6 +37,10 @@ jobs:
           & $harness
           if ($LASTEXITCODE -ne 0) { throw "Regression harness failed (exit $LASTEXITCODE)." }
 
+      # These steps deliberately do NOT use the .pubxml profiles, so every property
+      # the profile would have supplied has to be repeated here. Symbol and doc-file
+      # stripping is also set in both csproj (scoped to Release) so it cannot be
+      # forgotten again; the explicit -p: flags keep this step self-describing.
       - name: Publish MatrixDesktop (framework-dependent)
         shell: pwsh
         run: |
@@ -45,6 +49,10 @@ jobs:
             -r win-x64 `
             --no-self-contained `
             -p:PublishSingleFile=false `
+            -p:PublishReadyToRun=true `
+            -p:AllowedReferenceRelatedFileExtensions=none `
+            -p:DebugType=none `
+            -p:DebugSymbols=false `
             -p:PublishDir=bin\Publish\win-x64-fd\
 
       - name: Publish MatrixDesktopConfigurator (framework-dependent)
@@ -55,6 +63,10 @@ jobs:
             -r win-x64 `
             --no-self-contained `
             -p:PublishSingleFile=false `
+            -p:PublishReadyToRun=true `
+            -p:AllowedReferenceRelatedFileExtensions=none `
+            -p:DebugType=none `
+            -p:DebugSymbols=false `
             -p:PublishDir=bin\Publish\win-x64-fd\
 
       - name: Verify publish artefacts

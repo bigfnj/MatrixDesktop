@@ -35,6 +35,9 @@ jobs:
       - name: Restore
         run: dotnet restore MatrixDesktopApp.sln
 
+      # As in ci.yml: no .pubxml is loaded here, so symbol/doc stripping and
+      # ReadyToRun have to be passed explicitly. Without the first three the
+      # release zip carried 684,631 bytes of .pdb and WebView2 IntelliSense .xml.
       - name: Publish MatrixDesktop (framework-dependent)
         shell: pwsh
         run: |
@@ -43,6 +46,10 @@ jobs:
             -r win-x64 `
             --no-self-contained `
             -p:PublishSingleFile=false `
+            -p:PublishReadyToRun=true `
+            -p:AllowedReferenceRelatedFileExtensions=none `
+            -p:DebugType=none `
+            -p:DebugSymbols=false `
             -p:PublishDir=bin\Publish\win-x64-fd\ `
             -p:Version=${{ steps.version.outputs.version }} `
             -p:AssemblyVersion=${{ steps.version.outputs.assembly }} `
@@ -56,6 +63,10 @@ jobs:
             -r win-x64 `
             --no-self-contained `
             -p:PublishSingleFile=false `
+            -p:PublishReadyToRun=true `
+            -p:AllowedReferenceRelatedFileExtensions=none `
+            -p:DebugType=none `
+            -p:DebugSymbols=false `
             -p:PublishDir=bin\Publish\win-x64-fd\ `
             -p:Version=${{ steps.version.outputs.version }} `
             -p:AssemblyVersion=${{ steps.version.outputs.assembly }} `
