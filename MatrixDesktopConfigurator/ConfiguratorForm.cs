@@ -41,9 +41,6 @@ public sealed class ConfiguratorForm : Form
     private bool _isShuttingDown;
     private MatrixDesktop.Shared.AppWindowIcon? _windowIcon;
 
-    // Live-preview window (created on demand via OpenPreviewAsync, nulled on close).
-    private PreviewWindow? _previewWindow;
-
     // Cached embedded argument-guide text for the "?" help modal.
     private string? _cachedHelpText;
 
@@ -121,20 +118,6 @@ public sealed class ConfiguratorForm : Form
     {
         _isShuttingDown = true;
         StopTestProcess();
-
-        // Close the live-preview window if one is open. We assigned a
-        // FormClosed handler when creating it that nulls _previewWindow,
-        // but explicitly closing here ensures no orphaned WebView2 process
-        // is left behind when the user dismisses the configurator.
-        try
-        {
-            if (_previewWindow is { IsDisposed: false })
-            {
-                _previewWindow.Close();
-            }
-        }
-        catch { /* ignore */ }
-        _previewWindow = null;
 
         try
         {
@@ -260,7 +243,7 @@ public sealed class ConfiguratorForm : Form
         // Map the matrix web/ app to its own origin so the configurator page
         // can embed it in the live-preview iframe. If the assets aren't found,
         // the preview stays unavailable and the UI hides the pane.
-        _previewWebRoot = PreviewWindow.FindWebRoot();
+        _previewWebRoot = WebAssets.FindWebRoot();
         if (_previewWebRoot is not null)
         {
             _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
@@ -315,9 +298,6 @@ public sealed class ConfiguratorForm : Form
             // v1.0 additions
             "setTheme"         => SetTheme(payload),
             "exportPowerShell" => ExportPowerShell(payload),
-            "openPreview"      => await OpenPreviewAsync(),
-            "closePreview"     => ClosePreview(),
-            "previewCommand"   => await PreviewCommandAsync(payload),
             "loadHelp"         => LoadHelp(),
             _ => throw new InvalidOperationException($"Unknown configurator request: {type}"),
         };
@@ -343,73 +323,10 @@ public sealed class ConfiguratorForm : Form
         var draft = ReadObject(payload, "draft");
         var script = _commandBuilder.BuildPowerShellScript(draft, includeDefaults: false);
 
-        // Stash on the system clipboard so the user can paste anywhere. We
-        // also return the script body so the UI can show a confirmation
-        // preview / let the user save to file in a future release.
-        try
-        {
-            if (Clipboard.ContainsText() || !string.IsNullOrEmpty(script))
-            {
-                Clipboard.SetText(script);
-            }
-        }
-        catch (Exception ex)
-        {
-            MatrixDesktop.Shared.Logger.Warn($"ExportPowerShell clipboard set failed: {ex.Message}");
-        }
-
-        return new { script, copied = true };
-    }
-
-    private async Task<object?> OpenPreviewAsync()
-    {
-        if (_previewWindow is { IsDisposed: false })
-        {
-            // Already open — bring it forward and re-apply the latest query.
-            _previewWindow.BringToFront();
-            _previewWindow.Activate();
-            return new { opened = true, alreadyOpen = true };
-        }
-
-        var webRoot = PreviewWindow.FindWebRoot();
-        if (webRoot is null)
-        {
-            MatrixDesktop.Shared.Logger.Warn("Preview requested but no web/ folder was found beside the configurator.");
-            return new { opened = false, message = "web/ assets not found beside MatrixDesktopConfigurator.exe (or in dev tree)." };
-        }
-
-        var userDataFolder = GetConfiguratorAppDataFolder("PreviewWebView2");
-        var preview = new PreviewWindow(webRoot, userDataFolder);
-        preview.FormClosed += (_, _) => _previewWindow = null;
-        _previewWindow = preview;
-        preview.Show();
-
-        // First navigation uses the latest saved draft so the preview matches
-        // what's on screen immediately rather than showing defaults briefly.
-        var query = _commandBuilder.BuildWebQueryString(_state.LastDraft ?? _commandBuilder.CreateDefaultDraft());
-        await preview.NavigateWithQueryAsync(query);
-        return new { opened = true, alreadyOpen = false };
-    }
-
-    private object ClosePreview()
-    {
-        if (_previewWindow is { IsDisposed: false })
-        {
-            try { _previewWindow.Close(); } catch { /* ignore */ }
-        }
-        _previewWindow = null;
-        return new { closed = true };
-    }
-
-    private async Task<object?> PreviewCommandAsync(JsonElement payload)
-    {
-        if (_previewWindow is null || _previewWindow.IsDisposed) return new { applied = false, reason = "no-preview" };
-        if (!_previewWindow.IsReady) return new { applied = false, reason = "not-ready" };
-
-        var draft = ReadObject(payload, "draft");
-        var query = _commandBuilder.BuildWebQueryString(draft);
-        await _previewWindow.NavigateWithQueryAsync(query);
-        return new { applied = true };
+        // The script body is returned either way so the UI can still show it if the
+        // clipboard is unavailable.
+        var copied = TrySetClipboardText(script, "the exported PowerShell script");
+        return new { script, copied };
     }
 
     private object LoadHelp()
@@ -571,24 +488,33 @@ public sealed class ConfiguratorForm : Form
     private object CopyCommand(JsonElement payload)
     {
         var command = ReadOptionalString(payload, "command") ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(command))
+        if (string.IsNullOrWhiteSpace(command))
         {
-            Clipboard.SetText(command);
+            return new { copied = false, message = "There is no command to copy." };
         }
 
-        return new { copied = true };
+        var copied = TrySetClipboardText(command, "the generated command");
+        return new
+        {
+            copied,
+            message = copied ? null : "The clipboard is in use by another program. Try again.",
+        };
     }
 
     private object TestCommand(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
-        StopTestProcess();
 
+        // MD-15: resolve the executable BEFORE stopping the running test. The old order
+        // killed the user's current test instance and only then discovered it had nothing
+        // to launch, so a missing executable cost them the window they were looking at.
         var exe = FindMatrixDesktopExe();
         if (exe is null)
         {
             throw new FileNotFoundException("MatrixDesktop.exe was not found beside the configurator or in the local build output.");
         }
+
+        StopTestProcess();
 
         var info = new ProcessStartInfo(exe)
         {
@@ -612,6 +538,29 @@ public sealed class ConfiguratorForm : Form
             processId = _testProcess.Id,
             command = _commandBuilder.BuildCommand(draft, includeDefaults: false, forTest: true),
         };
+    }
+
+    // SetDataObject rather than SetText: it retries internally, which matters because the
+    // Windows clipboard is a shared single-owner resource and any clipboard manager,
+    // remote-desktop clipboard sync or password manager can hold it briefly. Returns
+    // whether it actually worked, so the UI stops claiming success it cannot verify.
+    private static bool TrySetClipboardText(string text, string what)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        try
+        {
+            Clipboard.SetDataObject(text, copy: true, retryTimes: 10, retryDelay: 100);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MatrixDesktop.Shared.Logger.Warn($"Could not put {what} on the clipboard: {ex.Message}");
+            return false;
+        }
     }
 
     private object StopTest()

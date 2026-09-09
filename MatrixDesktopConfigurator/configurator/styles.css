@@ -20,6 +20,25 @@ html[data-theme="dark"] {
 	--invalid-border: #db6d6d;
 	--invalid-bg: rgba(219, 109, 109, 0.08);
 	--modal-overlay: rgba(0, 0, 0, 0.55);
+
+	/* Surfaces and accents that used to be hardcoded, which is what broke the
+	   light theme. Anything added here MUST get a light counterpart below. */
+	--chrome: #101619;
+	--mark-border: #2f4838;
+	--mark-bg: #13251a;
+	--nav-active-border: #386c49;
+	--nav-active-bg: #15251b;
+	--disabled-border: #223035;
+	--disabled-bg: #11181b;
+	--disabled-text: #6f817b;
+	--accent-border: #34574a;
+	--randomize-border: #3a5f67;
+	--randomize-bg: #17292e;
+	--test-border: #36643f;
+	--test-bg: #17311d;
+	--stop-border: #713e3e;
+	--stop-text: #ffb3b3;
+	--focus-ring: rgba(104, 212, 124, 0.2);
 }
 
 html[data-theme="light"] {
@@ -41,6 +60,26 @@ html[data-theme="light"] {
 	--invalid-border: #b21f1f;
 	--invalid-bg: rgba(178, 31, 31, 0.06);
 	--modal-overlay: rgba(20, 25, 30, 0.45);
+
+	/* Light counterparts. Tinted rather than merely inverted so the accent
+	   buttons still read as accents, and each foreground keeps usable contrast
+	   against its own surface rather than against the dark one. */
+	--chrome: #e9edf1;
+	--mark-border: #a9cdb5;
+	--mark-bg: #e6f4ea;
+	--nav-active-border: #7fb894;
+	--nav-active-bg: #e2f2e7;
+	--disabled-border: #ccd3d9;
+	--disabled-bg: #eceff2;
+	--disabled-text: #78848c;
+	--accent-border: #8fbfa2;
+	--randomize-border: #8dbcc4;
+	--randomize-bg: #e2f1f4;
+	--test-border: #8fbf9d;
+	--test-bg: #e4f3e8;
+	--stop-border: #cf9a9a;
+	--stop-text: #8f1f1f;
+	--focus-ring: rgba(31, 158, 87, 0.25);
 }
 
 * {
@@ -111,7 +150,7 @@ input:focus,
 textarea:focus,
 button:focus-visible {
 	border-color: var(--focus);
-	box-shadow: 0 0 0 2px rgba(104, 212, 124, 0.2);
+	box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 .app-shell {
@@ -127,7 +166,7 @@ button:focus-visible {
 	gap: 20px;
 	padding: 14px 18px;
 	border-bottom: 1px solid var(--line);
-	background: #101619;
+	background: var(--chrome);
 }
 
 .brand {
@@ -142,9 +181,9 @@ button:focus-visible {
 	place-items: center;
 	width: 42px;
 	height: 42px;
-	border: 1px solid #2f4838;
+	border: 1px solid var(--mark-border);
 	border-radius: 6px;
-	background: #13251a;
+	background: var(--mark-bg);
 	color: var(--green);
 	font-weight: 700;
 }
@@ -199,7 +238,7 @@ h1 {
 .preview-header {
 	padding: 10px 14px;
 	border-bottom: 1px solid var(--line);
-	background: #101619;
+	background: var(--chrome);
 	font-size: 12px;
 	font-weight: 700;
 	letter-spacing: 0.05em;
@@ -219,7 +258,7 @@ h1 {
 	display: flex;
 	flex-direction: column;
 	border-right: 1px solid var(--line);
-	background: #101619;
+	background: var(--chrome);
 	padding: 12px;
 	overflow: auto;
 }
@@ -245,8 +284,8 @@ h1 {
 }
 
 .group-nav button.active {
-	border-color: #386c49;
-	background: #15251b;
+	border-color: var(--nav-active-border);
+	background: var(--nav-active-bg);
 	color: var(--green);
 }
 
@@ -321,12 +360,12 @@ h1 {
 }
 
 .disabled-field {
-	border-color: #223035;
-	background: #11181b;
+	border-color: var(--disabled-border);
+	background: var(--disabled-bg);
 }
 
 .disabled-field label {
-	color: #6f817b;
+	color: var(--disabled-text);
 }
 
 .disabled-field input,
@@ -423,11 +462,6 @@ h1 {
 	width: 64px;
 }
 
-.mini-actions {
-	display: flex;
-	gap: 6px;
-}
-
 .mini-actions button,
 .list-row button {
 	width: 34px;
@@ -437,13 +471,13 @@ h1 {
 
 .add-row {
 	justify-self: start;
-	border-color: #34574a;
+	border-color: var(--accent-border);
 	color: var(--green);
 }
 
 .command-panel {
 	border-top: 1px solid var(--line);
-	background: #101619;
+	background: var(--chrome);
 	padding: 12px 18px 14px;
 }
 
@@ -484,20 +518,20 @@ h1 {
 }
 
 #randomizeButton {
-	border-color: #3a5f67;
-	background: #17292e;
+	border-color: var(--randomize-border);
+	background: var(--randomize-bg);
 	color: var(--teal);
 }
 
 #testButton {
-	border-color: #36643f;
-	background: #17311d;
+	border-color: var(--test-border);
+	background: var(--test-bg);
 	color: var(--green);
 }
 
 #stopButton:not(:disabled) {
-	border-color: #713e3e;
-	color: #ffb3b3;
+	border-color: var(--stop-border);
+	color: var(--stop-text);
 }
 
 .import-panel {
@@ -596,9 +630,9 @@ h1 {
 
 /* Invalid input feedback — applied by app.js when a numeric value falls
    outside the field's metadata min/max range. */
-.field input.invalid,
-.field select.invalid,
-.field textarea.invalid {
+/* Only an <input> ever receives .invalid: app.js adds it in the number-field
+   builder and nowhere else, and it builds no <select> or <textarea> there. */
+.field input.invalid {
 	border-color: var(--invalid-border);
 	background: var(--invalid-bg);
 }

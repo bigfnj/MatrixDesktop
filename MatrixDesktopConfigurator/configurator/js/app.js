@@ -1,4 +1,4 @@
-import { openColorPicker } from "./colorPicker.js";
+﻿import { openColorPicker } from "./colorPicker.js";
 
 const state = {
 	metadata: null,
@@ -151,13 +151,18 @@ const setStatus = (message, tone = "normal") => {
 	el.statusLine.style.color = tone === "error" ? "var(--danger)" : tone === "ok" ? "var(--green)" : "var(--muted)";
 };
 
+const setSaveState = (text) => {
+	el.saveState.textContent = text;
+};
+
 const setDirty = (dirty) => {
 	state.dirty = dirty;
-	el.saveState.textContent = dirty ? "Draft changed" : "Draft saved";
+	setSaveState(dirty ? "Draft changed" : "Draft saved");
 };
 
 const scheduleSaveDraft = () => {
 	window.clearTimeout(state.saveTimer);
+	setSaveState("Saving…");
 	state.saveTimer = window.setTimeout(async () => {
 		try {
 			await requestHost("saveDraft", {
@@ -165,10 +170,11 @@ const scheduleSaveDraft = () => {
 				selectedPresetId: state.selectedPresetId,
 			});
 			state.lastDraft = clone(state.draft);
-			if (!state.dirty) {
-				el.saveState.textContent = "Draft saved";
-			}
+			// Unconditional. The old guard was `if (!state.dirty)`, which could never be
+			// true here because updateDraftValue sets dirty before scheduling the save.
+			setSaveState("Draft saved");
 		} catch (error) {
+			setSaveState("Save failed");
 			setStatus(error.message, "error");
 		}
 	}, 250);
@@ -591,7 +597,13 @@ const renderPaletteField = (field) => {
 	add.className = "add-row";
 	add.textContent = "Add stop";
 	add.addEventListener("click", () => {
-		stops.push({ r: 0, g: 1, b: 0.45, at: stops.length ? 1 : 0 });
+		// MD-16: every added stop used to land at exactly 1.0, so adding two produced two
+		// stops at the same position and a degenerate gradient. Place the new one between
+		// the last stop and the end instead, which is both non-colliding and where someone
+		// clicking "Add stop" would expect it.
+		const last = stops.length ? clamp01(Number(stops[stops.length - 1].at)) : -1;
+		const at = stops.length === 0 ? 0 : clamp01((last + 1) / 2);
+		stops.push({ r: 0, g: 1, b: 0.45, at });
 		updateDraftValue(field, stops);
 		renderFields();
 	});
@@ -929,8 +941,14 @@ const bindEvents = () => {
 
 	el.copyButton.addEventListener("click", async () => {
 		try {
-			await requestHost("copyCommand", { command: el.commandOutput.value });
-			setStatus("Command copied.", "ok");
+			// The host now reports whether the clipboard write actually succeeded, rather
+			// than always answering copied = true.
+			const result = await requestHost("copyCommand", { command: el.commandOutput.value });
+			if (result?.copied) {
+				setStatus("Command copied.", "ok");
+			} else {
+				setStatus(result?.message || "Could not copy the command.", "error");
+			}
 		} catch (error) {
 			setStatus(error.message, "error");
 		}
@@ -963,8 +981,12 @@ const bindEvents = () => {
 	if (el.exportPsButton) {
 		el.exportPsButton.addEventListener("click", async () => {
 			try {
-				await requestHost("exportPowerShell", { draft: state.draft });
-				setStatus("PowerShell script copied to clipboard.", "ok");
+				const result = await requestHost("exportPowerShell", { draft: state.draft });
+				if (result?.copied) {
+					setStatus("PowerShell script copied to clipboard.", "ok");
+				} else {
+					setStatus("Script generated, but the clipboard is in use by another program.", "error");
+				}
 			} catch (error) {
 				setStatus(`PowerShell export failed: ${error.message}`, "error");
 			}

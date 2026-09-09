@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text.Json.Nodes;
 
 namespace MatrixDesktopConfigurator;
@@ -176,27 +176,15 @@ internal sealed class DraftRandomizer
         return result;
     }
 
-    // Internal and static so the regression harness can assert it agrees with
-    // ColorConverter.HslToRgb. The two implementations are duplicates: this one predates
-    // the extraction of ColorConverter and was not migrated with the importer. Proving
-    // they agree is the precondition for deleting this copy.
+    // MD-33: delegates to ColorConverter instead of carrying a second copy of the same
+    // piecewise function. This class predated that extraction and was not migrated with the
+    // importer, so the codebase held two implementations of identical maths in one project.
+    // Kept internal and static so the regression harness can still assert the equivalence
+    // that made removing the duplicate safe.
     internal static JsonObject ColorFromHsl(double h, double s, double l)
     {
-        h = WrapHue(h);
-        s = Clamp01(s);
-        l = Clamp01(l);
-
-        if (s == 0)
-        {
-            return Color(l, l, l);
-        }
-
-        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-        var p = 2 * l - q;
-        return Color(
-            HueToRgb(p, q, h + 1.0 / 3.0),
-            HueToRgb(p, q, h),
-            HueToRgb(p, q, h - 1.0 / 3.0));
+        var rgb = ColorConverter.HslToRgb(h, s, l);
+        return Color(rgb[0], rgb[1], rgb[2]);
     }
 
     private static JsonObject Color(double r, double g, double b) => new()
@@ -241,29 +229,7 @@ internal sealed class DraftRandomizer
         return ((hue % 1) + 1) % 1;
     }
 
-    private static double Clamp01(double value)
-    {
-        if (value < 0)
-        {
-            return 0;
-        }
-
-        if (value > 1)
-        {
-            return 1;
-        }
-
-        return value;
-    }
-
-    private static double HueToRgb(double p, double q, double t)
-    {
-        t = WrapHue(t);
-        if (t < 1.0 / 6.0) return p + (q - p) * 6 * t;
-        if (t < 1.0 / 2.0) return q;
-        if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6;
-        return p;
-    }
+    private static double Clamp01(double value) => ColorConverter.Clamp01(value);
 
     private static string GetString(JsonObject obj, string key, string defaultValue)
     {

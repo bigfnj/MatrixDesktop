@@ -155,15 +155,28 @@ internal sealed partial class CommandBuilder
         };
     }
 
+    // MD-30: the serialised form of each field's default is computed once and kept, rather
+    // than being re-serialised for every field on every call. BuildCommand and
+    // BuildWebQueryString both run on a per-keystroke debounce, and every call walked all
+    // ~60 fields calling SerializeToNode plus ToJsonString twice. The catalog is immutable
+    // once ArgumentCatalog.Create has run, so caching is safe by construction.
+    private readonly Dictionary<string, string?> _defaultJsonByFieldId = [];
+
     private bool IsDefault(ArgumentDefinition field, JsonNode value)
     {
-        var defaultNode = JsonSerializer.SerializeToNode(field.DefaultValue, _jsonOptions);
-        if (defaultNode is null)
+        if (!_defaultJsonByFieldId.TryGetValue(field.Id, out var defaultJson))
+        {
+            var defaultNode = JsonSerializer.SerializeToNode(field.DefaultValue, _jsonOptions);
+            defaultJson = defaultNode is null ? null : NormalizeJson(defaultNode);
+            _defaultJsonByFieldId[field.Id] = defaultJson;
+        }
+
+        if (defaultJson is null)
         {
             return IsEmpty(value);
         }
 
-        return NormalizeJson(value) == NormalizeJson(defaultNode);
+        return NormalizeJson(value) == defaultJson;
     }
 
     private bool IsEmpty(JsonNode value)

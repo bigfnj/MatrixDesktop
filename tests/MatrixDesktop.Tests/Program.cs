@@ -8,6 +8,7 @@ tests.AddRange(AppCliTests.All);
 tests.AddRange(ImporterTests.All);
 tests.AddRange(CommandBuilderTests.All);
 tests.AddRange(ParityTests.All);
+tests.AddRange(StorageTests.All);
 
 var failures = 0;
 foreach ((string name, Action test) in tests)
