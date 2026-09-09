@@ -1,5 +1,47 @@
 # MatrixDesktop Backlog
 
+## Picking this up cold
+
+State as of **v1.0.4**, 2026-09-09. `main` is clean, tagged, CI and Release green.
+
+**Verify before you trust anything.** One command, and it is the whole story:
+
+```pwsh
+pwsh -File tests\run-gate.ps1              # 40 checks, needs a desktop session
+pwsh -File tests\run-gate.ps1 -Tier1Only   # 12 checks, what CI runs, no session needed
+```
+
+Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` is not a pass.**
+
+**The one convention that matters here: mutation-test every new check.** Break the thing it
+guards, confirm exactly one failure naming the right file, restore, and put the mutation result
+in the commit message rather than the green run. This is not ceremony. Three checks in this repo
+passed vacuously until someone tried to break them, and one mutation caught a bug in the check
+being added that same hour. An unmutated gate is decoration.
+
+**Where the coverage is, and what each layer cannot see:**
+
+| Layer | Catches | Blind to |
+| --- | --- | --- |
+| `tests\MatrixDesktop.Tests` (81 tests, console EXE, exit code is the result) | argument parsing, command building, colour maths, storage | anything that renders |
+| `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
+| `tests\web-smoke.py` (12 checks, headless Chromium, runs in CI) | geometry, theme contrast, whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+
+That middle blind spot is not hypothetical. v1.0.2 shipped with the configurator's entire
+command panel below the bottom of the window and every pixel statistic looked fine.
+
+**Three traps that have each bitten more than once.** Details in the sections below and in
+`VENDORING.md`: `bloomPass`'s transposed width/height uniforms are correct and must not be
+"fixed"; the argument guide's header version has gone stale twice and now has a gate check;
+and a Python patch script that reads with universal newlines or writes `utf-8-sig` will flip
+line endings or add a BOM across a whole file, so check `git diff` first-lines after one.
+
+**Releasing.** Push a `v*` tag and `release.yml` does the rest, stamping the version from the
+tag. Bump `<Version>` in both `.csproj` and the guide's header line *in the same commit as the
+tag*, because `release.yml` overriding from the tag is exactly what let the repo sit at 1.0.2
+through two shipped releases without anyone noticing. The gate holds the guide and the two
+csproj to each other; it cannot know what tag you are about to push.
+
 ## v1.0 — Completed
 
 These features shipped in v1.0.0:

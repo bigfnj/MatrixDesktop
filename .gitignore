@@ -84,5 +84,28 @@ SESSION_HANDOFF*.md
 .cursorrules
 .windsurfrules
 SESSION_*
-# Verification gate scratch output (publishes, screenshots)
+# Verification gate scratch output (publishes, screenshots).
+# Note this also catches MatrixDesktop/artifacts/, which is where ad-hoc publish experiments
+# have landed; the gate itself only writes to the repo-root artifacts/gate/.
 artifacts/
+
+# Secrets. Nothing matching these has ever existed in this repo and none is expected to:
+# it is a public repository that talks to no service and holds no credential. They are here
+# as insurance, because the cost of the rule is nothing and the cost of one accidental
+# `git add` of a local .env is a rotated key and a rewritten history.
+.env
+.env.*
+*.env
+secrets.json
+appsettings.Development.json
+appsettings.Local.json
+appsettings.*.local.json
+*.pem
+*.pfx
+*.p12
+*.key
+*.snk
+id_rsa
+id_rsa.*
+.npmrc
+.netrc
