@@ -1,5 +1,11 @@
-MATRIXDESKTOP ARGUMENT GUIDE (Desktop wrapper build v9)
-======================================================
+MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.0.1)
+=====================================================
+
+This file is embedded in both MatrixDesktop.exe and MatrixDesktopConfigurator.exe.
+It is what `MatrixDesktop.exe --help-full` prints and what the configurator's `?`
+button shows, so it is user-facing text, not developer notes. The authoritative
+version number is <Version> in MatrixDesktop/MatrixDesktop.csproj; keep the line
+above in step with it.
 
 Scope
 -----
@@ -64,36 +70,38 @@ Numbers
 Booleans
 - For known boolean web flags (camera, volumetric, glyphFlip, clickRipples, loops, skipIntro, suppressWarnings, once, isometric):
   - Recommended: true / false
-  - Also accepted via wrapper normalization: 1/0, yes/no, on/off (these get converted to true/false).
+  - Also accepted via wrapper normalization, converted to true/false before the
+    value reaches the web app:
+      true  <= 1, y, yes, on
+      false <= 0, n, no, off
+    Matching is case-insensitive and surrounding whitespace is trimmed, so
+    --camera YES and --camera " on " both work.
+  - An EMPTY value normalizes to true.
+    Example: --camera=   is treated as camera=true
   - Bare boolean flags are treated as true.
     Example: --volumetric  is treated as volumetric=true
+  - Any other value is passed through to the web app unchanged, and the web app
+    accepts a boolean only when the text is exactly "true" (case-insensitive).
+    So --camera maybe and --camera 2 are both FALSE, silently. Stick to the
+    forms listed above.
 
 Comma-separated lists
 - Color and palette/stripe values are passed as comma-separated lists without brackets.
   Example: --backgroundRGB 0,0,0
+- NO WHITESPACE inside the list, not even after a comma. The shell, not the app,
+  splits on spaces, so "--stripeColors 1,0,0, 1,1,0" arrives as two separate
+  arguments: the wrapper reads only "1,0,0," as the value, and the trailing empty
+  field makes the whole list invalid, so the flag is dropped. There is no warning.
+  Alternatively quote the whole value: --stripeColors "1,0,0, 1,1,0" also works,
+  because the parser trims each field. Unquoted and spaced does not.
 
 Colors
-Gemini said
-To create a rainbow-like sequence of red, orange, yellow, green, blue, purple, we need to map each of those six colors to their corresponding RGB values (0 to 1).
-
-Here is the breakdown of the values:
-
-Color	Red	Green	Blue
-Red		1		0		0
-Orange	1		0.5		0
-Yellow	1		1		0
-Green	0		1		0
-Blue	0		0		1
-Purple	0.5		0		0.5
-
-Combining these into the single string format required by the module:
---stripeColors 1,0,0,1,0.5,0,1,1,0,0,1,0,0,0,1,0.5,0,0.5
-
-A Quick Tip on Tuning
-If you find the colors don't look quite right on your specific screen, you can tweak the values:
-
-For a brighter Purple: Use 1, 0, 1 instead of 0.5, 0, 0.5.
-For a darker Orange: Reduce the green value to 0.4 or 0.3.
+- Every color channel is a 0..1 float, not 0..255. So full red is 1,0,0 and NOT
+  255,0,0. See section 4.7 for the per-flag formats (RGB triples, HSL triples,
+  palette stops, stripe sequences).
+- A stripe sequence is one flat comma-separated list of triples with no
+  grouping punctuation. Six colors is eighteen numbers:
+  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,1,0.5,0,1,1,0,0,1,0,0,0,1,0.5,0,0.5
 
 
 3) App flags (wrapper-level; NOT forwarded to the web app)
@@ -180,12 +188,13 @@ Exit behavior (physical keyboard only; injected keypresses ignored)
   Meaning: disables ESC-to-exit.
 
 - --foreground-key-exit
-  Aliases: --require-foreground-key-exit
+  Aliases: --require-foreground-key-exit, --foregroundkey-exit,
+           --requireforeground-key-exit, --no-global-key-exit, --noglobal-key-exit
   Default: ON
   Meaning: only exit on keypress while MatrixDesktop is the foreground (active) app.
 
 - --global-key-exit
-  Aliases: --background-key-exit, --global-exit-on-key
+  Aliases: --background-key-exit, --global-exit-on-key, --globalkey-exit
   Default: OFF
   Meaning: exit on physical keypress even when MatrixDesktop is NOT focused.
   Risk: this can be surprising because typing in other apps will close MatrixDesktop.
@@ -203,7 +212,16 @@ WebView2 DevTools
 Help
 - --help
   Aliases: -h, /?, help
-  Meaning: shows built-in help dialog.
+  Meaning: shows the built-in help dialog, a short summary of the wrapper flags.
+  Note: this is a MODAL dialog. The process waits for you to dismiss it, so do
+  not use it in a script or an unattended test.
+
+- --help-full
+  Aliases: --help-arguments
+  Meaning: shows this entire argument guide in a scrollable dialog, read from
+  the copy embedded in the executable. No sibling .txt file is required.
+  Checked before --help, so --help-full wins if both are passed.
+  Note: also modal. Same caveat as --help.
 
 
 4) Web flags (forwarded to the embedded Matrix web app)
@@ -533,8 +551,11 @@ palette (RGB gradient)
 - Value format: repeating groups of 4 numbers:
   R,G,B,at,R,G,B,at,...
   where 'at' is a stop position (typically 0..1).
+- NO SPACES anywhere in the value. A space after a comma makes the shell split
+  the token, the wrapper sees only the first fragment, and the whole list is
+  then rejected as malformed.
 - Example (3 stops):
-  MatrixDesktop.exe --palette 0.1,0,0.2,0,  0.2,0.5,0,0.5,  1,0.7,0,1
+  MatrixDesktop.exe --palette 0.1,0,0.2,0,0.2,0.5,0,0.5,1,0.7,0,1
 
 paletteHSL (HSL gradient)
 - Key: paletteHSL
@@ -545,8 +566,9 @@ stripeColors (RGB stripes)
 - Aliases: stripeRGB, colors
 - Value format: repeating groups of 3 numbers:
   R,G,B,R,G,B,R,G,B,...
+- NO SPACES anywhere in the value, for the same reason as palette above.
 - Example (red/yellow/green):
-  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,  1,1,0,  0,1,0
+  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,1,1,0,0,1,0
 
 stripeHSL (HSL stripes)
 - Key: stripeHSL
@@ -612,7 +634,7 @@ D) 3D subtle forward drift
   MatrixDesktop.exe --version 3d --forwardSpeed 0.08 --density 1.2
 
 E) Stripes
-  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0, 1,1,0, 0,1,0
+  MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,1,1,0,0,1,0
 
 F) Image effect using a local bundled asset
   MatrixDesktop.exe --effect image --url assets/mesh.png
@@ -621,6 +643,11 @@ F) Image effect using a local bundled asset
 6) Notable “gotchas” (practical warnings)
 -----------------------------------------
 - Web parameter keys are case-sensitive. “animationspeed” will be ignored; “animationSpeed” will work.
+- Never put a space inside a comma-separated value unless you quote the whole
+  value. An unquoted “--stripeColors 1,0,0, 1,1,0, 0,1,0” is silently dropped:
+  the shell splits it, the wrapper keeps only the first fragment, and the
+  trailing empty field invalidates the list. This is the single most common way
+  a copied example fails with no error message.
 - Avoid percent signs in numeric values. “50%” becomes 50.
 - Unsafe density, numColumns, and resolution values are clamped before rendering.
 - forwardSpeed has no visible effect unless volumetric=true.
