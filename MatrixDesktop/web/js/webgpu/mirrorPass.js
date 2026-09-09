@@ -1,9 +1,9 @@
-import { structs } from "../../lib/gpu-buffer.js";
+﻿import { structs } from "../../lib/gpu-buffer.js";
 import { makeComputeTarget, makeUniformBuffer, loadShader, makeBindGroup, makePass } from "./utils.js";
 
 const numTouches = 5;
 
-export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer }) => {
+export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer, canvas }) => {
 	const touches = Array(numTouches)
 		.fill()
 		.map((_) => [0, 0, -Infinity, 0]);
@@ -13,9 +13,16 @@ export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer }) =>
 	let touchesChanged = true;
 	let start = Date.now();
 
+	// MD-48 (upstream): see the regl mirrorPass. e.srcElement on a window-level listener
+	// divided by whatever element was clicked, so a click on the notice div produced
+	// Infinity or NaN in the touches uniform.
 	const clickHandler = (e) => {
-		touches[index][0] = 0 + e.clientX / e.srcElement.clientWidth;
-		touches[index][1] = 1 - e.clientY / e.srcElement.clientHeight;
+		const rect = canvas.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0) {
+			return;
+		}
+		touches[index][0] = (e.clientX - rect.left) / rect.width;
+		touches[index][1] = 1 - (e.clientY - rect.top) / rect.height;
 		touches[index][2] = (Date.now() - start) / 1000;
 		index = (index + 1) % numTouches;
 		touchesChanged = true;

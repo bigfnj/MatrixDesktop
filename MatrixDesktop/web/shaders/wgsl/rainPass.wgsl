@@ -1,4 +1,4 @@
-// This shader module is the star of the show.
+﻿// This shader module is the star of the show.
 // It is where the cell states update and the symbols get drawn to the screen.
 
 struct Config {
@@ -244,17 +244,21 @@ fn getStarDistance(pos : vec2<f32>) -> f32 {
 }
 
 fn getClickRippleDistance(pos : vec2<f32>) -> f32 {
+	// MD-19: every shape applies the same glyph aspect correction. The circle branch used
+	// to return length(pos) uncorrected, so a circular ripple was subtly out of round
+	// relative to the other three on any font whose glyphHeightToWidth is not 1.
+	var aspectCorrected = pos * vec2<f32>(1.0, config.glyphHeightToWidth);
 	if (config.clickRippleType == 0) {
-		var boxDistance = abs(pos) * vec2<f32>(1.0, config.glyphHeightToWidth);
+		var boxDistance = abs(aspectCorrected);
 		return max(boxDistance.x, boxDistance.y);
 	}
 	if (config.clickRippleType == 2) {
-		return getTriangleDistance(pos * vec2<f32>(1.0, config.glyphHeightToWidth));
+		return getTriangleDistance(aspectCorrected);
 	}
 	if (config.clickRippleType == 3) {
-		return getStarDistance(pos * vec2<f32>(1.0, config.glyphHeightToWidth));
+		return getStarDistance(aspectCorrected);
 	}
-	return length(pos);
+	return length(aspectCorrected);
 }
 
 fn getClickRipples(currentTime : f32, screenPos : vec2<f32>) -> f32 {

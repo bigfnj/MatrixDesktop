@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   Standalone argument configurator for MatrixDesktop.
   Uses WinForms only as the native shell and WebView2 for the actual UI.
 -->
@@ -13,11 +13,22 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MatrixDesktopConfigurator</AssemblyName>
     <RootNamespace>MatrixDesktopConfigurator</RootNamespace>
-    <Version>1.0.1</Version>
-    <AssemblyVersion>1.0.1.0</AssemblyVersion>
-    <FileVersion>1.0.1.0</FileVersion>
+    <Version>1.0.2</Version>
+    <AssemblyVersion>1.0.2.0</AssemblyVersion>
+    <FileVersion>1.0.2.0</FileVersion>
     <ApplicationIcon>..\MatrixDesktop\Matrix.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
+
+    <!--
+      Publish payload hygiene. See the matching block in
+      MatrixDesktop/MatrixDesktop.csproj for the full rationale: the workflows
+      and tests\run-gate.ps1 publish with raw -p: properties and never load a
+      .pubxml, so a DebugType set only in the profile applied to nothing.
+      Scoped to Release so Debug keeps full symbols.
+    -->
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
+    <AllowedReferenceRelatedFileExtensions Condition="'$(Configuration)' == 'Release'">none</AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,20 +40,22 @@
     <Compile Include="..\Shared\Logger.cs" Link="Shared\Logger.cs" />
     <Compile Include="..\Shared\FlagNormalization.cs" Link="Shared\FlagNormalization.cs" />
     <Compile Include="..\Shared\CrashDumpWriter.cs" Link="Shared\CrashDumpWriter.cs" />
+    <Compile Include="..\Shared\AppWindowIcon.cs" Link="Shared\AppWindowIcon.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Configurator embeds the same argument guide so its "?" button works
          without needing the sibling MatrixDesktop.exe to be present. -->
-    <EmbeddedResource Include="..\MatrixDesktop_Argument_Guide.txt" LogicalName="MatrixDesktopConfigurator.ArgumentGuide.txt" />
+    <EmbeddedResource Include="..\MatrixDesktop_Argument_Guide.txt" LogicalName="MatrixDesktop.ArgumentGuide.txt" />
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      Embedded copy only. Shared/AppWindowIcon.cs prefers the embedded resource,
+      and both executables publish into the same folder, so the loose on-disk
+      Matrix.ico was being written twice into one 361 KB slot for no reader.
+    -->
     <EmbeddedResource Include="..\MatrixDesktop\Matrix.ico" LogicalName="Matrix.ico" />
-    <Content Include="..\MatrixDesktop\Matrix.ico" Link="Matrix.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
   </ItemGroup>
 
   <ItemGroup>

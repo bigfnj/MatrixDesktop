@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace MatrixDesktop;
@@ -142,47 +142,50 @@ internal static class AppCli
 
                 case "working-area":
                 case "workingarea":
-                    useWorkingArea = true;
+                    useWorkingArea = OnValue(value);
                     break;
 
                 case "topmost":
-                    topMost = true;
+                    topMost = OnValue(value);
                     break;
 
                 case "no-topmost":
                 case "notopmost":
                     topMost = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "exit-on-esc":
                 case "esc-exit":
                 case "exitonesc":
                 case "escexit":
-                    exitOnEsc = true;
+                    exitOnEsc = OnValue(value);
                     break;
 
                 case "no-esc-exit":
                 case "noesc-exit":
                 case "no-esc":
                     exitOnEsc = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "exit-on-any-key":
                 case "exit-on-anykey":
                 case "anykey-exit":
-                    exitOnAnyKey = true;
+                    exitOnAnyKey = OnValue(value);
                     break;
 
                 case "no-exit-on-any-key":
                 case "no-anykey-exit":
                     exitOnAnyKey = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "global-key-exit":
                 case "globalkey-exit":
                 case "global-exit-on-key":
                 case "background-key-exit":
-                    globalKeyExit = true;
+                    globalKeyExit = OnValue(value);
                     break;
 
                 case "foreground-key-exit":
@@ -192,25 +195,28 @@ internal static class AppCli
                 case "no-global-key-exit":
                 case "noglobal-key-exit":
                     globalKeyExit = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "hide-cursor":
                 case "hidecursor":
-                    hideCursor = true;
+                    hideCursor = OnValue(value);
                     break;
 
                 case "show-cursor":
                 case "showcursor":
                     hideCursor = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "no-devtools":
                 case "nodevtools":
-                    disableDevTools = true;
+                    disableDevTools = OnValue(value);
                     break;
 
                 case "devtools":
                     disableDevTools = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 default:
@@ -271,6 +277,34 @@ internal static class AppCli
             "  MatrixDesktop.exe --monitor 1 --effect mirror",
             "  MatrixDesktop.exe \"?version=3d&effect=mirror\"",
         });
+    }
+
+    // MD-10. These flags used to consume a following value token and then discard it, so
+    // "--topmost false" enabled topmost and the "false" vanished with no diagnostic. The
+    // configurator's importer honoured the same value, which meant importing a hand-written
+    // command produced a draft that disagreed with what the command actually did.
+    //
+    // The convention now matches ArgumentImporter.ApplyAppPair exactly, and the
+    // alias-parity test in the regression harness keeps the two from drifting again:
+    //   - a primary form takes an optional value and defaults to true, so "--topmost",
+    //     "--topmost true" and "--topmost yes" all enable it and "--topmost false" does not
+    //   - an explicitly negative form such as "--no-topmost" always means false, because
+    //     "--no-topmost false" is a double negative nobody should have to reason about
+    private static bool OnValue(string? value)
+        => Shared.FlagNormalization.ParseBool(value, defaultWhenMissing: true);
+
+    private static void WarnIfValueIgnored(string key, string? value, bool consumedValue)
+    {
+        if (!consumedValue || value is null)
+        {
+            return;
+        }
+
+        // Deliberately a log line rather than silence. The token is gone either way, but
+        // "--no-topmost false" is a mistake worth telling someone about.
+        Shared.Logger.Warn(
+            $"'--{key}' always means false, so the value '{value}' after it was ignored. " +
+            $"Use the positive form if you meant to pass a value.");
     }
 
     private static bool LooksLikeFlag(string token)

@@ -1,4 +1,4 @@
-precision highp float;
+﻿precision highp float;
 
 // These effects are used to spice up the non-canon versions of the code rain.
 // The shader writes them to the channels of a data texture:
@@ -101,17 +101,21 @@ float getStarDistance(vec2 pos) {
 }
 
 float getClickRippleDistance(vec2 pos) {
+	// MD-19: every shape applies the same glyph aspect correction. The circle branch used
+	// to return length(pos) uncorrected, so a circular ripple was subtly out of round
+	// relative to the box, triangle and star on any font whose glyphHeightToWidth is not 1.
+	vec2 aspectCorrected = pos * vec2(1., glyphHeightToWidth);
 	if (clickRippleType == 0) {
-		vec2 boxDistance = abs(pos) * vec2(1., glyphHeightToWidth);
+		vec2 boxDistance = abs(aspectCorrected);
 		return max(boxDistance.x, boxDistance.y);
 	}
 	if (clickRippleType == 2) {
-		return getTriangleDistance(pos * vec2(1., glyphHeightToWidth));
+		return getTriangleDistance(aspectCorrected);
 	}
 	if (clickRippleType == 3) {
-		return getStarDistance(pos * vec2(1., glyphHeightToWidth));
+		return getStarDistance(aspectCorrected);
 	}
-	return length(pos);
+	return length(aspectCorrected);
 }
 
 float getClickRipples(float currentTime, vec2 screenPos) {

@@ -1,4 +1,4 @@
-// Shared popover color picker operating on {r,g,b} floats in the 0..1 range
+﻿// Shared popover color picker operating on {r,g,b} floats in the 0..1 range
 // (the same representation the rest of the configurator and the matrix web app
 // use). Provides a draggable saturation/value square + hue bar, plus precise
 // hex and 0..1 RGB entry. Calls onChange({r,g,b}) live during interaction.
@@ -127,6 +127,9 @@ const hsvFromColor = (color) => {
 };
 
 const dragSquare = (clientX, clientY) => {
+	// ctx is null once the popover closes. Escape closes it, and a keydown mid-drag was
+	// enough to make the next pointermove throw on ctx.hsv.
+	if (!ctx) return;
 	const rect = refs.square.getBoundingClientRect();
 	ctx.hsv.s = clamp01((clientX - rect.left) / rect.width);
 	ctx.hsv.v = clamp01(1 - (clientY - rect.top) / rect.height);
@@ -134,21 +137,43 @@ const dragSquare = (clientX, clientY) => {
 };
 
 const dragHue = (clientX) => {
+	if (!ctx) return;
 	const rect = refs.hue.getBoundingClientRect();
 	ctx.hsv.h = clamp01((clientX - rect.left) / rect.width) * 360;
 	emit();
 };
 
+// Pointer capture plus every terminating event, not just pointerup. Unbinding on pointerup
+// alone leaked the pointermove listener whenever the button came up outside the window or
+// the gesture was cancelled, so the colour kept tracking the mouse and each subsequent
+// drag added another live listener.
 const startDrag = (handler) => (event) => {
 	event.preventDefault();
+	const target = event.currentTarget;
+	try {
+		target.setPointerCapture(event.pointerId);
+	} catch {
+		// Not fatal; the document-level listeners below still drive the drag.
+	}
 	handler(event.clientX, event.clientY);
+
 	const move = (ev) => handler(ev.clientX, ev.clientY);
-	const up = () => {
+	const stop = () => {
 		document.removeEventListener("pointermove", move);
-		document.removeEventListener("pointerup", up);
+		document.removeEventListener("pointerup", stop);
+		document.removeEventListener("pointercancel", stop);
+		window.removeEventListener("blur", stop);
+		try {
+			target.releasePointerCapture(event.pointerId);
+		} catch {
+			// Already released, or never captured.
+		}
 	};
+
 	document.addEventListener("pointermove", move);
-	document.addEventListener("pointerup", up);
+	document.addEventListener("pointerup", stop);
+	document.addEventListener("pointercancel", stop);
+	window.addEventListener("blur", stop);
 };
 
 const wire = () => {
@@ -156,6 +181,7 @@ const wire = () => {
 	refs.hue.addEventListener("pointerdown", startDrag((x) => dragHue(x)));
 
 	refs.hex.addEventListener("input", () => {
+		if (!ctx) return;
 		ctx.color = hexToColor(refs.hex.value);
 		ctx.hsv = hsvFromColor(ctx.color);
 		render(refs.hex);
@@ -164,6 +190,7 @@ const wire = () => {
 
 	for (const channel of ["r", "g", "b"]) {
 		refs[channel].addEventListener("input", () => {
+			if (!ctx) return;
 			ctx.color = { ...ctx.color, [channel]: clamp01(Number.parseFloat(refs[channel].value)) };
 			ctx.hsv = hsvFromColor(ctx.color);
 			render(refs[channel]);

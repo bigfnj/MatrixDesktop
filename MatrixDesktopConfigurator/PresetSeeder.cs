@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 
 namespace MatrixDesktopConfigurator;
@@ -38,9 +38,10 @@ internal static class PresetSeeder
             var existing = state.UserPresets.FirstOrDefault(existing => string.Equals(existing.Id, preset.Id, StringComparison.OrdinalIgnoreCase));
             if (existing is not null)
             {
-                existing.Name = preset.Name;
-                existing.Values = imported.Draft;
-                existing.UpdatedUtc = now;
+                // MD-11: leave it alone. Once a starter preset exists it belongs to the
+                // user, and a seed-version bump used to overwrite its Values, silently
+                // discarding whatever they had tuned. Deletion was already respected by the
+                // isFirstSeed check below; editing was not, which is the more common case.
                 continue;
             }
 

@@ -51,19 +51,22 @@ internal static class MatrixArgs
             return string.Empty;
         }
 
-        // If a single raw query string is provided, accept it as-is.
+        // A single raw query string is a documented paste form.
+        //
+        // MD-17: this used to return the string verbatim, which meant the raw-query branch
+        // and the key=value branch disagreed about encoding. A space arrived unescaped and
+        // produced an invalid URL, and a '#' silently truncated every parameter after it,
+        // because everything past it becomes a URL fragment. Each pair is now decoded and
+        // re-encoded through the same path as every other input, so both branches agree.
         if (args.Count == 1)
         {
             var single = (args[0] ?? string.Empty).Trim();
-            if (single.StartsWith("?", StringComparison.Ordinal))
-            {
-                return single[1..];
-            }
+            var isRawQuery = single.StartsWith("?", StringComparison.Ordinal)
+                             || (single.Contains('=') && single.Contains('&'));
 
-            // People sometimes paste "a=b&c=d" without the leading '?'.
-            if (single.Contains('=') && single.Contains('&'))
+            if (isRawQuery)
             {
-                return single.TrimStart('?');
+                return NormalizeRawQuery(single.TrimStart('?'));
             }
         }
 
@@ -152,8 +155,75 @@ internal static class MatrixArgs
             return string.Empty;
         }
 
+        return Encode(final);
+    }
+
+
+    // Splits a raw query on '&', decodes each side of the first '=', then re-encodes. The
+    // decode step matters: a pasted query usually arrives already percent-encoded, and
+    // encoding it a second time without decoding would turn "%20" into "%2520".
+    private static string NormalizeRawQuery(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return string.Empty;
+        }
+
+        var final = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var part in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var pair = part.Trim();
+            if (pair.Length == 0) continue;
+
+            var eq = pair.IndexOf('=');
+            string key;
+            string value;
+
+            if (eq < 0)
+            {
+                key = Unescape(pair);
+                value = string.Empty;
+            }
+            else
+            {
+                key = Unescape(pair[..eq]);
+                value = Unescape(pair[(eq + 1)..]);
+            }
+
+            if (string.IsNullOrWhiteSpace(key)) continue;
+
+            if (BoolKeys.Contains(key))
+            {
+                value = NormalizeBoolValue(value);
+            }
+
+            final[key] = value;
+        }
+
+        return Encode(final);
+    }
+
+    private static string Unescape(string value)
+    {
+        try
+        {
+            // '+' means space in form encoding, which is how these strings are usually
+            // produced when copied out of a browser address bar.
+            return Uri.UnescapeDataString(value.Replace("+", " ", StringComparison.Ordinal));
+        }
+        catch (UriFormatException)
+        {
+            // A stray '%' that is not a valid escape. Take the text literally rather than
+            // dropping the parameter.
+            return value;
+        }
+    }
+
+    private static string Encode(Dictionary<string, string> pairs)
+    {
         var sb = new StringBuilder();
-        foreach (var kv in final)
+        foreach (var kv in pairs)
         {
             if (sb.Length > 0) sb.Append('&');
             sb.Append(Uri.EscapeDataString(kv.Key));
@@ -164,14 +234,26 @@ internal static class MatrixArgs
         return sb.ToString();
     }
 
-
     private static string NormalizeBoolValue(string value)
     {
         var v = (value ?? string.Empty).Trim();
         if (v.Length == 0) return "true";
 
-        // The upstream parser treats values containing "true" as true.
-        // Map common CLI boolean forms into explicit true/false strings.
+        // Maps common CLI boolean spellings onto the exact strings the web layer accepts.
+        //
+        // The comment that used to sit here claimed "the upstream parser treats values
+        // containing 'true' as true". That is wrong, and it matters because it describes the
+        // wrong side of the boundary. web/js/config.js:402 is
+        //     const isTrue = (s) => s.toLowerCase() === "true";
+        // which is STRICT equality. The substring behaviour belongs to
+        // Shared/FlagNormalization.ParseBool, which serves wrapper flags only.
+        //
+        // So the two boolean parsers in this codebase genuinely differ: a wrapper flag
+        // treats any value containing "true" as true, while a web flag requires exactly
+        // "true". That is why this method normalises the recognised spellings here rather
+        // than passing them through and hoping. Anything unrecognised is forwarded verbatim
+        // and the web layer will read it as false.
+        // NormalizeRawQuery calls this too, so the raw-query path gets the same treatment.
         switch (v.ToLowerInvariant())
         {
             case "1":

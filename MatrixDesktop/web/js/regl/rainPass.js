@@ -131,7 +131,14 @@ export default ({ regl, config, lkg, canvas }) => {
 			previousEffectState: effectDoubleBuffer.back,
 			clickRippleType,
 			clickRippleAspectRatio: () => clickRipples.aspectRatio,
-			clicks: () => clickRipples.clicks,
+			// MD-04: sync the ripple clock from the SAME context.time the shader reads on
+			// this frame, rather than letting clickRipples keep its own performance.now()
+			// origin. Done here because this callback already runs once per frame with the
+			// context in hand.
+			clicks: (context) => {
+				clickRipples.syncTime(context.time);
+				return clickRipples.clicks;
+			},
 		},
 
 		framebuffer: effectDoubleBuffer.front,

@@ -3,7 +3,24 @@ const inactiveTime = -1e9;
 
 const clamp01 = (value) => Math.max(0, Math.min(1, value));
 
-const createClickRipples = (canvas, enabled) => {
+// Tracks recent canvas clicks so the rain shaders can draw a ripple from each one.
+//
+// MD-04: this used to stamp each click against its OWN performance.now() origin, captured
+// when the pass was constructed, while the shaders compared those stamps against the
+// renderer's clock. Those are two different origins:
+//
+//   REGL     the shader's `time` uniform is regl.context("time")
+//   WebGPU   main.js sets `start` on the FIRST rAF frame, which happens after
+//            `await makePipeline` has loaded roughly 1.9 MB of MSDF textures
+//
+// So on WebGPU every click was stamped earlier than the clock the shader read, the
+// shader's `elapsedTime >= 0` guard hid the ripple until the difference elapsed, and the
+// ripple appeared late by however long asset loading took. Cold start made it worse.
+//
+// Rather than trying to reconstruct the renderer's origin here, the render loop now hands
+// its own current time in via syncTime, which both renderers already have exactly. There
+// is only one clock, so the two cannot drift by construction.
+const createClickRipples = (canvas, enabled, initialTime = 0) => {
 	const clicks = Array(maxClickRipples * 3).fill(0);
 	const touches = Array(maxClickRipples)
 		.fill()
@@ -15,8 +32,11 @@ const createClickRipples = (canvas, enabled) => {
 
 	let index = 0;
 	let changed = true;
-	let start = performance.now();
 	let aspectRatio = 1;
+
+	// The renderer's clock, in the same units and with the same origin the shaders see.
+	// Updated once per frame by whichever pass uploads the ripple data.
+	let currentTime = initialTime;
 
 	const setClick = (x, y, time) => {
 		clicks[index * 3 + 0] = x;
@@ -37,11 +57,10 @@ const createClickRipples = (canvas, enabled) => {
 
 		const x = clamp01((event.clientX - rect.left) / rect.width);
 		const y = clamp01(1 - (event.clientY - rect.top) / rect.height);
-		setClick(x, y, (performance.now() - start) / 1000);
+		setClick(x, y, currentTime);
 	};
 
 	if (enabled) {
-		start = performance.now();
 		canvas.addEventListener("click", clickHandler);
 	}
 
@@ -53,6 +72,13 @@ const createClickRipples = (canvas, enabled) => {
 		},
 		get aspectRatio() {
 			return aspectRatio;
+		},
+		// Called every frame with the renderer's current time. Cheap by design: this runs
+		// inside the same callback that uploads the ripple uniforms.
+		syncTime(time) {
+			if (Number.isFinite(time)) {
+				currentTime = time;
+			}
 		},
 		setAspectRatio(value) {
 			const next = Number.isFinite(value) && value > 0 ? value : 1;

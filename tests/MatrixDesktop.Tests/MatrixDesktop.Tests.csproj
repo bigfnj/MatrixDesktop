@@ -1,0 +1,57 @@
+<!--
+  Regression harness for the pure argument, command and colour code.
+
+  Console EXE whose exit code is the result, matching every other test harness in these
+  repos. No xunit, NUnit, MSTest or FluentAssertions: none of them appear anywhere in this
+  developer's projects, so adopting one here would be inventing a convention.
+
+  Production code arrives by source-linking rather than by a project reference plus
+  InternalsVisibleTo. Three reasons:
+    1. It matches how MatrixDesktop.csproj itself already consumes Shared\*.cs.
+    2. The types under test are internal, and source-linking makes them accessible without
+       coordinating an InternalsVisibleTo attribute across two other projects.
+    3. Shared\*.cs is compiled into BOTH executables, so a test project that referenced
+       both would hit CS0433 on MatrixDesktop.Shared.Logger and .FlagNormalization the
+       moment a test named either one.
+
+  Deliberately targets plain net10.0, not net10.0-windows: nothing linked below touches
+  WinForms or System.Drawing, so the harness stays runnable on any host. That also avoids a
+  real CS0104 trap, since UseWindowsForms would inject a global using for System.Drawing
+  and make MatrixDesktopConfigurator.ColorConverter ambiguous with System.Drawing.ColorConverter.
+
+  AppendTargetFrameworkToOutputPath=false keeps the flat bin\Release\ layout that
+  tests\run-gate.ps1 invokes.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MatrixDesktop.Tests</RootNamespace>
+    <AssemblyName>MatrixDesktop.Tests</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Wrapper CLI parsing. -->
+    <Compile Include="..\..\MatrixDesktop\AppCli.cs" Link="Production\AppCli.cs" />
+    <Compile Include="..\..\MatrixDesktop\MatrixArgs.cs" Link="Production\MatrixArgs.cs" />
+
+    <!-- Shared normalisation primitives. -->
+    <Compile Include="..\..\Shared\FlagNormalization.cs" Link="Production\FlagNormalization.cs" />
+    <Compile Include="..\..\Shared\Logger.cs" Link="Production\Logger.cs" />
+
+    <!-- Configurator argument metadata, import and command generation. -->
+    <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentCatalog.cs" Link="Production\ArgumentCatalog.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentImporter.cs" Link="Production\ArgumentImporter.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\CommandBuilder.cs" Link="Production\CommandBuilder.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\ColorConverter.cs" Link="Production\ColorConverter.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\Tokenizer.cs" Link="Production\Tokenizer.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\ConfiguratorState.cs" Link="Production\ConfiguratorState.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\StorageService.cs" Link="Production\StorageService.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\DraftRandomizer.cs" Link="Production\DraftRandomizer.cs" />
+  </ItemGroup>
+</Project>

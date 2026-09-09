@@ -84,3 +84,5 @@ SESSION_HANDOFF*.md
 .cursorrules
 .windsurfrules
 SESSION_*
+# Verification gate scratch output (publishes, screenshots)
+artifacts/

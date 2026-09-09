@@ -1,0 +1,17 @@
+{
+  "$comment": [
+    "Pins the .NET SDK so a local build, a CI build and a release build all use",
+    "the same compiler and the same SDK targets. Without this file the CI runner",
+    "silently uses whichever 10.0.x feature band the image happens to carry,",
+    "which is how a build that is green locally fails on the runner, or worse,",
+    "produces a different binary.",
+    "",
+    "rollForward latestPatch: a newer patch of the 10.0.3xx band is accepted",
+    "(security fixes should not require a repo edit), a newer feature band is",
+    "not. Set dotnet-version in both workflows to the same version below."
+  ],
+  "sdk": {
+    "version": "10.0.302",
+    "rollForward": "latestPatch"
+  }
+}
