@@ -55,13 +55,31 @@ export default ({ regl, config }, inputs) => {
 		uniforms: {
 			tex: regl.prop("tex"),
 			direction: regl.prop("direction"),
-			// MD-44 (upstream): these two were swapped. bloomPass.blur.frag.glsl computes
-			// `size = width > height ? vec2(width/height, 1.) : vec2(1., height/width)` and
-			// divides by max(width, height), so feeding the viewport's width in as `height`
-			// inverted the aspect correction and made the blur anisotropic in the wrong
-			// axis on any non-square target.
-			width: regl.context("viewportWidth"),
-			height: regl.context("viewportHeight"),
+			// DO NOT "FIX" THIS BY UNSWAPPING IT. The transposition is deliberate and
+			// correct, and it was already reverted once after being mistaken for a bug.
+			//
+			// bloomPass.blur.frag.glsl computes
+			//     size   = width > height ? vec2(width/height, 1.) : vec2(1., height/width)
+			//     offset = direction / max(width, height) * size
+			// and `size`'s components are in the OPPOSITE order from what an isotropic
+			// one-texel step needs, so it has to be fed the transposed pair to cancel out.
+			//
+			// Worked through for a 1920x1080 target, direction [1,0] then [0,1]:
+			//
+			//   transposed (this code)      width=1080 height=1920
+			//     1080 > 1920 is false  ->  size = (1, 1.778),  max = 1920
+			//     horizontal  (1/1920)*1     * 1920 = 1.000 texel
+			//     vertical    (1/1920)*1.778 * 1080 = 1.000 texel   <- isotropic
+			//
+			//   "unswapped"                 width=1920 height=1080
+			//     1920 > 1080 is true   ->  size = (1.778, 1),  max = 1920
+			//     horizontal  (1/1920)*1.778 * 1920 = 1.778 texels
+			//     vertical    (1/1920)*1     * 1080 = 0.563 texels  <- 3.16x anisotropic
+			//
+			// So naming these after the viewport axis they carry would be clearer, but the
+			// values must stay crossed unless the shader's `size` order changes with them.
+			height: regl.context("viewportWidth"),
+			width: regl.context("viewportHeight"),
 		},
 		framebuffer: regl.prop("fbo"),
 	});
