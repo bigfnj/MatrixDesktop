@@ -498,6 +498,66 @@ try {
         Test-Ok 'every referenced web asset resolves'
     }
 
+    # Headless DOM smoke. Tiers 2 and 3 photograph the real windows and measure pixels, which
+    # cannot see a layout defect: the v1.0.2 configurator pushed its whole command panel off
+    # the bottom of the window and every pixel statistic stayed healthy. These assertions are
+    # geometric instead, and because they run in headless Chromium they need no session, no
+    # GPU and no WebView2, so they are the only configurator UI coverage that works in CI.
+    Test-Hdr 'tier 1: headless web smoke'
+    # Prefer an interpreter that actually has playwright. On a developer box the bare
+    # 'python' is deliberately the sanctioned system one, which does not, so searching PATH
+    # alone would report CANNOT VERIFY forever and this check would never once run locally.
+    # TOOLBOX_PYTHON is the machine's provisioned venv; CI sets neither and falls through to
+    # its own 'python', where the workflow installs playwright first.
+    $py = $null
+    $pyWithoutPlaywright = $null
+    foreach ($candidate in @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        $found = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $found) { continue }
+        & $found.Source -c 'import playwright' 2>$null
+        if ($LASTEXITCODE -eq 0) { $py = $found.Source; break }
+        if (-not $py) { $pyWithoutPlaywright = $found.Source }
+    }
+    if (-not $py -and $pyWithoutPlaywright) { $py = $pyWithoutPlaywright }
+    $smokeScript = Join-Path $RepoRoot 'tests\web-smoke.py'
+    $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
+    if (-not $py) {
+        Test-Unchecked 'headless web smoke' 'no python on PATH (set MD_GATE_PYTHON to point at one)'
+    } elseif (-not (Test-Path -LiteralPath $smokeScript -PathType Leaf)) {
+        Test-Fail 'headless web smoke' "missing: $smokeScript"
+    } elseif (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+        Test-Unchecked 'headless web smoke' 'the test harness has not been built, so the loadState fixture cannot be generated'
+    } else {
+        # The fixture is regenerated from the real ArgumentCatalog every run, so it can never
+        # be a stale snapshot of a catalogue that has since changed.
+        $fixture = Join-Path $RepoRoot 'artifacts\gate\loadState.json'
+        & $testExe --dump-state $fixture | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Test-Fail 'headless web smoke' 'could not generate the loadState fixture'
+        } else {
+            $smokeOut = & $py $smokeScript 2>&1 | Out-String
+            $smokeExit = $LASTEXITCODE
+            foreach ($line in ($smokeOut -split "`r?`n")) {
+                if ($line -match '^\s{2}(ok|FAIL)\s') {
+                    Write-Host ('  ' + $line.Trim()) -ForegroundColor DarkGray
+                }
+            }
+            switch ($smokeExit) {
+                0 {
+                    $n = ([regex]::Matches($smokeOut, '(?m)^\s+ok\s')).Count
+                    Test-Ok "headless web smoke ($n checks)"
+                }
+                1 {
+                    $bad = @([regex]::Matches($smokeOut, '(?m)^\s+FAIL\s+(.+)$') | ForEach-Object { $_.Groups[1].Value })
+                    Test-Fail 'headless web smoke' ($bad -join ' | ')
+                }
+                2 { Test-Unchecked 'headless web smoke' 'playwright or its chromium build is unavailable for this interpreter' }
+                default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
+            }
+        }
+    }
+
     # Both executables load their window icon and their argument guide from an embedded
     # resource, with an on-disk fallback that succeeds. So if the embedding ever breaks,
     # nothing visibly changes until someone prunes the loose copy from the publish output,
@@ -516,6 +576,12 @@ try {
         # The first version of this check did use -args, so it inspected an empty list and
         # reported OK: a check that passed without looking at anything. The inspected count
         # is asserted below so that cannot recur.
+        # The count is emitted on its OWN line, unconditionally, and asserted separately from
+        # the resource check. The first version of this guard could not fail: the probe only
+        # emitted "OK:<n>" when there were no errors, and every loop iteration either reached
+        # the increment or appended an error, so no-errors implied n == expected and the
+        # "inspected fewer than expected" arm was unreachable. A guard against a vacuous pass
+        # that was itself vacuous.
         $literals = ($probeDlls | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
         $resourceProbe = @"
 `$bad = @()
@@ -523,34 +589,55 @@ try {
 foreach (`$dll in @($literals)) {
     try {
         `$asm = [Reflection.Assembly]::LoadFrom(`$dll)
-        `$seen++
         foreach (`$name in 'Matrix.ico', 'MatrixDesktop.ArgumentGuide.txt') {
             `$stream = `$asm.GetManifestResourceStream(`$name)
             if (-not `$stream) { `$bad += "`$([IO.Path]::GetFileName(`$dll)) is missing `$name" } else { `$stream.Dispose() }
         }
+        `$seen++
     } catch {
         `$bad += "`$([IO.Path]::GetFileName(`$dll)) could not be inspected: `$(`$_.Exception.Message)"
     }
 }
-if (`$bad.Count -gt 0) { `$bad -join '; ' } else { "OK:`$seen" }
+"SEEN:`$seen"
+if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 "@
-        $probeResult = (& pwsh -NoProfile -Command $resourceProbe 2>&1) | Select-Object -Last 1
-        if ($probeResult -eq "OK:$($probeDlls.Count)") {
-            Test-Ok "both executables embed the icon and the argument guide ($($probeDlls.Count) assemblies inspected)"
-        } elseif ($probeResult -like 'OK:*') {
+        $probeLines = @(& pwsh -NoProfile -Command $resourceProbe 2>&1)
+        $seenLine = @($probeLines | Where-Object { $_ -like 'SEEN:*' }) | Select-Object -Last 1
+        $verdict = $probeLines | Select-Object -Last 1
+        $seen = if ($seenLine) { [int]($seenLine -replace 'SEEN:', '') } else { -1 }
+
+        if ($seen -ne $probeDlls.Count) {
             Test-Fail 'both executables embed the icon and the argument guide' `
-                "the probe only inspected $($probeResult -replace 'OK:','') of $($probeDlls.Count) assemblies, so the result is not trustworthy"
+                "the probe fully inspected $seen of $($probeDlls.Count) assemblies, so its verdict is not trustworthy. Verdict was: $verdict"
+        } elseif ($verdict -ne 'OK') {
+            Test-Fail 'both executables embed the icon and the argument guide' $verdict
         } else {
-            Test-Fail 'both executables embed the icon and the argument guide' $probeResult
+            Test-Ok "both executables embed the icon and the argument guide ($seen assemblies inspected)"
         }
     }
 
     Test-Hdr 'tier 1: publish payload'
     if (Test-Path -LiteralPath $GatePublishDir) { Remove-Item -LiteralPath $GatePublishDir -Recurse -Force }
+
+    # These must stay identical to .github\workflows\release.yml, or the gate signs off on a
+    # payload nobody ships. The gate previously published bare, so PublishReadyToRun was never
+    # exercised here: R2R rewrites every assembly, adds ~780 KB, and is the single biggest
+    # difference between what is measured and what a user downloads. DebugType/DebugSymbols
+    # matter just as much, because without them the "no .pdb" assertion below was passing on a
+    # publish that had no reason to emit one, which is a check that cannot fail.
+    # The release-parity check further down holds the two lists together.
+    $PublishFlags = @(
+        '-p:PublishSingleFile=false'
+        '-p:PublishReadyToRun=true'
+        '-p:AllowedReferenceRelatedFileExtensions=none'
+        '-p:DebugType=none'
+        '-p:DebugSymbols=false'
+    )
+
     $publishOk = $true
     foreach ($proj in 'MatrixDesktop\MatrixDesktop.csproj', 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj') {
         & dotnet publish (Join-Path $RepoRoot $proj) -c Release -r win-x64 --no-self-contained `
-            -p:PublishSingleFile=false -p:PublishDir="$GatePublishDir\" --nologo -v:minimal | Out-Null
+            @PublishFlags -p:PublishDir="$GatePublishDir\" --nologo -v:minimal | Out-Null
         if ($LASTEXITCODE -ne 0) { $publishOk = $false; Test-Fail "publish $proj" }
     }
     if ($publishOk) {
@@ -580,6 +667,42 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { "OK:`$seen" }
             Test-Ok 'repository has a LICENSE'
         } else {
             Test-Fail 'repository has a LICENSE' 'no LICENSE at the repo root, and this is a public repo'
+        }
+
+        # Assert the CONDITION, not the presence of a line: every flag the gate publishes with
+        # must appear in each of release.yml's two publish steps. Checking only that the file
+        # mentions PublishReadyToRun somewhere would still pass if it were moved, commented out,
+        # or applied to just one of the two executables.
+        $releaseYml = Join-Path $RepoRoot '.github\workflows\release.yml'
+        if (-not (Test-Path -LiteralPath $releaseYml -PathType Leaf)) {
+            Test-Fail 'gate publishes what release.yml publishes' "not found: $releaseYml"
+        } else {
+            $ymlText = Get-Content -LiteralPath $releaseYml -Raw
+            # Bounded by the next step header or end of file, NOT by a blank line. A blank
+            # line terminator looked fine until a mutation removed one flag and left the line
+            # whitespace-only, which truncated the capture and made the gate report four
+            # missing flags instead of the one that was actually removed. It still failed, but
+            # a check that misidentifies what broke is most of the way to being useless.
+            $steps = @([regex]::Matches($ymlText, '(?s)dotnet publish\s+(.*?)(?=\r?\n\s{6}- name|\Z)'))
+            if ($steps.Count -ne 2) {
+                Test-Fail 'gate publishes what release.yml publishes' `
+                    "expected 2 'dotnet publish' steps in release.yml, found $($steps.Count); the parity check cannot be trusted"
+            } else {
+                $drift = @()
+                foreach ($flag in $PublishFlags) {
+                    for ($i = 0; $i -lt $steps.Count; $i++) {
+                        if ($steps[$i].Groups[1].Value -notmatch [regex]::Escape($flag)) {
+                            $drift += "$flag (missing from publish step $($i + 1))"
+                        }
+                    }
+                }
+                if ($drift.Count -gt 0) {
+                    Test-Fail 'gate publishes what release.yml publishes' `
+                        ("the gate would measure a payload the release does not build: " + ($drift -join '; '))
+                } else {
+                    Test-Ok "gate publishes what release.yml publishes ($($PublishFlags.Count) flags matched in both steps)"
+                }
+            }
         }
     }
 
@@ -616,6 +739,10 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { "OK:`$seen" }
                 foreach ($caseName in $cases.Keys) {
                     $launchedAt = Get-Date
                     $dumpsBefore = Get-DumpCount
+                    # -1 means "not observed". Initialised out here because it is assigned at
+                    # the end of the try below, and under StrictMode an early throw would
+                    # otherwise make the reaped check blow up instead of reporting UNCHECKED.
+                    $webviewKids = -1
                     $started = Start-GateApp -Exe $exe -AppArgs $cases[$caseName]
                     $proc = $started.Process
                     $closeMethod = 'not-attempted'
@@ -707,13 +834,21 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { "OK:`$seen" }
                         Test-Fail "smoke [$caseName] shuts down cleanly" "needed '$closeMethod', so OnFormClosing cleanup did not complete"
                     }
 
+                    # $webviewKids is the count taken while the app was still alive, and it is
+                    # what stops this from being a check that cannot fail. "Zero survivors"
+                    # is the same observation whether the children were reaped or were never
+                    # spawned, so without the before-count a build that failed to start
+                    # WebView2 at all would score a green tick here. It was collected and then
+                    # never read; now a zero before-count is reported as unverified.
                     $survivors = Get-WebViewDescendantCount -RootPid $proc.Id
-                    if ($survivors -lt 0) {
+                    if ($survivors -lt 0 -or $webviewKids -lt 0) {
                         Test-Unchecked "smoke [$caseName] webview children reaped" 'Win32_Process query unavailable'
+                    } elseif ($webviewKids -eq 0) {
+                        Test-Unchecked "smoke [$caseName] webview children reaped" 'no msedgewebview2 child was running before close, so "none survived" proves nothing'
                     } elseif ($survivors -gt 0) {
-                        Test-Fail "smoke [$caseName] webview children reaped" "$survivors msedgewebview2 process(es) still parented to the exited pid"
+                        Test-Fail "smoke [$caseName] webview children reaped" "$survivors of $webviewKids msedgewebview2 process(es) still parented to the exited pid"
                     } else {
-                        Test-Ok "smoke [$caseName] webview children reaped"
+                        Test-Ok "smoke [$caseName] webview children reaped ($webviewKids before close, 0 after)"
                     }
 
                     if ((Get-DumpCount) -gt $dumpsBefore) {

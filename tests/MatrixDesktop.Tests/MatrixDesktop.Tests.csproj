@@ -38,6 +38,16 @@
   <ItemGroup>
     <!-- Wrapper CLI parsing. -->
     <Compile Include="..\..\MatrixDesktop\AppCli.cs" Link="Production\AppCli.cs" />
+
+    <!--
+      The SAME file again, this time as bytes, so ParityTests can read the switch labels
+      it compiled against. Without this the canonical alias list in ParityTests is a hand
+      copy: adding a case to AppCli.Parse and forgetting the list fails nothing, which is
+      the exact drift the parity test claims to prevent. Embedding rather than reading from
+      disk means no path guessing, and it cannot go stale relative to the compiled code,
+      because both items resolve the same path at build time.
+    -->
+    <EmbeddedResource Include="..\..\MatrixDesktop\AppCli.cs" LogicalName="AppCli.cs.txt" />
     <Compile Include="..\..\MatrixDesktop\MatrixArgs.cs" Link="Production\MatrixArgs.cs" />
 
     <!-- Shared normalisation primitives. -->

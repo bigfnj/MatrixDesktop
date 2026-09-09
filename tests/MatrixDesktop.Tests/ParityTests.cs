@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using MatrixDesktopConfigurator;
 
 namespace MatrixDesktop.Tests;
@@ -13,6 +14,7 @@ internal static class ParityTests
     public static IEnumerable<(string, Action)> All =>
     [
         ("Every wrapper flag the app accepts is also accepted by the configurator importer", AliasParity),
+        ("The canonical alias list matches AppCli.Parse's actual switch labels", AliasListIsNotStale),
         ("The randomizer's colour maths agrees with ColorConverter", HslEquivalence),
         ("FlagNormalization parses every documented boolean spelling", BooleanParsing),
         ("FlagNormalization canonicalises keys consistently", KeyNormalisation),
@@ -20,8 +22,19 @@ internal static class ParityTests
         ("Randomizing never selects an effect the configurator cannot preview", RandomizerAvoidsUnsafeEffects),
     ];
 
-    // Canonical alias list, taken from AppCli.Parse's switch labels. Adding a flag to the
-    // app without adding it here and to the importer will fail this test.
+    // Aliases that AppCli.Parse handles but that this list deliberately omits, each with the
+    // reason. Anything added here is exempt from AliasListIsNotStale, so keep it short.
+    private static readonly string[] AliasesExcludedFromParity =
+    [
+        // Consumes the NEXT token as its value ("--monitor 2"), so the "handled means it
+        // forwarded nothing" heuristic in AliasParity cannot express it. Covered instead by
+        // AppCliTests' monitor-parsing cases.
+        "monitor",
+    ];
+
+    // Canonical alias list, mirroring AppCli.Parse's switch labels. AliasListIsNotStale
+    // holds this equal to the real labels, so adding a flag to the app without adding it
+    // here fails, and AliasParity then forces the importer to accept it too.
     private static readonly string[] WrapperAliases =
     [
         "windowed",
@@ -40,6 +53,36 @@ internal static class ParityTests
         "show-cursor", "showcursor",
         "no-devtools", "nodevtools", "devtools",
     ];
+
+    // Reads the AppCli.cs source embedded by the csproj and compares its switch labels to
+    // WrapperAliases. This is what makes AliasParity enforcing rather than decorative: the
+    // list above used to be a hand copy, so a new case in AppCli.Parse could be handled by
+    // the app, unknown to the importer, and still show a green suite.
+    //
+    // AppCli.cs contains exactly one switch and one default:, so every `case "..."` in the
+    // file belongs to it. If that ever stops being true this test starts over-reporting,
+    // which fails loudly rather than silently passing.
+    private static void AliasListIsNotStale()
+    {
+        using var stream = typeof(ParityTests).Assembly.GetManifestResourceStream("AppCli.cs.txt")
+            ?? throw new InvalidOperationException(
+                "AppCli.cs.txt is not embedded. The EmbeddedResource item in MatrixDesktop.Tests.csproj " +
+                "was removed or its LogicalName changed, which would silently reduce this test to a no-op.");
+        var source = new StreamReader(stream).ReadToEnd();
+
+        var labels = Regex.Matches(source, "^\\s*case \"([^\"]+)\":", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .Except(AliasesExcludedFromParity, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        Check.True(labels.Length > 30,
+            $"only found {labels.Length} case labels in the embedded AppCli.cs, so the regex no longer " +
+            "matches the source and this test would pass against almost nothing");
+
+        Check.SetEqual(labels, WrapperAliases,
+            "ParityTests.WrapperAliases has drifted from AppCli.Parse. Add the new alias to the list " +
+            "(and to ArgumentImporter, which AliasParity will then require).");
+    }
 
     private static void AliasParity()
     {
