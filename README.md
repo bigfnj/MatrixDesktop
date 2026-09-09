@@ -215,6 +215,18 @@ Practical examples:
 - Show the full embedded argument reference:
   - `MatrixDesktop.exe --help-full`
 
+### Example launcher script
+
+[`RunMatrixDesktop_ARGS.bat`](RunMatrixDesktop_ARGS.bat) is a worked example of a full
+argument line. Copy it into `publish\win-x64-fd\` (or an extracted release zip) beside
+`MatrixDesktop.exe` and run it. Its comments cover the three ways a hand-written argument
+line usually goes wrong: spaces inside comma-separated values, passing both halves of an
+alias pair such as `raindropLength`/`dropLength`, and expecting `start /min` to stick when
+the app un-minimises itself on startup.
+
+For anything beyond a quick edit of that file, use `MatrixDesktopConfigurator.exe`, which
+generates and validates the command for you.
+
 Supported input forms:
 
 - Raw query string:
