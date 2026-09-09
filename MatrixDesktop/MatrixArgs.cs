@@ -53,11 +53,22 @@ internal static class MatrixArgs
 
         // A single raw query string is a documented paste form.
         //
-        // MD-17: this used to return the string verbatim, which meant the raw-query branch
-        // and the key=value branch disagreed about encoding. A space arrived unescaped and
-        // produced an invalid URL, and a '#' silently truncated every parameter after it,
-        // because everything past it becomes a URL fragment. Each pair is now decoded and
-        // re-encoded through the same path as every other input, so both branches agree.
+        // MD-17: this used to return the string verbatim, so a space arrived unescaped and
+        // produced an invalid URL, and a '#' silently truncated every parameter after it by
+        // starting a fragment. Both branches now percent ENCODE through Encode().
+        //
+        // They deliberately differ on DECODING, and that asymmetry is correct rather than an
+        // oversight, so do not "align" them:
+        //
+        //   --url=a%20b   a command-line value is literal text. It is encoded but not
+        //                 decoded, so the web layer decodes back to exactly "a%20b", which
+        //                 is what the user typed. A literal space is written --url "a b".
+        //   ?url=a%20b    a pasted query string is already encoded BY DEFINITION, so %20
+        //                 means a space. It is decoded first, then re-encoded, and the web
+        //                 layer sees "a b".
+        //
+        // Decoding the command-line form would silently reinterpret any filename containing
+        // a percent sign. Both behaviours are pinned by tests in MatrixArgsTests.
         if (args.Count == 1)
         {
             var single = (args[0] ?? string.Empty).Trim();

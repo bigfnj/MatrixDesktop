@@ -61,18 +61,12 @@ public sealed class MainForm : Form
 
         // If monitors are added/removed or resolution changes while the app is running,
         // resize to keep spanning the full virtual desktop.
+        // Routed through the same helper as the session and power handlers. It kept its own
+        // inline BeginInvoke, which checked only IsDisposed and swallowed the failure with no
+        // log, so a display change racing the close vanished silently: the exact failure mode
+        // the marshalling work was meant to remove.
         _displaySettingsChangedHandler = (_, __) =>
-        {
-            if (IsDisposed) return;
-            try
-            {
-                BeginInvoke(new Action(() => ApplyWindowModeAndBounds(initial: false)));
-            }
-            catch
-            {
-                // Ignore cross-thread / shutdown timing edge cases.
-            }
-        };
+            MarshalToUiThread(() => ApplyWindowModeAndBounds(initial: false), "display settings changed");
 
         // Helps the wrapper feel more "native" and avoids a bright flash on startup.
         BackColor = System.Drawing.Color.Black;
@@ -151,24 +145,50 @@ public sealed class MainForm : Form
         // handle were ever recreated, and only one unsubscribe happens on teardown, so the
         // surplus subscription would keep this form alive and fire against a disposed
         // WebView.
-        if (!_systemEventsAttached)
+        // Tracked per event, not as one flag for both. A single flag set after two
+        // subscriptions describes neither: if the first += succeeded and the second threw,
+        // the flag stayed false, the catch swallowed it, and the successful subscription was
+        // never removed. SystemEvents is static and holds a strong reference, so that rooted
+        // the form for the life of the process and kept firing against a disposed WebView.
+        if (!_sessionSwitchAttached)
         {
             try
             {
                 SystemEvents.SessionSwitch += OnSessionSwitch;
-                SystemEvents.PowerModeChanged += OnPowerModeChanged;
-                _systemEventsAttached = true;
+                _sessionSwitchAttached = true;
             }
             catch
             {
-                // SystemEvents subscription can fail in services / sandboxed
-                // environments; not fatal.
+                // SystemEvents subscription can fail in services / sandboxed environments.
+            }
+        }
+
+        if (!_powerModeAttached)
+        {
+            try
+            {
+                SystemEvents.PowerModeChanged += OnPowerModeChanged;
+                _powerModeAttached = true;
+            }
+            catch
+            {
+                // Not fatal; the session handler above may still be live.
             }
         }
     }
 
-    private bool _systemEventsAttached;
+    private bool _sessionSwitchAttached;
+    private bool _powerModeAttached;
     private bool _isSuspended;
+
+    // _isSuspended alone cannot serialise these: it is assigned only AFTER the await, and
+    // the await hands the UI thread back to the pump. Windows really does deliver two
+    // suspend-class events together (PowerModes.Suspend plus SessionLock on sleep-with-lock,
+    // RemoteDisconnect plus SessionLock on an RDP drop), so without an in-flight flag the
+    // second action would hide the WebView, race the first, and could finish by restoring
+    // visibility while the first one reports a successful suspend. That leaves a visible
+    // window over a suspended renderer, with _isSuspended true so nothing retries.
+    private bool _suspendInFlight;
 
     // SystemEvents raises its events on a private thread it owns, NOT on the UI thread.
     // Measured on this machine: UI thread id 2, handler thread id 4. So every one of these
@@ -234,7 +254,9 @@ public sealed class MainForm : Form
     {
         if (_isSuspended) return;
         if (_isShuttingDown) return;
+        if (_suspendInFlight) return;
 
+        _suspendInFlight = true;
         try
         {
             if (_webView.CoreWebView2 is null) return;
@@ -263,10 +285,19 @@ public sealed class MainForm : Form
         {
             Shared.Logger.Warn($"Failed to suspend WebView (reason='{reason}'): {ex.Message}");
         }
+        finally
+        {
+            _suspendInFlight = false;
+        }
     }
 
     private void TryResumeWebView(string reason)
     {
+        // Guarded like the suspend side. The handlers are detached in OnHandleDestroyed,
+        // which runs AFTER OnFormClosing has already disposed the WebView, so a session
+        // unlock arriving in that window would otherwise touch a disposed COM object.
+        if (_isShuttingDown) return;
+
         try
         {
             if (_webView.CoreWebView2 is not null)
@@ -310,11 +341,16 @@ public sealed class MainForm : Form
 
         // Unhook the v1.0 power/session listeners so they don't fire against
         // a destroyed form's WebView.
-        if (_systemEventsAttached)
+        if (_sessionSwitchAttached)
         {
             try { SystemEvents.SessionSwitch -= OnSessionSwitch; } catch { /* ignore */ }
+            _sessionSwitchAttached = false;
+        }
+
+        if (_powerModeAttached)
+        {
             try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch { /* ignore */ }
-            _systemEventsAttached = false;
+            _powerModeAttached = false;
         }
 
         // Ensure foreground enforcer is stopped to prevent timer ticks during disposal
@@ -909,11 +945,47 @@ public sealed class MainForm : Form
         return _cachedUserDataFolder;
     }
 
+    private const int MaxRecoveryProfilesRetained = 3;
+
     private static string GetFreshLocalUserDataFolder()
     {
         var root = GetWritableAppDataFolder("WebView2Recovery");
-        var folder = Path.Combine(root, $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Environment.ProcessId}");
 
+        // Prune first. Each of these is a full WebView2 profile, several MB and growing with
+        // its cache, and the failure that creates one is usually environmental, so it repeats
+        // on every launch: a machine with a broken Edge install accumulated one per start with
+        // nothing to reclaim them. Dumps and the log are capped; this was not.
+        try
+        {
+            var stale = new DirectoryInfo(root)
+                .GetDirectories()
+                .OrderByDescending(static d => d.LastWriteTimeUtc)
+                .Skip(MaxRecoveryProfilesRetained - 1)
+                .ToArray();
+
+            foreach (var directory in stale)
+            {
+                try
+                {
+                    directory.Delete(recursive: true);
+                }
+                catch
+                {
+                    // A profile still locked by a live WebView2 is not worth failing over.
+                }
+            }
+
+            if (stale.Length > 0)
+            {
+                Shared.Logger.Info($"Pruned {stale.Length} stale WebView2 recovery profile(s) from '{root}'.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Shared.Logger.Warn($"Could not prune WebView2 recovery profiles: {ex.Message}");
+        }
+
+        var folder = Path.Combine(root, $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Environment.ProcessId}");
         Directory.CreateDirectory(folder);
         return folder;
     }

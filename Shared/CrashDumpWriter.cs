@@ -49,6 +49,13 @@ internal static class CrashDumpWriter
     private static bool TryReserveDumpSlot()
         => System.Threading.Interlocked.Increment(ref _dumpsWritten) <= MaxDumpsPerProcess;
 
+    // Reserving is not the same as succeeding. Without this, a dump that failed to write
+    // still burned a slot, so three failures in a row (insufficient privilege, a full disk,
+    // AV interception, all of which cluster) permanently disabled dumps while the log
+    // claimed three had been written.
+    private static void ReleaseDumpSlot()
+        => System.Threading.Interlocked.Decrement(ref _dumpsWritten);
+
     private static void PruneOldDumps(string dumpDir)
     {
         try
@@ -203,6 +210,7 @@ internal static class CrashDumpWriter
             if (!ok)
             {
                 var err = Marshal.GetLastWin32Error();
+                ReleaseDumpSlot();
                 Logger.Warn($"MiniDumpWriteDump returned false. Win32 error={err}. Reason='{reason}'.");
                 return null;
             }
@@ -212,6 +220,7 @@ internal static class CrashDumpWriter
         }
         catch (Exception ex)
         {
+            ReleaseDumpSlot();
             try { Logger.Error($"WriteDump exception. Reason='{reason}'.", ex); }
             catch { /* ignore */ }
             return null;

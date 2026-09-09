@@ -103,7 +103,15 @@ internal sealed class StorageService
         var json = JsonSerializer.Serialize(state, _jsonOptions);
         var temp = StoragePath + ".tmp";
 
-        File.WriteAllText(temp, json);
+        try
+        {
+            File.WriteAllText(temp, json);
+        }
+        catch
+        {
+            TryDeleteTemp(temp);
+            throw;
+        }
 
         if (File.Exists(StoragePath))
         {
@@ -124,6 +132,13 @@ internal sealed class StorageService
         }
 
         File.Move(temp, StoragePath, overwrite: true);
+    }
+
+    // Best-effort sweep of a temp file left by a failed save. Harmless if it survives, since
+    // the next save truncates it, but it is confusing to find next to the presets.
+    private void TryDeleteTemp(string temp)
+    {
+        try { if (File.Exists(temp)) File.Delete(temp); } catch { /* ignore */ }
     }
 
     public static JsonObject CloneObject(JsonObject? source)
@@ -171,9 +186,18 @@ internal sealed class StorageService
         {
             if (!File.Exists(StoragePath)) return null;
 
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+            // Milliseconds, and no overwrite. At second resolution with overwrite:true, two
+            // configurators started together both hitting an unreadable file would quarantine
+            // to the same name and the second would destroy the first casualty, which defeats
+            // the point of preserving it. The same collision was fixed in CrashDumpWriter.
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss.fff", CultureInfo.InvariantCulture);
             var target = StoragePath + ".unreadable-" + stamp;
-            File.Move(StoragePath, target, overwrite: true);
+            if (File.Exists(target))
+            {
+                target = StoragePath + ".unreadable-" + stamp + "-" + Environment.ProcessId;
+            }
+
+            File.Move(StoragePath, target);
             return target;
         }
         catch
@@ -223,17 +247,27 @@ internal sealed class StorageService
                 return existing.CanWrite;
             }
 
-            var probe = Path.Combine(directory, $".write-probe-{Guid.NewGuid():N}");
-            using (var stream = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            // Fixed name, and deleted in a finally. A GUID name meant a delete that failed,
+            // to a scanner holding the freshly closed handle, left one orphan per launch with
+            // nothing anywhere to sweep them; and the early return inside the using skipped
+            // the delete entirely.
+            var probe = Path.Combine(directory, ".write-probe");
+            try
             {
-                if (!stream.CanWrite)
+                using (var stream = new FileStream(probe, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    return false;
+                    if (!stream.CanWrite)
+                    {
+                        return false;
+                    }
                 }
-            }
 
-            File.Delete(probe);
-            return true;
+                return true;
+            }
+            finally
+            {
+                try { File.Delete(probe); } catch { /* swept on the next successful probe */ }
+            }
         }
         catch
         {

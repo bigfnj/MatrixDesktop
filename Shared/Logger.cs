@@ -23,8 +23,6 @@ internal static class Logger
 
     private static readonly string _logPath = ResolveLogPath();
 
-    public static string LogPath => _logPath;
-
     public static void Info(string message) => Write("INFO", message, null);
     public static void Warn(string message) => Write("WARN", message, null);
     public static void Error(string message, Exception? ex = null) => Write("ERROR", message, ex);
@@ -102,6 +100,15 @@ internal static class Logger
                     bufferSize: 4096,
                     useAsync: false);
                 stream.Write(bytes, 0, bytes.Length);
+                return;
+            }
+            // DirectoryNotFoundException and PathTooLongException derive from IOException but
+            // are not contention, so retrying them just burns 21 sleeps per line, and
+            // _dirCreated stays false so the next line does it again. A startup that logs
+            // once per pruned asset would stall for seconds in an already-broken environment.
+            catch (Exception ex) when (
+                ex is DirectoryNotFoundException or PathTooLongException or FileNotFoundException)
+            {
                 return;
             }
             catch (Exception ex) when (

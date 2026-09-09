@@ -109,6 +109,7 @@ internal static class AppCli
             {
                 case "windowed":
                     mode = WindowMode.Windowed;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "borderless":
@@ -118,12 +119,17 @@ internal static class AppCli
                 case "spanall":
                     mode = WindowMode.BorderlessSpanAll;
                     monitorIndex = null;
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "single-monitor":
                 case "singlemonitor":
                     mode = WindowMode.BorderlessSingleMonitor;
                     monitorIndex = null; // primary
+                    // "--single-monitor 1" used to consume the 1, drop it silently, and run
+                    // on the PRIMARY display. Very easy to type when "--monitor 1" is the
+                    // flag two lines above it in the help text.
+                    WarnIfValueIgnored(k, value, consumedValue);
                     break;
 
                 case "monitor":
@@ -295,7 +301,13 @@ internal static class AppCli
 
     private static void WarnIfValueIgnored(string key, string? value, bool consumedValue)
     {
-        if (!consumedValue || value is null)
+        // Gated on the value alone, NOT on consumedValue. SplitKeyValue reports
+        // consumedValue: false for the "--flag=value" spelling because the value came from
+        // the same token, so gating on it meant "--no-topmost false" warned while
+        // "--no-topmost=false" was silently ignored, and "=" is the form the README and the
+        // argument guide document.
+        _ = consumedValue;
+        if (value is null)
         {
             return;
         }
