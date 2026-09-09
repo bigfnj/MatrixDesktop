@@ -251,9 +251,17 @@ internal sealed partial class CommandBuilder
         return values.Count == 0 ? string.Empty : JoinNumbers(values);
     }
 
+    // Shared instance rather than a fresh one per call. JsonSerializerOptions builds and caches
+    // a converter set on first use, so allocating one per call threw that cache away every time
+    // and re-resolved converters. IsDefaultValue calls this up to twice per field and the
+    // configurator rebuilds the command on every keystroke, so at ~60 fields it was on the order
+    // of a hundred throwaway option sets per edit. Safe to share: the instance is never mutated
+    // after construction, and JsonSerializerOptions is documented as thread-safe once used.
+    private static readonly JsonSerializerOptions NormalizeOptions = new(JsonSerializerDefaults.Web);
+
     private static string NormalizeJson(JsonNode node)
     {
-        return node.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return node.ToJsonString(NormalizeOptions);
     }
 
     private static string JoinNumbers(params double[] values) => JoinNumbers((IEnumerable<double>)values);

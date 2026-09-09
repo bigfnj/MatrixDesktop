@@ -101,13 +101,22 @@ internal static class ArgumentCatalog
                 Fields =
                 [
                     Color("backgroundColor", "Background", "web", 0, 0, 0),
-                    Color("cursorColor", "Cursor", "web", 0.47, 1, 0.38),
+                    // These are the RGB conversions of config.js's HSL defaults, NOT
+                    // approximations. Both of these had been eyeballed and were visibly off:
+                    // cursorColor was hsl(0.242, 1, 0.73) = (0.756, 1.000, 0.460) but read
+                    // (0.47, 1, 0.38), and every palette stop was wrong, with the last one
+                    // also sitting at 1.0 instead of 0.8, which changes the gradient's shape.
+                    // Cost of the drift: the swatch showed a colour the app never renders, and
+                    // because CommandBuilder only emits a field that differs from its default,
+                    // nudging any one stop baked the whole wrong palette into the command.
+                    // tests/run-gate.ps1 now recomputes these from config.js on every run.
+                    Color("cursorColor", "Cursor", "web", 0.756, 1.000, 0.460),
                     Color("glintColor", "Glint", "web", 1, 1, 1),
                     Palette("palette", "Palette gradient", "web",
-                        new ColorStop(0.00, 0.00, 0.00, 0.0),
-                        new ColorStop(0.00, 0.25, 0.00, 0.2),
-                        new ColorStop(0.35, 0.95, 0.30, 0.7),
-                        new ColorStop(0.65, 1.00, 0.60, 1.0)),
+                        new ColorStop(0.000, 0.000, 0.000, 0.0),
+                        new ColorStop(0.092, 0.380, 0.020, 0.2),
+                        new ColorStop(0.538, 0.970, 0.430, 0.7),
+                        new ColorStop(0.692, 0.980, 0.620, 0.8)),
                     Stripes("stripeColors", "Stripe colors", "web",
                         "Only used by stripe-based effects. Each row becomes one RGB triplet in the generated stripeColors value.",
                         new ColorValue(0.50, 0.00, 0.50),
