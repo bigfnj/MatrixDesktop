@@ -403,7 +403,16 @@ Output:
 
 ## Attribution / License
 
-The `MatrixDesktop` wrapper code in this solution is provided as-is.
+The `MatrixDesktop` wrapper code in this repository is licensed under the **MIT License** — see
+[`LICENSE`](LICENSE). That covers `MatrixDesktop/`, `MatrixDesktopConfigurator/`, `Shared/`, and
+`tests/`.
 
-The included `web/` folder is the upstream **matrix** project and remains under its original MIT license (see `web/LICENSE`).
+`MatrixDesktop/web/` is a vendored fork of **[Rezmason/matrix](https://github.com/Rezmason/matrix)**,
+which is also MIT licensed, copyright (c) 2018 Rezmason. Its license text is at
+`MatrixDesktop/web/LICENSE` and is reproduced at the bottom of the root `LICENSE`. Both licenses
+are MIT, so the combined work distributes under MIT with both copyright notices retained.
+
+It is a fork, not a pristine copy: 16 files under `web/` carry local changes.
+See [`VENDORING.md`](VENDORING.md) for the exact list, the fork point, and how to diff against
+upstream.
 
