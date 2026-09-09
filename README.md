@@ -84,15 +84,28 @@ This keeps WebView2 asset loading on a normal local Windows path even when the E
 
 ### Smaller web payload in build/publish output
 
-The project file excludes upstream content that is not needed at runtime:
+The non-runtime upstream content is **gone from the repository**, not merely excluded from
+the build. Commit `bd24373` deleted `web/playdate/**`, `web/svg sources/**`,
+`web/screenshot.png` (3.5 MB), `web/lib/regl.js` (unminified; the runtime loads
+`regl.min.js`), and the upstream notes (`README.md`, `TODO.txt`, `glyph order.txt`,
+`prettier_command.txt`, `webgpu_notes.txt`, `assets/msdf_command.txt`). See
+[`VENDORING.md`](VENDORING.md).
 
-- `web/playdate/**` (non-runtime)
-- `web/svg sources/**` (non-runtime)
-- `web/screenshot.png` (large)
-- `web/lib/regl.js` (unminified; runtime uses `regl.min.js`)
-- all `web/**/*.md` and `web/**/*.txt` (docs/notes)
+What ships today is all of `MatrixDesktop/web/`: `index.html`, `js/`, `shaders/`, `lib/`,
+`assets/`, and `LICENSE` — 69 tracked files.
 
-This reduces build/publish copy work and slightly shrinks the portable folder.
+The `Exclude` list on the `web\**\*` Content glob in `MatrixDesktop.csproj` still names
+those deleted paths, plus `web\msdfgen\**\*` which was never vendored at all. Those clauses
+match nothing on disk now and are kept only as a guard against re-import; `.gitignore` lines
+43-49 guard the same paths on the commit side. Two clauses are still live rules rather than
+history:
+
+- `web\**\*.md` and `web\**\*.txt` — these are the reason **not to add a `.md` or `.txt`
+  file under `MatrixDesktop/web/`**. It would be dropped from every build and publish output,
+  and `.gitignore` would refuse to track it in the first place. `web/LICENSE` survives only
+  because it has no file extension.
+- `web\.gitmodules`, `web\.gitignore`, `web\.gitattributes` — likewise defensive; the
+  vendored copy is not a submodule.
 
 ### Smaller publish output via invariant globalization
 
@@ -168,17 +181,18 @@ Wrapper-level flags are consumed by the desktop shell itself and are **not** for
 | `--working-area` | `--workingarea` | Uses monitor working areas so taskbars stay visible. Applies to borderless modes. |
 | `--topmost` | - | Keeps the window above other windows. |
 | `--no-topmost` | `--notopmost` | Turns off always-on-top behavior. |
-| `--exit-on-esc` | `--esc-exit` | Enables physical ESC-to-exit (useful if any-key exit is disabled). |
+| `--exit-on-esc` | `--esc-exit`, `--exitonesc`, `--escexit` | Enables physical ESC-to-exit (useful if any-key exit is disabled). |
 | `--no-esc-exit` | `--noesc-exit`, `--no-esc` | Disables ESC-to-exit. |
 | `--exit-on-any-key` | `--exit-on-anykey`, `--anykey-exit` | Closes the app on any physical key press (default). |
 | `--no-exit-on-any-key` | `--no-anykey-exit` | Disables any-key exit (ESC may still exit if enabled). |
-| `--foreground-key-exit` | `--require-foreground-key-exit` | Only exit on keypress when MatrixDesktop is the foreground app (default). |
-| `--global-key-exit` | `--background-key-exit`, `--global-exit-on-key` | Exit on keypress even when MatrixDesktop is not focused (use with caution). |
+| `--foreground-key-exit` | `--require-foreground-key-exit`, `--foregroundkey-exit`, `--requireforeground-key-exit`, `--no-global-key-exit`, `--noglobal-key-exit` | Only exit on keypress when MatrixDesktop is the foreground app (default). |
+| `--global-key-exit` | `--background-key-exit`, `--global-exit-on-key`, `--globalkey-exit` | Exit on keypress even when MatrixDesktop is not focused (use with caution). |
 | `--hide-cursor` | `--hidecursor` | Hides the mouse cursor while the app is running. |
 | `--show-cursor` | `--showcursor` | Explicitly keeps the cursor visible. |
 | `--no-devtools` | `--nodevtools` | Disables WebView2 DevTools. Handy for a more locked-down distribution build. |
 | `--devtools` | - | Explicitly leaves WebView2 DevTools enabled. |
-| `--help` | `-h`, `/?`, `help` | Shows the built-in help dialog. |
+| `--help` | `-h`, `/?`, `help` | Shows the built-in help dialog: a short summary of these wrapper flags. Modal. |
+| `--help-full` | `--help-arguments` | Shows the whole embedded argument guide in a scrollable dialog. No sibling `.txt` needed. Checked before `--help`, so it wins if both are passed. Modal. |
 
 Practical examples:
 
@@ -198,6 +212,20 @@ Practical examples:
   - `MatrixDesktop.exe --no-exit-on-any-key --version classic`
 - Show the built-in help dialog:
   - `MatrixDesktop.exe --help`
+- Show the full embedded argument reference:
+  - `MatrixDesktop.exe --help-full`
+
+### Example launcher script
+
+[`RunMatrixDesktop_ARGS.bat`](RunMatrixDesktop_ARGS.bat) is a worked example of a full
+argument line. Copy it into `publish\win-x64-fd\` (or an extracted release zip) beside
+`MatrixDesktop.exe` and run it. Its comments cover the three ways a hand-written argument
+line usually goes wrong: spaces inside comma-separated values, passing both halves of an
+alias pair such as `raindropLength`/`dropLength`, and expecting `start /min` to stick when
+the app un-minimises itself on startup.
+
+For anything beyond a quick edit of that file, use `MatrixDesktopConfigurator.exe`, which
+generates and validates the command for you.
 
 Supported input forms:
 
@@ -217,8 +245,10 @@ Notes:
 - NOTE: input generated via a virtual HID keyboard driver is often indistinguishable from physical hardware in user-mode; if you need to block those too, you would need device allowlisting logic.
 - By default, key-exit only triggers when MatrixDesktop is the foreground app; use `--global-key-exit` to make it close on keypress even when not focused.
 - If both an enable and a disable flag are supplied for the same wrapper feature, the **last one wins**.
-- Boolean flags accept common forms like `true/false`, `1/0`, `yes/no`, `on/off`.
-- Bare boolean web flags such as `--camera`, `--volumetric`, `--clickRipples`, or `--skipIntro` are treated as `true`.
+- Boolean flags accept `true/false`, `1/0`, `y/n`, `yes/no`, and `on/off`, case-insensitively.
+- Bare boolean web flags such as `--camera`, `--volumetric`, `--clickRipples`, or `--skipIntro` are treated as `true`, and so is an explicitly empty value (`--camera=`).
+- Any other value is passed through and the web app only accepts the exact text `true`, so `--camera maybe` is silently `false`.
+- Never put a space inside a comma-separated value unless you quote the whole value. `--stripeColors 1,0,0, 1,1,0` is split by the shell and then silently dropped as malformed; `--stripeColors 1,0,0,1,1,0` or `--stripeColors "1,0,0, 1,1,0"` both work.
 - Monitor indices are 0-based and come from `Screen.AllScreens`; their order can change if displays are rearranged in Windows.
 - Any unknown parameters are passed through but will be ignored by the web app.
 
@@ -277,7 +307,10 @@ The following arguments are recognized by the upstream `web/js/config.js` URL pa
 
 - `glyphRotation` (number) — rotate glyphs (degrees).
 - `cursorIntensity` (number) — cursor glow intensity (>= 0).
-- `glyphIntensity` (number) — glyph intensity multiplier (>= 0).
+- `glyphIntensity` (number) — **accepted but inert in this build.** `web/js/config.js` parses
+  and clamps it (>= 0) and defaults it to 1, but no rendering pass reads it: it appears
+  nowhere under `web/js/regl`, `web/js/webgpu`, or `web/shaders`. Passing it has no visible
+  effect. The argument guide says the same.
 
 Color values are typically provided as comma-separated triples. RGB values are usually in the 0–1 range.
 
@@ -331,45 +364,35 @@ The output EXE will be in:
 
 ## Publish (portable, single-folder output)
 
-Publishing produces a folder you can copy to another machine.
+Publishing produces a folder you can copy to another machine. There are exactly **two**
+publish paths, and only one of them ships the configurator.
 
-### Option A (recommended): self-contained portable folder (no .NET install needed)
+### Option A (recommended): framework-dependent portable folder
 
-- In **Visual Studio**:
-  1. Right-click the `MatrixDesktop` project
-  2. **Publish...**
-  3. Select the profile: **Portable-win-x64**
+The supported path. **This is the only publish output that contains both executables.**
 
-- Or from a terminal at the solution root:
+- Visual Studio publish profile: **Portable-win-x64-framework-dependent** (both projects have
+  a profile with this name, and both target the same output folder on purpose)
 
-```bat
-publish-portable-win-x64.cmd
-```
-
-Output:
-
-- `publish\win-x64\`
-
-### Option B: smaller portable folder (requires .NET Desktop Runtime)
-
-- Visual Studio publish profile: **Portable-win-x64-framework-dependent**
-
-- Or run:
+- Or, from a terminal at the repository root:
 
 ```bat
 publish-portable-win-x64-fd.cmd
 ```
 
-Output:
+Output: `publish\win-x64-fd\`, containing `MatrixDesktop.exe`,
+`MatrixDesktopConfigurator.exe`, the `web\` and `configurator\` assets, and the WebView2
+dependencies.
 
-- `publish\win-x64-fd\`
+Requires the **.NET 10 Desktop Runtime** on the target machine. Publish both projects
+together and at the same version — the script does this, and
+`Portable-win-x64-framework-dependent.pubxml` explains why it matters.
 
-This output includes both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe`.
+### Option B (experimental): trimmed self-contained folder
 
-### Option C (experimental): smaller self-contained output using IL trimming
-
-This is a size optimization and can break apps that rely on reflection/COM activation in surprising ways.
-Validate on your targets.
+A size optimization only. It publishes **`MatrixDesktop.exe` alone — no configurator** — and
+IL trimming can break code that relies on reflection or COM activation in ways that only
+show up at runtime. Validate on your target machines before shipping it.
 
 - Visual Studio publish profile: **Portable-win-x64-trimmed-experimental**
 
@@ -379,9 +402,41 @@ Validate on your targets.
 publish-portable-win-x64-trimmed-experimental.cmd
 ```
 
-Output:
+Output: `publish\win-x64-trimmed\`. Self-contained, so no .NET runtime is needed on the
+target, but it is the larger folder of the two.
 
-- `publish\win-x64-trimmed\`
+There is no single-file publish. `publish-singlefile-fd.cmd` and its `SingleFile-FD` profile
+were removed after being verified non-functional: the profile used item metadata in a
+property condition (MSB4190) and requested single-file compression on a framework-dependent
+publish (NETSDK1176), so it never produced an executable.
+
+## Verification gate
+
+`tests\run-gate.ps1` is the pre-release check. It builds, runs the regression harness,
+parses every web module, asserts the embedded resources, publishes both executables, and
+optionally launches them and asserts a real render.
+
+```pwsh
+pwsh -File tests\run-gate.ps1 -Tier1Only   # what CI runs
+pwsh -File tests\run-gate.ps1              # adds the runtime smoke tiers
+```
+
+`-Tier1Only` is the flag CI uses. It covers everything that does not need an interactive
+desktop session: build, unit tests, web bundle integrity, embedded resources, and publish
+payload contents. The runtime tiers create real windows and capture frames, so they need an
+attached interactive session and cannot run on a headless runner.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Pass. Every check that ran, passed. |
+| `1` | A real failure. At least one check failed and the cause is in the code or the repo. |
+| `2` | Something could not be verified — a check was skipped for lack of an interactive session, missing build output, or similar. Not a pass; the skipped list is printed. |
+| `3` | The gate itself broke. Treat as a harness bug, not a product failure. |
+
+Exit 2 is worth treating as acceptable in CI while still printing the not-verified list,
+which is what `ci.yml` does. Exit 1 and 3 fail the build.
 
 ## Notes / prerequisites
 
@@ -403,7 +458,16 @@ Output:
 
 ## Attribution / License
 
-The `MatrixDesktop` wrapper code in this solution is provided as-is.
+The `MatrixDesktop` wrapper code in this repository is licensed under the **MIT License** — see
+[`LICENSE`](LICENSE). That covers `MatrixDesktop/`, `MatrixDesktopConfigurator/`, `Shared/`, and
+`tests/`.
 
-The included `web/` folder is the upstream **matrix** project and remains under its original MIT license (see `web/LICENSE`).
+`MatrixDesktop/web/` is a vendored fork of **[Rezmason/matrix](https://github.com/Rezmason/matrix)**,
+which is also MIT licensed, copyright (c) 2018 Rezmason. Its license text is at
+`MatrixDesktop/web/LICENSE` and is reproduced at the bottom of the root `LICENSE`. Both licenses
+are MIT, so the combined work distributes under MIT with both copyright notices retained.
+
+It is a fork, not a pristine copy: 16 files under `web/` carry local changes.
+See [`VENDORING.md`](VENDORING.md) for the exact list, the fork point, and how to diff against
+upstream.
 

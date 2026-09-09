@@ -28,10 +28,30 @@
       we suppress it so "treat warnings as errors" builds remain unblocked.
     -->
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
-    
-    <!-- Single-file publish settings (when PublishSingleFile is true) -->
-    <IncludeNativeLibrariesForSelfExtract Condition="'$(PublishSingleFile)' == 'true'">true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile Condition="'$(PublishSingleFile)' == 'true'">true</EnableCompressionInSingleFile>
+
+    <!--
+      Publish payload hygiene.
+
+      These live in the project rather than only in the .pubxml because every
+      automated publish path bypasses the profiles and passes raw properties
+      instead: both GitHub workflows and tests\run-gate.ps1 invoke
+      `dotnet publish -c Release -r win-x64 -p:PublishDir=...`. The DebugType
+      set inside Portable-win-x64-framework-dependent.pubxml therefore never
+      applied to a single automated build, and the payload shipped 684,631
+      bytes of .pdb plus WebView2 IntelliSense .xml.
+
+      AllowedReferenceRelatedFileExtensions=none drops the .pdb/.xml that would
+      otherwise ride along with each referenced assembly (that is where the
+      WebView2 doc XML comes from). DebugType/DebugSymbols drop this project's
+      own symbols.
+
+      Scoped to Release so a Debug build keeps full symbols for local
+      debugging. Tradeoff: a Release crash dump written by
+      Shared/CrashDumpWriter.cs will have no line numbers.
+    -->
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
+    <AllowedReferenceRelatedFileExtensions Condition="'$(Configuration)' == 'Release'">none</AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,11 +73,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      Matrix.ico ships exactly once, as an embedded resource (361,102 bytes).
+      Shared/AppWindowIcon.cs reads the embedded copy first and only falls back
+      to an on-disk Matrix.ico beside the EXE if that lookup returns null, so
+      the loose <Content> copy that used to live here was dead weight in every
+      payload. <ApplicationIcon> above still stamps the icon into the PE header,
+      which is what Explorer reads and what the third fallback
+      (Icon.ExtractAssociatedIcon) recovers.
+    -->
     <EmbeddedResource Include="Matrix.ico" LogicalName="Matrix.ico" />
-    <Content Include="Matrix.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
   </ItemGroup>
 
   <ItemGroup>

@@ -18,6 +18,17 @@
     <FileVersion>1.0.1.0</FileVersion>
     <ApplicationIcon>..\MatrixDesktop\Matrix.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
+
+    <!--
+      Publish payload hygiene. See the matching block in
+      MatrixDesktop/MatrixDesktop.csproj for the full rationale: the workflows
+      and tests\run-gate.ps1 publish with raw -p: properties and never load a
+      .pubxml, so a DebugType set only in the profile applied to nothing.
+      Scoped to Release so Debug keeps full symbols.
+    -->
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
+    <AllowedReferenceRelatedFileExtensions Condition="'$(Configuration)' == 'Release'">none</AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
 
   <ItemGroup>
@@ -39,11 +50,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      Embedded copy only. Shared/AppWindowIcon.cs prefers the embedded resource,
+      and both executables publish into the same folder, so the loose on-disk
+      Matrix.ico was being written twice into one 361 KB slot for no reader.
+    -->
     <EmbeddedResource Include="..\MatrixDesktop\Matrix.ico" LogicalName="Matrix.ico" />
-    <Content Include="..\MatrixDesktop\Matrix.ico" Link="Matrix.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
   </ItemGroup>
 
   <ItemGroup>
