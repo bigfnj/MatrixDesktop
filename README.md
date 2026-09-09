@@ -4,7 +4,7 @@ This is a minimal Windows desktop wrapper around the original **Rezmason/matrix*
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
-Current version: **1.0.1** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+Current version: **1.0.2** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
 
 ## Visual examples
 
