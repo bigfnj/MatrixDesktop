@@ -28,10 +28,6 @@
       we suppress it so "treat warnings as errors" builds remain unblocked.
     -->
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
-    
-    <!-- Single-file publish settings (when PublishSingleFile is true) -->
-    <IncludeNativeLibrariesForSelfExtract Condition="'$(PublishSingleFile)' == 'true'">true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile Condition="'$(PublishSingleFile)' == 'true'">true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
