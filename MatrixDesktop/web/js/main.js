@@ -52,9 +52,17 @@ const loadRenderer = async (canvas, config, useWebGPU) => {
 document.body.onload = async () => {
 	const urlParams = new URLSearchParams(window.location.search);
 	const config = makeConfig(Object.fromEntries(urlParams.entries()));
-	const useWebGPU = (await supportsWebGPU()) && ["webgpu"].includes(config.renderer?.toLowerCase());
+	// Config check FIRST. && evaluates left to right, so asking supportsWebGPU() first
+	// meant awaiting navigator.gpu.requestAdapter() on every launch even though the default
+	// renderer is "regl", which initialises the D3D12 adapter enumeration and can spin up the
+	// GPU process for nothing.
+	const useWebGPU = config.renderer?.toLowerCase() === "webgpu" && (await supportsWebGPU());
 
-	if (isRunningSwiftShader() && !config.suppressWarnings) {
+	// suppressWarnings FIRST, same reason. isRunningSwiftShader() creates a second canvas
+	// and a whole throwaway WebGL context just to read a renderer string, and never releases
+	// it, so it burned one of the browser's live-context budget immediately before the real
+	// context is created. Now skipped entirely when the answer cannot matter.
+	if (!config.suppressWarnings && isRunningSwiftShader()) {
 		const notice = document.createElement("notice");
 		notice.innerHTML = `<div class="notice">
 		<p>Wake up, Neo... you've got hardware acceleration disabled.</p>

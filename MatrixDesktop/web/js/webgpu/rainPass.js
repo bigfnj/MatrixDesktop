@@ -102,7 +102,9 @@ export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
 	let computeBindGroup;
 	let renderBindGroup;
 	let output;
+	let outputView;
 	let highPassOutput;
+	let highPassOutputView;
 
 	const loaded = (async () => {
 		const [glyphMSDFTexture, glintMSDFTexture, baseTexture, glintTexture, rainShader] = await Promise.all(assets);
@@ -214,9 +216,11 @@ export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
 		// Update
 		output?.destroy();
 		output = makeRenderTarget(device, size, renderFormat);
+		outputView = output.createView();
 
 		highPassOutput?.destroy();
 		highPassOutput = makeRenderTarget(device, size, renderFormat);
+		highPassOutputView = highPassOutput.createView();
 
 		return {
 			primary: output,
@@ -247,8 +251,14 @@ export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
 		computePass.end();
 
 		if (shouldRender) {
-			renderPassConfig.colorAttachments[0].view = output.createView();
-			renderPassConfig.colorAttachments[1].view = highPassOutput.createView();
+			// Views are cached in build(). output and highPassOutput are reassigned only
+			// there, and a view of an unchanged texture is immutable, so building them per
+			// frame allocated 120 throwaway objects a second for identical results. Every
+			// other WebGPU pass already builds its views once in build(); this was the lone
+			// exception. endPass legitimately calls createView() per frame because the
+			// swapchain texture genuinely changes; these two do not.
+			renderPassConfig.colorAttachments[0].view = outputView;
+			renderPassConfig.colorAttachments[1].view = highPassOutputView;
 			const renderPass = encoder.beginRenderPass(renderPassConfig);
 			renderPass.setPipeline(renderPipeline);
 			renderPass.setBindGroup(0, renderBindGroup);
