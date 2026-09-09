@@ -27,6 +27,7 @@ Exit codes match the gate's own convention:
 
 import functools
 import http.server
+import io
 import json
 import socket
 import sys
@@ -237,6 +238,51 @@ def check_configurator(page, origin, state_json):
     page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
 
 
+def mean_luma(png_bytes):
+    from PIL import Image  # imported lazily; main() reports CANNOT VERIFY if it is absent
+    im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    px = im.tobytes()
+    total = 0.0
+    for i in range(0, len(px), 3):
+        total += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]
+    return total / (len(px) // 3)
+
+
+def check_glyph_intensity(browser, origin):
+    """A flag that renders identically at every value is a flag that does nothing.
+
+    glyphIntensity was accepted by the CLI, listed in the argument guide, offered in the
+    configurator and set by Randomize for the whole of v1.0.x, while being read by no shader
+    at all. Nothing detected that, because nothing had ever asserted a flag CHANGES the
+    output. This does, for both effects that implement it.
+    """
+    def luma(query):
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        try:
+            page.goto(f"{origin}/index.html?{query}", wait_until="load")
+            page.wait_for_function("document.querySelector('canvas') != null", timeout=20000)
+            page.wait_for_timeout(2500)
+            # Averaged over frames because rain is stochastic; one frame is not a measurement.
+            return sum(mean_luma(page.screenshot()) for _ in range(3)) / 3
+        finally:
+            page.close()
+
+    for effect, extra in (("palette", ""), ("stripe", "&effect=stripes")):
+        base = f"suppressWarnings=true&numColumns=40{extra}"
+        dark = luma(f"{base}&glyphIntensity=0")
+        bright = luma(f"{base}&glyphIntensity=2")
+        # Deliberately compares 0 against 2 rather than against the default. Comparing to the
+        # default would also pass if the shader ignored the uniform and both runs were simply
+        # the default render.
+        if bright <= dark * 3:
+            fail(f"glyphIntensity changes the {effect} render",
+                 f"luma at 0 is {dark:.2f} and at 2 is {bright:.2f}; the uniform is not "
+                 f"reaching the shader, so the flag is inert again")
+        else:
+            ok(f"glyphIntensity changes the {effect} render",
+               f"luma {dark:.1f} at 0 vs {bright:.1f} at 2")
+
+
 def check_matrix_web(page, origin):
     """The vendored bundle. Asserts it boots and draws, which nothing in CI covered before."""
     errors = []
@@ -280,8 +326,9 @@ def main():
 
     try:
         from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("  playwright is not installed for this interpreter", file=sys.stderr)
+        from PIL import Image  # noqa: F401  -- mean_luma needs it; fail fast, not mid-run
+    except ImportError as exc:
+        print(f"  a dependency is missing for this interpreter: {exc}", file=sys.stderr)
         return 2
 
     cfg_httpd, cfg_origin = serve(CONFIGURATOR)
@@ -313,6 +360,9 @@ def main():
             page = browser.new_page(viewport=VIEWPORT)
             check_matrix_web(page, web_origin)
             page.close()
+
+            print("=== web smoke: flags actually do something ===")
+            check_glyph_intensity(browser, web_origin)
 
             browser.close()
     finally:

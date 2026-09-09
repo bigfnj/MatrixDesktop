@@ -272,6 +272,24 @@ function Get-WebViewDescendantCount {
     }
 }
 
+# Same count, but allowing for the fact that WebView2's children do not exit the instant
+# their host does. Without the wait this was a race, not a leak check: the parent returns
+# from WM_CLOSE, the gate counts immediately, and a child that is midway through a normal
+# shutdown gets reported as leaked. That produced a real intermittent FAIL on one smoke case
+# out of three while the other two passed, which is the signature of a timing bug rather
+# than a product defect. Returns as soon as the count reaches zero, so a genuinely clean
+# shutdown costs nothing; a real leak still fails, it just takes $TimeoutMs to say so.
+function Wait-WebViewDescendantsGone {
+    param([int]$RootPid, [int]$TimeoutMs = 5000)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ($true) {
+        $n = Get-WebViewDescendantCount -RootPid $RootPid
+        if ($n -le 0) { return $n }
+        if ([DateTime]::UtcNow -ge $deadline) { return $n }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
 # A visible #32770 owned by our pid is a modal dialog: the WebView2-missing message, or
 # the crash box. Without this the gate would capture the dialog and report a confusing
 # render failure instead of naming the actual problem.
@@ -714,7 +732,21 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         # -------------------------------------------------------- tier 2
 
         Test-Hdr 'tier 2: MatrixDesktop runtime smoke'
-        if (-not [Environment]::UserInteractive -or [GateWin]::GetForegroundWindow() -eq [IntPtr]::Zero) {
+        # Deliberately the same precondition as tier 3, and NOT "a window has focus".
+        #
+        # This used to also require GetForegroundWindow() != 0, left over from a capture design
+        # that was considered and never built: a screen grab would have needed our window on top,
+        # PrintWindow with PW_RENDERFULLCONTENT does not. The consequence was that whenever
+        # nothing held focus, which is most of the time on an agent-driven or RDP-detached box,
+        # the gate declined to verify the MAIN executable while tier 3 happily smoked the other
+        # one two hundred lines below under a weaker guard.
+        #
+        # Measured before removing it, with the guard relaxed and no foreground window at all:
+        # all three cases rendered (std 0.168 to 0.173) and, the part actually in doubt, the
+        # animation assertion passed (moved 0.145 to 0.539). So Chromium is not throttling an
+        # unfocused WebView2 here. Nothing is weakened by this: a capture that comes back black
+        # still FAILS the render floor rather than passing, which is the assertion that matters.
+        if (-not [Environment]::UserInteractive) {
             Test-Unchecked 'MatrixDesktop runtime smoke' 'no attached interactive session, so no window can be created or captured'
         } else {
             $exe = Join-Path $GatePublishDir 'MatrixDesktop.exe'
@@ -840,7 +872,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                     # spawned, so without the before-count a build that failed to start
                     # WebView2 at all would score a green tick here. It was collected and then
                     # never read; now a zero before-count is reported as unverified.
-                    $survivors = Get-WebViewDescendantCount -RootPid $proc.Id
+                    $survivors = Wait-WebViewDescendantsGone -RootPid $proc.Id
                     if ($survivors -lt 0 -or $webviewKids -lt 0) {
                         Test-Unchecked "smoke [$caseName] webview children reaped" 'Win32_Process query unavailable'
                     } elseif ($webviewKids -eq 0) {

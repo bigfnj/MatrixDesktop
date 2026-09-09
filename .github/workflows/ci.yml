@@ -71,7 +71,9 @@ jobs:
         run: |
           # Chromium only. The smoke never touches firefox or webkit, and pulling all
           # three roughly triples this step for nothing.
-          python -m pip install --disable-pip-version-check --quiet playwright==1.60.0
+          # pillow measures screenshot luminance, which is how the smoke proves a render
+          # flag actually changes the output rather than merely being accepted.
+          python -m pip install --disable-pip-version-check --quiet playwright==1.60.0 pillow==11.3.0
           python -m playwright install --with-deps chromium
 
       # These steps deliberately do NOT use the .pubxml profiles, so every property
