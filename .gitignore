@@ -31,6 +31,17 @@ codex.toml
 .codex.toml
 mcp.json
 .mcp.json
+# Added after an audit found these seven uncovered while the rest of the list was thorough.
+# None exists in this repo today; they are insurance on the same reasoning as the secrets
+# block near the bottom. `memory/` and `*.memory` matter most: an assistant that persists
+# notes into the working tree is the likeliest way private context reaches a public repo.
+.aider*
+.continue/
+.github/copilot-instructions.md
+memory/
+*.memory
+.specstory/
+.ai/
 
 # Build output
 bin/
