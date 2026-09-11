@@ -27,12 +27,12 @@ being added that same hour. An unmutated gate is decoration.
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
 | `tests\web-smoke.py` (13 checks, headless Chromium, runs in CI) | geometry, theme contrast, whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 
+That middle blind spot is not hypothetical. v1.0.2 shipped with the configurator's entire
+command panel below the bottom of the window and every pixel statistic looked fine.
+
 A fourth thing worth knowing: the window icon is read from the `.exe`'s own Win32 resources,
 not from a managed resource. `<ApplicationIcon>` cannot be removed, because `CreateAppHost`
 builds the apphost's icon by copying the Win32 resources out of the `.dll`.
-
-That middle blind spot is not hypothetical. v1.0.2 shipped with the configurator's entire
-command panel below the bottom of the window and every pixel statistic looked fine.
 
 **Three traps that have each bitten more than once.** Details in the sections below and in
 `VENDORING.md`: `bloomPass`'s transposed width/height uniforms are correct and must not be
@@ -45,6 +45,30 @@ tag. Bump `<Version>` in both `.csproj` and the guide's header line *in the same
 tag*, because `release.yml` overriding from the tag is exactly what let the repo sit at 1.0.2
 through two shipped releases without anyone noticing. The gate holds the guide and the two
 csproj to each other; it cannot know what tag you are about to push.
+
+## Open items
+
+The single place to look for "what is left". The per-pass sections further down are a record
+of when each item was found and why it was or was not acted on; they are not a to-do list, and
+two of them used to share the heading "Worth doing", which is how a v1.0.5 summary came to
+claim the backlog was empty when three items were still open. Anything struck through below
+has shipped.
+
+Nothing here is blocking, and nothing here is a defect a user can currently hit.
+
+| Open | Where | Shape |
+| --- | --- | --- |
+| Release builds carry no line numbers in crash traces | `DebugType=none` in both csproj | Small, but measuring the size delta has twice been defeated by incremental build |
+| CI and the gate both build and publish | `ci.yml`, `tests/run-gate.ps1` | Needs a decision, not code: does CI keep its own payload assertions or defer to the gate |
+| The two boolean parsers disagree | `Shared/FlagNormalization.cs`, `web/js/config.js:402` | `--topmost truthy` is true, `--camera truthy` is false |
+| No `quiltPass` in the WebGPU pipeline | `web/js/webgpu/` | Larger: port the pass, or document the gap |
+| `version=holoplay` renders garbage on ordinary hardware | `web/js/regl/lkgHelper.js` | Larger: the hardcoded fallback device is wrong, the timeout only stops it hanging |
+| Per-pass GPU disposal is incomplete | `web/js/regl/`, `web/js/webgpu/` | Hygiene; the browser reclaims these on context loss |
+| Two upstream shader/FBO defects | `bloomCombine.wgsl`, `regl/bloomPass.js` | Reportable to Rezmason; deliberately unfixed under `VENDORING.md` policy |
+| WebGPU reads `canvas.clientWidth` every frame | `web/js/webgpu/main.js:172` | Watching, not acting: non-default renderer, rewiring risks more than it saves |
+
+Outside this repo: both EXEs are unsigned, so every download trips SmartScreen. That is a
+cross-repo code-signing decision, not a MatrixDesktop task.
 
 ## v1.0 — Completed
 
@@ -86,7 +110,7 @@ These were considered for v1.0 but moved to a future release:
 
 Found and verified during that pass, deliberately not fixed. Each says why.
 
-### Worth doing
+### Items from this pass, with outcomes
 
 - ~~**Embedded live preview renders at the wrong scale.**~~ **Fixed in v1.0.3.** The
   diagnosis above was wrong about the mechanism: the backing store was not tiny and CSS was
@@ -167,7 +191,7 @@ left alone under the vendoring policy in `VENDORING.md`.
 
 ## Deferred from the v1.0.3 audit pass
 
-### Worth doing
+### Items from this pass, with outcomes
 
 - ~~**`gl-matrix.js` is the unminified 214,503-byte development build.**~~ **Done in v1.0.4.**
   Replaced with upstream's own `dist/gl-matrix-min.js` for the same version 3.4.0, renamed to
