@@ -433,19 +433,24 @@ publish (NETSDK1176), so it never produced an executable.
 
 ## Verification gate
 
-`tests\run-gate.ps1` is the pre-release check. It builds, runs the regression harness,
-parses every web module, asserts the embedded resources, publishes both executables, and
-optionally launches them and asserts a real render.
+`tests\run-gate.ps1` is the pre-release check: 43 checks with a desktop session, 14 of them
+in tier 1, which is what CI runs.
 
 ```pwsh
-pwsh -File tests\run-gate.ps1 -Tier1Only   # what CI runs
-pwsh -File tests\run-gate.ps1              # adds the runtime smoke tiers
+pwsh -File tests\run-gate.ps1 -Tier1Only   # 14 checks, what CI runs, no session needed
+pwsh -File tests\run-gate.ps1              # 43 checks, adds the runtime smoke tiers
 ```
 
-`-Tier1Only` is the flag CI uses. It covers everything that does not need an interactive
-desktop session: build, unit tests, web bundle integrity, a headless DOM smoke, embedded
-resources, and publish payload contents. The runtime tiers create real windows and capture
-frames, so they need an attached interactive session and cannot run on a headless runner.
+Tier 1 covers everything that does not need an interactive desktop session: a zero-warning
+build, the 86-test regression harness, `node --check` over every first-party web module,
+every referenced shader and asset resolving, a headless DOM smoke, the embedded argument
+guide, a window icon in both executables at every size the app asks for, the guide header's
+version matching both csproj, and the publish payload. The runtime tiers create real windows
+and capture frames, so they need an attached session and cannot run on a headless runner.
+
+One tier-1 check is about the gate itself: it asserts the publish flags it uses appear in
+both of `release.yml`'s publish steps. Without that the gate measures a payload nobody ships,
+which is exactly what it used to do.
 
 The headless DOM smoke (`tests/web-smoke.py`, Playwright + Chromium) is worth calling out,
 because it exists to catch the one thing the runtime tiers structurally cannot. Those tiers
@@ -453,9 +458,13 @@ photograph the real windows and measure pixel statistics, and a window whose foo
 pushed off-screen still measures perfectly healthy — which is exactly how v1.0.2 shipped a
 configurator with its whole command panel out of view. So these assertions are geometric:
 bounding boxes inside the viewport, shell height equal to the viewport, the field list
-actually scrolling, the preview pane's aspect ratio, and WCAG contrast in both themes. It
-needs no GPU, no window station and no WebView2, which makes it the only configurator UI
-coverage that runs in CI.
+actually scrolling, the command panel staying under 30% of the window, the preview pane's
+aspect ratio, and WCAG contrast in both themes. It needs no GPU, no window station and no
+WebView2, which makes it the only configurator UI coverage that runs in CI.
+
+It also asserts that a render flag actually *changes* the render, by measuring screenshot
+luminance at two values of `glyphIntensity`. That is the check whose absence let
+`glyphIntensity` ship parsed, documented and inert through all of v1.0.x.
 
 If Playwright is not installed for the interpreter it finds, the gate reports the smoke as
 not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific

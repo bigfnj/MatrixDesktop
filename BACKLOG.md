@@ -15,9 +15,12 @@ Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` 
 
 **The one convention that matters here: mutation-test every new check.** Break the thing it
 guards, confirm exactly one failure naming the right file, restore, and put the mutation result
-in the commit message rather than the green run. This is not ceremony. Three checks in this repo
-passed vacuously until someone tried to break them, and one mutation caught a bug in the check
-being added that same hour. An unmutated gate is decoration.
+in the commit message rather than the green run. This is not ceremony. Several checks in this
+repo passed vacuously until someone tried to break them, and on three separate occasions the
+mutation found a bug in the check *being added that same hour* rather than in the code it
+guarded. The most recent: an icon assertion compared a 16x16 bitmap's bytes against a 32x32's
+and called them "distinct", which can never be equal and so could never fail. An unmutated
+gate is decoration.
 
 **Where the coverage is, and what each layer cannot see:**
 
