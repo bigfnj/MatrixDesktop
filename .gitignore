@@ -120,3 +120,26 @@ id_rsa
 id_rsa.*
 .npmrc
 .netrc
+# Second pass, 2026-09-11. id_ed25519 is the notable omission: it has been the default
+# ssh-keygen type for years, so listing id_rsa without it covered the older case only.
+id_ed25519
+id_ed25519.*
+_netrc
+.git-credentials
+credentials.json
+service-account.json
+.pypirc
+.pgpass
+*.keystore
+*.jks
+*.crt
+*.cer
+local.settings.json
+*.publishsettings
+appsettings.Production.json
+
+# Deliberately NOT ignored, though a naive secrets sweep will suggest them:
+#   nuget.config        a normal, committed .NET project file
+#   appsettings.json    likewise; only the Development/Local/Production variants hold
+#                       machine or environment specifics
+# Ignoring either would hide a file that belongs in version control.
