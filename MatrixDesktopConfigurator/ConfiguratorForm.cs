@@ -82,7 +82,7 @@ public sealed class ConfiguratorForm : Form
     {
         try
         {
-            _windowIcon ??= MatrixDesktop.Shared.AppWindowIcon.Load(typeof(ConfiguratorForm).Assembly);
+            _windowIcon ??= MatrixDesktop.Shared.AppWindowIcon.Load();
             _windowIcon.ApplyTo(this);
         }
         catch

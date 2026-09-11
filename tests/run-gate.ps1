@@ -141,6 +141,13 @@ public class GateWin {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+
+    // Same call Shared/AppWindowIcon.cs makes, so the gate checks the icon the way the
+    // product loads it rather than by a different route that could disagree.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int PrivateExtractIcons(string file, int index, int cx, int cy,
+                                                 IntPtr[] icons, int[] ids, int count, int flags);
+    [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
     [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
@@ -576,18 +583,21 @@ try {
         }
     }
 
-    # Both executables load their window icon and their argument guide from an embedded
-    # resource, with an on-disk fallback that succeeds. So if the embedding ever breaks,
-    # nothing visibly changes until someone prunes the loose copy from the publish output,
-    # and then the icon quietly degrades. Asserting the resource directly is the only way
-    # to see it. Runs in a child process because LoadFrom locks the file.
+    # Both executables load the argument guide from an embedded resource. If the embedding
+    # breaks, --help-full and the configurator's ? button silently show nothing, so the
+    # resource is asserted directly. Runs in a child process because LoadFrom locks the file.
+    #
+    # Matrix.ico is deliberately NOT in this list any more. It used to be embedded as a
+    # managed resource as well as stamped into the PE by <ApplicationIcon>, which put it in
+    # the payload six times. AppWindowIcon now reads the running .exe's own Win32 icon, so
+    # the managed copy is gone and the thing worth asserting moved to the icon check below.
     Test-Hdr 'tier 1: embedded resources'
     $probeDlls = @(
         (Join-Path $RepoRoot 'MatrixDesktop\bin\Release\net10.0-windows\MatrixDesktop.dll'),
         (Join-Path $RepoRoot 'MatrixDesktopConfigurator\bin\Release\net10.0-windows\MatrixDesktopConfigurator.dll')
     )
     if (@($probeDlls | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -gt 0) {
-        Test-Unchecked 'both executables embed the icon and the argument guide' 'build output not present, so the assemblies cannot be inspected'
+        Test-Unchecked 'both executables embed the argument guide' 'build output not present, so the assemblies cannot be inspected'
     } else {
         # The paths are embedded into the script text as single-quoted literals rather than
         # passed with -args, which does not bind when pwsh is invoked with -Command <string>.
@@ -607,7 +617,7 @@ try {
 foreach (`$dll in @($literals)) {
     try {
         `$asm = [Reflection.Assembly]::LoadFrom(`$dll)
-        foreach (`$name in 'Matrix.ico', 'MatrixDesktop.ArgumentGuide.txt') {
+        foreach (`$name in 'MatrixDesktop.ArgumentGuide.txt') {
             `$stream = `$asm.GetManifestResourceStream(`$name)
             if (-not `$stream) { `$bad += "`$([IO.Path]::GetFileName(`$dll)) is missing `$name" } else { `$stream.Dispose() }
         }
@@ -625,12 +635,100 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         $seen = if ($seenLine) { [int]($seenLine -replace 'SEEN:', '') } else { -1 }
 
         if ($seen -ne $probeDlls.Count) {
-            Test-Fail 'both executables embed the icon and the argument guide' `
+            Test-Fail 'both executables embed the argument guide' `
                 "the probe fully inspected $seen of $($probeDlls.Count) assemblies, so its verdict is not trustworthy. Verdict was: $verdict"
         } elseif ($verdict -ne 'OK') {
-            Test-Fail 'both executables embed the icon and the argument guide' $verdict
+            Test-Fail 'both executables embed the argument guide' $verdict
         } else {
-            Test-Ok "both executables embed the icon and the argument guide ($seen assemblies inspected)"
+            Test-Ok "both executables embed the argument guide ($seen assemblies inspected)"
+        }
+    }
+
+    # The window icon now comes from the .exe's own Win32 resources, read by
+    # Shared/AppWindowIcon.cs, so THIS is the thing that has to hold. It matters more than
+    # the old managed-resource check did, because the loader has an on-disk fallback: if the
+    # PE icon vanished the app would still start and just show the generic default, which no
+    # render or launch assertion in tiers 2 and 3 can see.
+    #
+    # Two separate assertions, because they fail for different reasons:
+    #
+    #   1. Matrix.ico's directory really declares every size the app asks for. Read straight
+    #      out of the ICONDIR, which is exact.
+    #   2. PrivateExtractIcons against each .exe returns a correctly sized, non-blank bitmap
+    #      at those sizes, using the same call the product makes.
+    #
+    # The first version of (1) compared the 16x16 bitmap's bytes to the 32x32's and called
+    # them "distinct". Those are different byte lengths, so they could never be equal and the
+    # assertion could not fail: a single-size icon sailed through it. Caught by mutating the
+    # .ico down to a lone 32x32 entry, which is the exact silent-quality-loss this is for.
+    Test-Hdr 'tier 1: executable icon'
+    $RequiredIconSizes = @(16, 32)
+    $iconFile = Join-Path $RepoRoot 'MatrixDesktop\Matrix.ico'
+    if (-not (Test-Path -LiteralPath $iconFile -PathType Leaf)) {
+        Test-Fail 'the icon declares every size the app requests' "missing: $iconFile"
+    } else {
+        # ICONDIR: reserved(2) type(2) count(2), then count x ICONDIRENTRY(16), whose first
+        # byte is the width with 0 meaning 256.
+        $icoBytes = [IO.File]::ReadAllBytes($iconFile)
+        $entryCount = [BitConverter]::ToUInt16($icoBytes, 4)
+        $declared = @(for ($i = 0; $i -lt $entryCount; $i++) {
+            $w = $icoBytes[6 + ($i * 16)]
+            if ($w -eq 0) { 256 } else { [int]$w }
+        })
+        $absent = @($RequiredIconSizes | Where-Object { $declared -notcontains $_ })
+        if ($absent.Count -gt 0) {
+            Test-Fail 'the icon declares every size the app requests' `
+                ("Matrix.ico declares $($declared -join ', ') and is missing $($absent -join ', '); " +
+                 'the window would get a scaled bitmap instead of the real entry')
+        } else {
+            Test-Ok "the icon declares every size the app requests ($($declared -join ', '))"
+        }
+    }
+
+    $probeExes = @(
+        (Join-Path $RepoRoot 'MatrixDesktop\bin\Release\net10.0-windows\MatrixDesktop.exe'),
+        (Join-Path $RepoRoot 'MatrixDesktopConfigurator\bin\Release\net10.0-windows\MatrixDesktopConfigurator.exe')
+    )
+    if (@($probeExes | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -gt 0) {
+        Test-Unchecked 'both executables carry a window icon' 'build output not present'
+    } else {
+        $iconBad = @()
+        $iconSeen = 0
+        foreach ($exe in $probeExes) {
+            $exeName = [IO.Path]::GetFileName($exe)
+            foreach ($size in $RequiredIconSizes) {
+                $handles = [IntPtr[]]::new(1)
+                $ids = [int[]]::new(1)
+                $found = [GateWin]::PrivateExtractIcons($exe, 0, $size, $size, $handles, $ids, 1, 0)
+                if ($found -le 0 -or $handles[0] -eq [IntPtr]::Zero) {
+                    $iconBad += "$exeName has no ${size}x${size} icon"
+                    continue
+                }
+                try {
+                    $bmp = [System.Drawing.Icon]::FromHandle($handles[0]).ToBitmap()
+                    try {
+                        if ($bmp.Width -ne $size) { $iconBad += "$exeName asked for $size, got $($bmp.Width)" }
+                        $opaque = 0
+                        for ($y = 0; $y -lt $bmp.Height; $y++) {
+                            for ($x = 0; $x -lt $bmp.Width; $x++) {
+                                if ($bmp.GetPixel($x, $y).A -gt 8) { $opaque++ }
+                            }
+                        }
+                        $pct = 100.0 * $opaque / ($bmp.Width * $bmp.Height)
+                        if ($pct -lt 20) {
+                            $iconBad += ("$exeName ${size}x${size} is {0:F1}% opaque, effectively blank" -f $pct)
+                        }
+                    } finally { $bmp.Dispose() }
+                } finally { [void][GateWin]::DestroyIcon($handles[0]) }
+            }
+            $iconSeen++
+        }
+        if ($iconSeen -ne $probeExes.Count) {
+            Test-Fail 'both executables carry a window icon' "only inspected $iconSeen of $($probeExes.Count)"
+        } elseif ($iconBad.Count -gt 0) {
+            Test-Fail 'both executables carry a window icon' ($iconBad -join '; ')
+        } else {
+            Test-Ok "both executables carry a window icon ($iconSeen inspected at $($RequiredIconSizes -join ' and '))"
         }
     }
 

@@ -82,7 +82,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            _windowIcon ??= Shared.AppWindowIcon.Load(typeof(MainForm).Assembly);
+            _windowIcon ??= Shared.AppWindowIcon.Load();
             _windowIcon.ApplyTo(this);
         }
         catch
