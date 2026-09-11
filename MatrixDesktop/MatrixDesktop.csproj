@@ -21,9 +21,9 @@
          is why the shipped 1.0.3 and 1.0.4 binaries stamped correctly while this said 1.0.2.
          Keep it current anyway: it is what a developer's own build reports, and
          tests\run-gate.ps1 holds the argument guide's header to this value. -->
-    <Version>1.0.4</Version>
-    <AssemblyVersion>1.0.4.0</AssemblyVersion>
-    <FileVersion>1.0.4.0</FileVersion>
+    <Version>1.0.5</Version>
+    <AssemblyVersion>1.0.5.0</AssemblyVersion>
+    <FileVersion>1.0.5.0</FileVersion>
     <!-- Icon for the compiled EXE -->
     <ApplicationIcon>Matrix.ico</ApplicationIcon>
 

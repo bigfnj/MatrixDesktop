@@ -15,9 +15,9 @@
     <RootNamespace>MatrixDesktopConfigurator</RootNamespace>
     <!-- Local-build default only; release.yml overrides from the tag. Kept in step with
          MatrixDesktop.csproj, which the gate also holds the argument guide's header to. -->
-    <Version>1.0.4</Version>
-    <AssemblyVersion>1.0.4.0</AssemblyVersion>
-    <FileVersion>1.0.4.0</FileVersion>
+    <Version>1.0.5</Version>
+    <AssemblyVersion>1.0.5.0</AssemblyVersion>
+    <FileVersion>1.0.5.0</FileVersion>
     <ApplicationIcon>..\MatrixDesktop\Matrix.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
 

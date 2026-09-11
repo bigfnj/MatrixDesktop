@@ -2,13 +2,13 @@
 
 ## Picking this up cold
 
-State as of **v1.0.4**, 2026-09-09. `main` is clean, tagged, CI and Release green.
+State as of **v1.0.5**, 2026-09-11. `main` is clean, tagged, CI and Release green.
 
 **Verify before you trust anything.** One command, and it is the whole story:
 
 ```pwsh
-pwsh -File tests\run-gate.ps1              # 40 checks, needs a desktop session
-pwsh -File tests\run-gate.ps1 -Tier1Only   # 12 checks, what CI runs, no session needed
+pwsh -File tests\run-gate.ps1              # 43 checks, needs a desktop session
+pwsh -File tests\run-gate.ps1 -Tier1Only   # 14 checks, what CI runs, no session needed
 ```
 
 Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` is not a pass.**
@@ -23,9 +23,13 @@ being added that same hour. An unmutated gate is decoration.
 
 | Layer | Catches | Blind to |
 | --- | --- | --- |
-| `tests\MatrixDesktop.Tests` (81 tests, console EXE, exit code is the result) | argument parsing, command building, colour maths, storage | anything that renders |
+| `tests\MatrixDesktop.Tests` (86 tests, console EXE, exit code is the result) | argument parsing, command building, colour maths, storage, and drift between the guide, `ArgumentCatalog` and `config.js` | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
-| `tests\web-smoke.py` (12 checks, headless Chromium, runs in CI) | geometry, theme contrast, whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+| `tests\web-smoke.py` (13 checks, headless Chromium, runs in CI) | geometry, theme contrast, whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+
+A fourth thing worth knowing: the window icon is read from the `.exe`'s own Win32 resources,
+not from a managed resource. `<ApplicationIcon>` cannot be removed, because `CreateAppHost`
+builds the apphost's icon by copying the Win32 resources out of the `.dll`.
 
 That middle blind spot is not hypothetical. v1.0.2 shipped with the configurator's entire
 command panel below the bottom of the window and every pixel statistic looked fine.
@@ -114,10 +118,8 @@ Found and verified during that pass, deliberately not fixed. Each says why.
 - **CI and the gate now duplicate work.** `ci.yml` builds and publishes, and then the gate
   builds and publishes again. Consolidating means deciding whether CI keeps its own payload
   assertions or defers entirely to `tests/run-gate.ps1`.
-- **Generate the guide's flag reference from `ArgumentCatalog`.** Flag definitions live in
-  three places (`ArgumentCatalog`, `config.js`'s `paramMapping`, and the argument guide) and
-  currently agree only because they were checked by hand. The alias-parity test locks the
-  first two together; generating the third would make drift impossible.
+- ~~**Generate the guide's flag reference from `ArgumentCatalog`.**~~ **Done in v1.0.5**, as a
+  cross-check rather than generation. See the v1.0.3 section below for why.
 - **The two boolean parsers disagree.** A wrapper flag treats any value containing "true" as
   true (`Shared/FlagNormalization.ParseBool`), while a web flag requires exactly "true"
   (`web/js/config.js:402`). So `--topmost truthy` is true and `--camera truthy` is false.
@@ -171,21 +173,24 @@ left alone under the vendoring policy in `VENDORING.md`.
   Replaced with upstream's own `dist/gl-matrix-min.js` for the same version 3.4.0, renamed to
   `lib/gl-matrix.min.js` to match the existing `regl.min.js`. 214,503 to 52,494 bytes, down
   75.5%. Provenance, hashes and the equivalence check are recorded in `VENDORING.md`.
-- **The Win32 icon resource inside each `.dll` is dead weight.** After the v1.0.3 repack the
-  icon still ships six times: twice per `.dll` (managed `EmbeddedResource` plus the Win32
-  resource `ApplicationIcon` stamps) and once per apphost `.exe`. Nothing displays a class
-  library's icon. The SDK drives both from the same property and exposes no way to split
-  them, so removing the two dead copies needs a post-build resource edit. 115 KB.
-- **The command panel takes about a third of the configurator's height for a one-line
-  command.** `#commandOutput` has `min-height: 68px`, but `.command-row` is a grid whose row
-  height is set by the seven-button action column: 7 x 34px plus 6 x 7px = 280px, and the
-  textarea stretches to match. Now visible for the first time, since before v1.0.3 the whole
-  panel was off-screen. Laying the actions out in two columns would give roughly 120px back
-  to the field list. Left alone because it is a visible design change rather than a defect.
-- **Generate the guide's flag reference from `ArgumentCatalog`.** Flag definitions live in
-  three places. `AliasListIsNotStale` and `AliasParity` now lock two of them together in both
-  directions, and the catalogue-vs-`config.js` default sweep caught two real drifts, but the
-  argument guide is still maintained by hand and can still drift silently.
+- ~~**The Win32 icon resource inside each `.dll` is dead weight.**~~ **Resolved in v1.0.5**,
+  though not the way this entry assumed. The post-build resource edit is still impossible, and
+  now the reason is recorded: `CreateAppHost` takes `IntermediateAssembly` and no icon
+  parameter, so the apphost gets its icon by copying the Win32 resources out of the `.dll`.
+  Clearing `<ApplicationIcon>` therefore blanks the `.exe` too. What could go was the *other*
+  duplicate: the managed `EmbeddedResource`, which was copying bytes already present in the
+  `.exe`. `AppWindowIcon` now reads the executable's own icon via `PrivateExtractIcons`.
+  114,688 bytes, no PE surgery, no build machinery.
+- ~~**The command panel takes about a third of the configurator's height.**~~ **Fixed in
+  v1.0.5.** Two-column action grid with the scope select spanning both: 42% of the window down
+  to 27%. The guard is `tests/web-smoke.py`, which fails above 30%.
+- ~~**Generate the guide's flag reference from `ArgumentCatalog`.**~~ **Goal met in v1.0.5 by
+  a different mechanism, deliberately.** `tests/MatrixDesktop.Tests/GuideTests.cs` holds the
+  guide, `ArgumentCatalog` and `config.js` to each other in five directions instead of
+  generating one from another. Generating would have replaced 660 lines of hand-written prose
+  (per-flag meaning, performance notes, recommended ranges, worked examples) with a table
+  derived from an id, a default and a one-line help string. Cross-checking makes drift
+  impossible and keeps the document worth reading.
 
 ### Watching, not acting
 
