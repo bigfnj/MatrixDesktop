@@ -518,15 +518,31 @@ h1 {
 	font-size: 13px;
 }
 
+/* Two columns, not one.
+
+   .command-row is a grid, so its row height is whatever the taller of its two children
+   needs, and that was always this button stack: 7 items at 34px plus 6 gaps of 7px = 280px.
+   #commandOutput has min-height 68px but stretches to fill the row, so a one-line generated
+   command was being given a 280px-tall textarea and the field list above lost that space.
+
+   Nobody saw it until v1.0.4, because before the .app-shell fix the whole command panel was
+   off the bottom of the window.
+
+   The scope select spans both columns, which makes the button count divide evenly: 1 + 3
+   rows of 2 = 4 rows, 4*34 + 3*7 = 157px. No empty cell, Test and Stop end up adjacent, and
+   the field list gets about 120px back. */
 .command-actions {
 	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 	grid-auto-rows: 34px;
 	gap: 7px;
-	min-width: 136px;
+	min-width: 280px;
+	align-content: start;
 }
 
 .command-actions select {
 	width: 100%;
+	grid-column: 1 / -1;
 }
 
 #randomizeButton {

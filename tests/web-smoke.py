@@ -175,6 +175,20 @@ def check_configurator(page, origin, state_json):
     else:
         ok("the field list scrolls rather than clipping")
 
+    # The command panel is a footer for a usually-one-line command. It has no business
+    # taking a third of the window. It did: .command-row's height is set by the taller of
+    # its two children, and a 7-item single-column button stack came to 280px, which the
+    # textarea then stretched to match. 30% leaves room either side of the ~24% it now
+    # measures, and would have failed on the ~38% it was.
+    panel_share = box["panel"]["height"] / vh if box["panel"] else 1.0
+    if panel_share > 0.30:
+        fail("the command panel leaves the field list room",
+             f"the panel is {box['panel']['height']:.0f}px, {panel_share:.0%} of a {vh}px "
+             f"viewport, so the field list is squeezed for a one-line command")
+    else:
+        ok("the command panel leaves the field list room",
+           f"{box['panel']['height']:.0f}px, {panel_share:.0%} of viewport")
+
     # Aspect ratio, because the renderer lays its grid out along the longer axis: a very
     # tall thin pane draws a handful of enormous columns instead of numColumns of them.
     # Asserted unconditionally. An earlier revision only ran this when the pane had a
