@@ -48,6 +48,17 @@
       because both items resolve the same path at build time.
     -->
     <EmbeddedResource Include="..\..\MatrixDesktop\AppCli.cs" LogicalName="AppCli.cs.txt" />
+
+    <!--
+      The argument guide and the web app's own parameter table, as bytes, so GuideTests can
+      hold all three definition sites to each other. Flag definitions live in ArgumentCatalog
+      (source-linked above), config.js and the guide, and until now they agreed by luck: two
+      colour defaults had silently drifted, and glyphIntensity was documented and accepted
+      while no shader read it. Embedding beats reading from disk for the same reason as
+      AppCli.cs: no path guessing, and it cannot go stale against what was compiled.
+    -->
+    <EmbeddedResource Include="..\..\MatrixDesktop_Argument_Guide.txt" LogicalName="Guide.txt" />
+    <EmbeddedResource Include="..\..\MatrixDesktop\web\js\config.js" LogicalName="config.js.txt" />
     <Compile Include="..\..\MatrixDesktop\MatrixArgs.cs" Link="Production\MatrixArgs.cs" />
 
     <!-- Shared normalisation primitives. -->

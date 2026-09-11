@@ -22,6 +22,7 @@ tests.AddRange(AppCliTests.All);
 tests.AddRange(ImporterTests.All);
 tests.AddRange(CommandBuilderTests.All);
 tests.AddRange(ParityTests.All);
+tests.AddRange(GuideTests.All);
 tests.AddRange(StorageTests.All);
 
 var failures = 0;
