@@ -1,5 +1,7 @@
 """Real WebView2 configurator probe with exact portable-store preservation."""
 import argparse
+import ctypes
+from ctypes import wintypes
 import hashlib
 import importlib.util
 import io
@@ -17,6 +19,108 @@ ARTIFACTS = ROOT / "artifacts" / "native-zmatrix-configurator"
 spec = importlib.util.spec_from_file_location("native_uc3d_helper", ROOT / "tests" / "native-uc3d-smoke.py")
 native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
+native.USER32.EnumChildWindows.argtypes = [wintypes.HWND, native.CALLBACK, wintypes.LPARAM]
+native.USER32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+native.USER32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+native.USER32.GetDlgItem.argtypes = [wintypes.HWND, ctypes.c_int]
+native.USER32.GetDlgItem.restype = wintypes.HWND
+native.USER32.GetParent.argtypes = [wintypes.HWND]
+native.USER32.GetParent.restype = wintypes.HWND
+native.USER32.IsWindowVisible.argtypes = [wintypes.HWND]
+native.USER32.GetDlgCtrlID.argtypes = [wintypes.HWND]
+native.USER32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+native.USER32.SendMessageW.restype = wintypes.LPARAM
+
+
+def choose_cfg_file(page, process, path):
+    """Drive only this probe's native OpenFileDialog, retaining host text decoding."""
+    def text(hwnd, class_name=False):
+        value = ctypes.create_unicode_buffer(512)
+        reader = native.USER32.GetClassNameW if class_name else native.USER32.GetWindowTextW
+        reader(hwnd, value, len(value))
+        return value.value
+
+    def owned(hwnd):
+        process_id = wintypes.DWORD()
+        native.USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        return process_id.value == process.pid
+
+    page.locator("#importFileButton").click()
+    deadline = time.monotonic() + 15
+    dialog = None
+    while time.monotonic() < deadline:
+        matches = []
+        def visit(hwnd, _):
+            if owned(hwnd) and text(hwnd, True) == "#32770" and text(hwnd) == "Choose a ZMatrix configuration":
+                matches.append(hwnd)
+            return True
+        native.USER32.EnumWindows(native.CALLBACK(visit), 0)
+        assert len(matches) <= 1, "the owned file chooser is ambiguous"
+        if matches:
+            dialog = matches[0]
+            break
+        page.wait_for_timeout(50)
+    assert dialog, "the owned native CFG chooser did not appear"
+    edits = []
+    open_button = None
+    ready = False
+    while time.monotonic() < deadline:
+        edits = []
+        def child(hwnd, _):
+            if text(hwnd, True) != "Edit" or not native.USER32.IsWindowVisible(hwnd) or not owned(hwnd):
+                return True
+            parent = native.USER32.GetParent(hwnd)
+            filename_ancestor = False
+            while parent and parent != dialog:
+                filename_ancestor |= text(parent, True) in ("ComboBox", "ComboBoxEx32") and native.USER32.GetDlgCtrlID(parent) == 1148
+                parent = native.USER32.GetParent(parent)
+            if parent == dialog and filename_ancestor:
+                edits.append(hwnd)
+            return True
+        native.USER32.EnumChildWindows(dialog, native.CALLBACK(child), 0)
+        open_button = native.USER32.GetDlgItem(dialog, 1)
+        if len(edits) == 1 and open_button and text(open_button, True) == "Button" and native.USER32.IsWindowVisible(open_button):
+            ready = True
+            break
+        page.wait_for_timeout(50)
+    assert ready and len(edits) == 1, "the native chooser must expose one unambiguous filename edit under control1148 and its Open button"
+    assert open_button and owned(dialog) and owned(edits[0]) and owned(open_button), "refusing a file action outside the probe's exact PID"
+    value = ctypes.create_unicode_buffer(str(path.resolve()))
+    native.USER32.SendMessageW(edits[0], 0x000C, 0, ctypes.addressof(value))  # WM_SETTEXT
+    native.USER32.PostMessageW(open_button, 0x00F5, 0, 0)  # BM_CLICK
+
+
+def close_edit_roundtrip(playwright, exe, process, browser, page, renderer):
+    """Close before the normal debounce, then verify the synthetic portable store."""
+    page.wait_for_timeout(400)
+    proof = page.evaluate("""() => {
+        const before=window.__nativeRequests.filter(message=>message.type==='saveDraft').length;
+        // Only the native closing snapshot may persist this final synthetic edit.
+        // A slow WM_CLOSE delivery must not let the ordinary debounce mask a bug.
+        const post=chrome.webview.postMessage.bind(chrome.webview);
+        window.__closingSuppressedSaves=[];
+        chrome.webview.postMessage=message=>{
+            if(message.type==='saveDraft') { window.__closingSuppressedSaves.push(structuredClone(message));return; }
+            post(message);
+        };
+        const input=document.querySelector('[data-field="zmMaxStream"] input[type=number]');
+        input.value='2345';input.dispatchEvent(new Event('input',{bubbles:true}));
+        return {before,after:window.__nativeRequests.filter(message=>message.type==='saveDraft').length};
+    }""")
+    assert proof["before"] == proof["after"], "the final edit must still be pending before native close"
+    native.close_window(process)
+    browser.close()
+    stored = json.loads((exe.parent / "MatrixDesktopConfigurator.presets.json").read_text(encoding="utf-8-sig"))
+    assert stored["lastDraft"]["zmMaxStream"] == 2345, "native close lost the last field edit before its debounce"
+    reopened_process, reopened_browser = native.open_application(playwright, exe, [], "zmatrix-close-reopen-" + renderer)
+    try:
+        reopened_page = native.page_at(reopened_browser, "https://configurator.local/")
+        reopened_page.wait_for_function("document.querySelector('[data-field=\"zmMaxStream\"] input[type=number]')?.value==='2345'")
+        native.close_window(reopened_process)
+    finally:
+        native.stop_application(reopened_process)
+        reopened_browser.close()
+    return {"pendingBeforeClose": True, "ordinarySaveRouteBlocked": True, "storedAndReloadedValue": 2345, "reopenedPid": reopened_process.pid}
 
 
 def field(page, key):
@@ -225,7 +329,10 @@ FontHeight=-18
 Strings=First|Second
 """
         page.locator("#importButton").click()
-        page.locator("#importInput").fill(cfg)
+        cfg_path = ARTIFACTS / ("selected-" + renderer + ".cfg")
+        cfg_path.write_text(cfg, encoding="utf-16")  # Native File.ReadAllText must retain BOM handling.
+        choose_cfg_file(page, process, cfg_path)
+        page.wait_for_function("text=>document.querySelector('#importInput').value===text", arg=cfg)
         page.locator("#applyImportButton").click()
         page.wait_for_function("document.querySelector('[data-field=\"zmMaxStream\"] input[type=number]').value==='777'")
         assert field(page, "windowMode").locator("select").input_value() == "wallpaper", "native CFG import discarded the selected launch mode"
@@ -276,19 +383,23 @@ Strings=First|Second
         assert registry_snapshot() == before_registry, "preview/import/Test changed screensaver or autostart registry values"
         assert not errors, "configurator page errors: " + "; ".join(errors)
         page.screenshot(path=str(ARTIFACTS / ("configurator-" + renderer + ".png")))
+        final_preview_url = frame.url
+        closing_page = page
+        page = None
+        close_proof = close_edit_roundtrip(playwright, exe, process, browser, closing_page, renderer)
         report = {"renderer": renderer, "normalSource": imported["runtime"]["nativeFonts"]["normal"]["source"],
             "specialSource": imported["runtime"]["nativeFonts"]["special"]["source"],
             "initialGeneration": generation, "editedGeneration": edited["runtime"]["resourceGeneration"],
             "normalMetricsBefore": initial["runtime"]["nativeFonts"]["normal"]["metrics"],
             "normalMetricsAfter": edited["runtime"]["nativeFonts"]["normal"]["metrics"],
             "importedGlyphCount": len(imported["fonts"]["normal"]["glyphs"]), "testPid": launched["processId"],
-            "largeDirectTestPid": large_launch["processId"], "payloadIdentity": payload_identity, "finalPreview": {"url": frame.url,
+            "largeDirectTestPid": large_launch["processId"], "payloadIdentity": payload_identity, "finalPreview": {"url": final_preview_url,
                 "resourceGeneration": final_preview["runtime"]["resourceGeneration"], "warnings": final_preview["warnings"],
                 "normalSource": final_preview["runtime"]["nativeFonts"]["normal"]["source"],
                 "specialSource": final_preview["runtime"]["nativeFonts"]["special"]["source"],
                 "normalGlyphCount": len(final_preview["fonts"]["normal"]["glyphs"]),
                 "specialGlyphCount": len(final_preview["fonts"]["special"]["glyphs"])},
-            "registryPreserved": True, "errors": errors, "sourceWitnesses": witnesses}
+            "closeEditProof": close_proof, "registryPreserved": True, "errors": errors, "sourceWitnesses": witnesses}
         (ARTIFACTS / ("report-" + renderer + ".json")).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print("PASS native ZMatrix configurator", renderer, ": GDI atlases, font refresh, CFG import, scene retention, windowed Test, registry unchanged", flush=True)
     except BaseException:

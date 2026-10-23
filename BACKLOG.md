@@ -2,8 +2,8 @@
 
 ## Picking this up cold
 
-State for **v1.2.0**, 2026-10-23. ZMatrix and wallpaper implementation passes the
-full published gate. The committed-source audit is next. The prior UC3D items remain resolved below. Marketplace,
+State for **v1.2.0**, 2026-10-23. ZMatrix, wallpaper and the post-push source
+audit findings are resolved below. Published application checks pass. Marketplace,
 OBS/Spout/NDI and per-monitor configurations remain deferred by owner decision.
 
 **Verify before you trust anything.** One command, and it is the whole story:
@@ -61,9 +61,12 @@ two of them used to share the heading "Worth doing", which is how a v1.0.5 summa
 claim the backlog was empty when three items were still open. Anything struck through below
 has shipped.
 
-Active verification: complete the committed-source audit after pushing main.
-The final Windows PowerShell 5.1 gate reports 67 PASS, 0 FAIL, 0 UNCHECKED,
-including 131 core cases and 20 native cases inside its aggregate checks.
+No active items remain. The Windows PowerShell 5.1 full gate reports
+70 PASS, 0 FAIL, 0 UNCHECKED, with its actual Windows process exit observed as 0.
+The PowerShell 7 Tier 1 gate reports 37 PASS, 0 FAIL, 0 UNCHECKED.
+These include 139 core cases and 22 native cases inside aggregate checks.
+Sixteen subsequent native and regression phases each exit 0, covering both
+renderers and repeating regressions after wallpaper, configurator and UC3D smoke.
 The screensaver preview and fullscreen input-exit probes pass when launched as the
 signed-in owner in the connected RDP session. The agent execution account could not
 deliver input there; that context is correctly reported as UNCHECKED rather than passed.
@@ -80,7 +83,7 @@ The implementation uses fresh source and retains the separately permitted font.
 | Continuous wallpaper for every scene | FIXED | WorkerW hosting is independent of scene. Actual Matrix/UC3D/ZMatrix probes render both backends without focus changes. New nested Progman/WorkerW discovery supports this workstation's shell layout. `wallpaper-smoke.py` checks the real parent, rendering and orderly shutdown. |
 | Functional ZMatrix streams, persistence, cleanup, phrases and blends | FIXED | Shared seeded simulation and bytewise persistent surface, real WebGL/WebGPU presentation. `zmatrix-tests.mjs` has literal raster and timing cases; thirteen private source mutations fail their named assertions. Actual browser animation/pause/resize/disposal checks pass both backends. |
 | Native Windows font descriptors and wallpaper | FIXED | GDI atlases retain real metrics, RGB coverage, rotated ink bounds and substitution warnings. PaintDesktop excludes app windows/icons. Eleven native GDI cases and nine rebuilt mutations cover font behavior and handle cleanup. Native scene probes consume both native fonts without warnings. |
-| Configurator settings and original CFG import | FIXED | All 27 controls, structured font/phrase/character editors, byte RGB, preserved inactive metadata and scene filtering. C# and seven DOM cases verify real importer/builder behavior. Twelve private mutations prove validation, migration, DPI conversion, export and request-order guards. Actual configurator checks pass both backends. |
+| Configurator settings and original CFG import | FIXED | All 27 controls, structured font/phrase/character editors, byte RGB, preserved inactive metadata and scene filtering. C# and ten DOM cases verify real importer/builder behavior. Twelve original private mutations prove validation, migration, DPI conversion, export and request-order guards. Actual configurator checks pass both backends. |
 | Existing UC3D starters misclassified after adding fields | FIXED | Historical field sets are frozen and seed 6 adds only the new starter. Literal historical fixtures retain edited, renamed and deleted starters. |
 | Paused original REGL scene could skip initialization or read stale ping-pong state | FIXED | Active time and active shader tick replace elapsed wall time/raw RAF tick. Actual GPU uniform witness starts at tick 0 after an initial pause. An isolated served raw-tick mutation fails the initialization assertion. |
 | Independent pause reasons and any-monitor fullscreen detection | FIXED | Clearing one reason retains all other reasons. A fullscreen window on either monitor pauses the wallpaper. Three rebuilt policy mutants fail their intended tests. |
@@ -91,7 +94,7 @@ The implementation uses fresh source and retains the separately permitted font.
 | Reused preview iframe retained expired native resource URLs after font edits | FIXED | A current-bootstrap endpoint and readiness promise reconcile document initialization with newer pushed generations. Extracted-initializer cases and source mutations cover generation/query ordering, origins and failed fetches. Actual normal/special font edits produce new GDI generations and visible output on both backends. |
 | A preview received native atlases prepared for another draft | FIXED | Bootstrap snapshots carry their exact query identity. Cached, pushed and fetched resources must match the document query; a mismatched current fetch rejects readiness visibly. Named extracted-initializer cases and four identity mutations prove each boundary. |
 | Application and configurator query builders use different leading-question-mark conventions | FIXED | Normalize the serialized resource identity to an empty string or one leading question mark. The bootstrap suite checks empty, prefixed, unprefixed and escaped values; native wallpaper startup verifies the application path, and native configurator checks verify the preview path. |
-| Late preview replies navigated over newer edits | FIXED | Preview request versions discard obsolete replies. The seven-case DOM suite includes a delayed old reply; removing the guard fails that case. |
+| Late preview replies navigated over newer edits | FIXED | Preview request versions discard obsolete replies. The DOM suite includes a delayed old reply; removing the guard fails that case. |
 | A valid large direct Test launched before copied-command formatting threw | FIXED | Validate and prepare the command description before launch, with a direct-launch description when only the copied representation is too long. Rebuilt focused tests, its mutation and both native backends exercise large Unicode values. |
 | Native resource change during initial atlas decode was missed | FIXED | Subscribe before loading and await the latest generation before declaring the runtime ready. The 38-case ZMatrix suite exercises a delayed first decode and a newer update. Late subscription and skipped latest-generation wait each fail the named startup regression. |
 | Desktop pointer coordinates used physical pixels as CSS pixels | FIXED | Explicit viewport-to-canvas scaling, paired clicks and drag suppression. Three isolated input mutants cover DPI scaling, unpaired clicks and strict decimal parsing, with unchanged original source witnesses. |
@@ -106,6 +109,32 @@ The implementation uses fresh source and retains the separately permitted font.
 | Foreground helper joined a foreign input queue | FIXED | Remove AttachThreadInput while retaining independent native activation attempts. Two compiled-callgraph/order cases and three rebuilt mutations prove the reachable native path. Current owned UI responsiveness is verified; the earlier timeout did not measure the old UI's responsiveness, so it does not prove an old hang. |
 | Screensaver input is not delivered from the agent execution account | CLOSED-VERIFIED | Accepted SendInput does not advance LastInputInfo from the agent account despite WTSActive and matching Default desktops. A private RunAS Helper/WTS launcher runs the exact same published probe as the signed-in owner in RDP session 1. Preview passes; fullscreen acquires focus and exits 0 after a real Escape event. The user need not disconnect RDP or log in locally. No session state or helper authorization policy was changed. |
 | README promised complete WebView2 suspension | FIXED | Qualify suspension as a request that WebView2 may decline. Scene clocks and UC3D audio still honor host pause; controlled audio cases and real browser suspension checks cover that fallback. |
+
+### Post-push v1.2.0 audit
+
+The full source audit began after implementation commit `1afb6aa` reached main.
+The following findings are resolved and application verification is complete.
+Thirty-three focused source/assembly mutations fail their named assertions.
+A deployed null closing-snapshot mutation also fails the native stored-value
+assertion with ordinary autosave blocked. Exact preset and backup bytes are restored.
+The old backlog was reread against the full diff; no old item was deleted.
+
+| Finding | Disposition | Implementation and checkable evidence |
+| --- | --- | --- |
+| A late camera stream could restart after renderer cleanup | FIXED | Generation-owned acquisition stops obsolete streams and checks ownership again after video.play. Six controlled cases and four source mutations cover late streams, overlapping setup, late failures and exactly-once release. Native synthetic-video verification is included in the final pass. |
+| Valid minimum density and column settings created an empty GPU grid | FIXED | Both rain passes retain at least one effective column. Real pass-factory cases include the minimum endpoints and ordinary nonzero controls; each backend's removed clamp causes its named failure. |
+| WebGPU image uploads retained ImageBitmap sources | FIXED | Close the source in finally after success, texture-allocation failure or upload failure. The real loader is exercised with owned sources; removing close fails the named ownership assertion. |
+| Choose .cfg file replaced the selected text with the current command | FIXED | Show the import panel before assigning the returned file contents. The actual owned Windows dialog imports a UTF-16 BOM fixture with native text decoding. The DOM regression kills the original ordering mutation; the native helper waits for the exact owned filename control. |
+| Exported PowerShell scripts lost raw JSON quotes under Windows PowerShell 5.1 | FIXED | Use documented ProcessStartInfo.Arguments with Windows argument quoting and an ASCII base64 transport for UTF-8 content. Real generated scripts pass argv-capture execution under PowerShell 5.1 and 7, including equals, quotes, backslashes, Unicode and a large valid list. An emptied-arguments mutation fails the named PowerShell 5.1 case. |
+| A late disabled color-picker callback mutated saved draft arrays | FIXED | Copy editor values at the update boundary so displayed arrays do not alias stored draft data. The actual late callback is checked against saved state; removing the copy fails its named DOM assertion. |
+| Crash-dump failures corrupted the three-dump reservation cap | FIXED | Release only an owned reservation, roll back rejected reservations and preserve the native error before handle cleanup. Two synthetic native cases and five freshly rebuilt mutations verify pre-reservation failure, failed writers, the cap and rejection accounting without writing real dumps. |
+| Raw JSON containing equals or ampersands became bogus query keys | FIXED | Preserve structured flag/value pairs and distinguish literal explicit flags or standalone JSON from actual raw queries. Thirty-eight isolated CLI/parser cases pass; three fresh assembly variants each fail exactly one named regression. |
+| Configurator import split raw JSON at equals or ampersands | FIXED | Apply the same literal structured-value distinction before tokenizing imported commands. Three production-importer cases and three freshly rebuilt mutants verify raw JSON, explicit flags and real query controls. |
+| Short help omitted wallpaper discovery and mode diagnostics claimed false semantics | FIXED | Advertise --wallpaper and --help-full. Explain that value-free switches ignore supplied values without calling window modes false. The final native help-dialog probe verifies the displayed text. |
+| Looking Glass calibration could request a billion views or override validated quilt fields | FIXED | Limit the quilt to 1024 views and reject zero-size derived tiles; merge validated quilt dimensions after external calibration fields. Eight cases and seven source mutations cover limits, ordinary valid controls and collisions for all four quilt dimensions. Unsupported calibration reports fallback explicitly. Physical Looking Glass hardware remains unavailable. |
+| Closing within the draft debounce interval could lose the last edit | FIXED | Capture one final frontend snapshot before disposing WebView2, bounded to 1.5 seconds. Repeated close requests share the operation; malformed, unavailable and late snapshots retain the last received draft, and late faults are observed. Two controlled cases, the actual immediate edit-close-reopen check and five mutations cover these boundaries. |
+| Obsolete JsonNode extension was shadowed by the runtime instance method | CLOSED-VERIFIED | Calls already bind to the .NET 10 instance method, so the helper had no reachable effect. Remove that unused source. The 139-case core harness, including real PowerShell export executions, passes against the runtime methods. |
+| Argument guide understated the density maximum | CLOSED-VERIFIED | The parser and catalog already support 0.01-8. Correct the guide's 0.01-4 prose to match config.js, ArgumentCatalog and README. Executing makeConfig with 0, 4, 8 and 100 yields 0.01, 4, 8 and 8. |
 
 The native configurator font-edit refresh is closed by its deployed WebView2
 probes on both backends. Explorer recovery is closed by the second actual shell

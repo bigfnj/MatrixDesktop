@@ -10,6 +10,14 @@ const cameraSize = [1, 1];
 let _animationFrameId = null;
 let _isDrawing = false;
 let _stream = null;
+let _generation = 0;
+const stoppedStreams = new WeakSet();
+
+const stopTracks = (stream) => {
+	if (!stream || stoppedStreams.has(stream)) return;
+	stoppedStreams.add(stream);
+	stream.getTracks().forEach(track => { try { track.stop(); } catch {} });
+};
 
 const drawToCanvas = () => {
 	if (!_isDrawing) return;
@@ -28,26 +36,29 @@ const stopCameraLoop = () => {
 };
 
 const stopCamera = () => {
+	_generation++;
 	stopCameraLoop();
 	// Stop all tracks to release the camera
-	if (_stream) {
-		_stream.getTracks().forEach(track => track.stop());
-		_stream = null;
-	}
+	stopTracks(_stream);
+	_stream = null;
 	video.srcObject = null;
 };
 
 const setupCamera = async () => {
 	stopCamera();
+	const generation = _generation;
+	let stream = null;
 	try {
-		_stream = await navigator.mediaDevices.getUserMedia({
+		stream = await navigator.mediaDevices.getUserMedia({
 			video: {
 				width: { min: 800, ideal: 1280 },
 				frameRate: { ideal: 60 },
 			},
 			audio: false,
 			});
-		const videoTrack = _stream.getVideoTracks()[0];
+		if (generation !== _generation) { stopTracks(stream); return; }
+		_stream = stream;
+		const videoTrack = stream.getVideoTracks()[0];
 		const settings = videoTrack.getSettings();
 		const width = Math.max(1, settings.width ?? 1);
 		const height = Math.max(1, settings.height ?? 1);
@@ -62,15 +73,14 @@ const setupCamera = async () => {
 
 		video.srcObject = _stream;
 		await video.play();
+		if (generation !== _generation) { stopTracks(stream); return; }
 
 		_isDrawing = true;
 		drawToCanvas();
 	} catch (e) {
-		_isDrawing = false;
-		if (_stream) {
-			_stream.getTracks().forEach(track => track.stop());
-			_stream = null;
-		}
+		stopTracks(stream);
+		if (generation !== _generation) return;
+		stopCamera();
 		console.warn(`Camera not initialized: ${e}`);
 	}
 };

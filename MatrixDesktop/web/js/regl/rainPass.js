@@ -44,7 +44,7 @@ export default ({ regl: nativeRegl, config, lkg, canvas }) => {
 	// to reach the desired density, and then overlaps them
 	const volumetric = config.volumetric;
 	const density = volumetric && config.effect !== "none" ? config.density : 1;
-	const [numRows, numColumns] = [config.numColumns, Math.floor(config.numColumns * density)];
+	const [numRows, numColumns] = [config.numColumns, Math.max(1, Math.floor(config.numColumns * density))];
 
 	// The volumetric mode requires us to create a grid of quads,
 	// rather than a single quad for our geometry
@@ -276,8 +276,8 @@ export default ({ regl: nativeRegl, config, lkg, canvas }) => {
 
 			const [numTileColumns, numTileRows] = [lkg.tileX, lkg.tileY];
 			const numVantagePoints = numTileRows * numTileColumns;
-			const tileWidth = Math.floor(w / numTileColumns);
-			const tileHeight = Math.floor(h / numTileRows);
+			const tileWidth = Math.max(1, Math.floor(w / numTileColumns));
+			const tileHeight = Math.max(1, Math.floor(h / numTileRows));
 			vantagePoints.length = 0;
 			for (let row = 0; row < numTileRows; row++) {
 				for (let column = 0; column < numTileColumns; column++) {

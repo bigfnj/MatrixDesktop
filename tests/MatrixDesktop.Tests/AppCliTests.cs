@@ -16,6 +16,7 @@ internal static class AppCliTests
         ("Every documented cursor and devtools alias is recognised", CursorAndDevToolsAliases),
         ("Web flags are forwarded rather than consumed", WebFlagsForwarded),
         ("A space separated web flag keeps its value together", WebFlagValuePreserved),
+        ("Raw structured web argv preserves equals and shell characters", StructuredWebValues),
         ("An empty string value survives for the web layer", EmptyStringValueSurvives),
         ("A raw query string argument is forwarded untouched", RawQueryForwarded),
         ("Wrapper flags are stripped from the forwarded arguments", WrapperFlagsStripped),
@@ -167,6 +168,22 @@ internal static class AppCliTests
         Check.Equal(2, rest.Count, "a consumed value must be put back, or --effect would arrive with no value");
         Check.Equal("--effect", rest[0], "the key keeps its prefix");
         Check.Equal("mirror", rest[1], "the value follows immediately, preserving the pairing");
+    }
+
+    private static void StructuredWebValues()
+    {
+        const string phrases = """["A=B & C","\"quoted\"",""]""";
+        const string characters = """["=","&","#","%","漢"]""";
+        const string font = """{"name":"A=B","height":-12}""";
+        string[] arguments = ["--scene", "zmatrix", "--zmPhrases", phrases,
+            "--zmCharacters", characters, "--zmFont", font, "--camera", "effect=stripes"];
+        Parse(out var rest, arguments);
+        Check.True(rest.SequenceEqual(arguments), "The wrapper must preserve every raw structured argv token.");
+        Check.Equal("scene=zmatrix&zmPhrases=" + Uri.EscapeDataString(phrases)
+            + "&zmCharacters=" + Uri.EscapeDataString(characters)
+            + "&zmFont=" + Uri.EscapeDataString(font) + "&camera=true&effect=stripes",
+            MatrixArgs.BuildQueryString(rest),
+            "Equals inside JSON must remain a value while an adjacent real key remains a key.");
     }
 
     private static void EmptyStringValueSurvives()

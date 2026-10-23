@@ -304,6 +304,7 @@ internal static class AppCli
             "MatrixDesktop.exe [app flags] [web flags]",
             "",
             "App flags (handled by the desktop wrapper):",
+            "  --wallpaper            Run behind desktop icons, with tray controls.",
             "  --windowed             Run in a normal resizable window.",
             "  --borderless           Force borderless fullscreen spanning all monitors (default).",
             "  --single-monitor        Borderless fullscreen on the primary monitor.",
@@ -318,6 +319,7 @@ internal static class AppCli
             "  --foreground-key-exit   Only exit on keypress when MatrixDesktop is foreground (default).",
             "  --global-key-exit       Exit on keypress even when not focused (use with caution).",
             "  --no-devtools           Disable WebView2 DevTools.",
+            "  --help-full            Open the complete scene and argument reference.",
             "",
             "Web flags (forwarded to the embedded web app as URL query params):",
             "  Examples: --version 3d --effect mirror --camera true",
@@ -356,11 +358,9 @@ internal static class AppCli
             return;
         }
 
-        // Deliberately a log line rather than silence. The token is gone either way, but
-        // "--no-topmost false" is a mistake worth telling someone about.
+        // Value-free switches include window modes and explicitly negative booleans.
         Shared.Logger.Warn(
-            $"'--{key}' always means false, so the value '{value}' after it was ignored. " +
-            $"Use the positive form if you meant to pass a value.");
+            $"'--{key}' does not accept a value, so '{value}' was ignored.");
     }
 
     private static bool LooksLikeFlag(string token)

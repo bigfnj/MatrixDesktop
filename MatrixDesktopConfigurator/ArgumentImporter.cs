@@ -453,7 +453,8 @@ internal sealed class ArgumentImporter
             return true;
         }
 
-        if (!token.Contains('&') || token.Contains("://", StringComparison.Ordinal))
+        if (token.StartsWith("--", StringComparison.Ordinal) || token.StartsWith("/", StringComparison.Ordinal)
+            || IsStructuredPair(token) || !token.Contains('&') || token.Contains("://", StringComparison.Ordinal))
         {
             return false;
         }
@@ -481,6 +482,16 @@ internal sealed class ArgumentImporter
 
             yield return (Unescape(part[..eq]), Unescape(part[(eq + 1)..]));
         }
+    }
+
+    private static bool IsStructuredPair(string token)
+    {
+        var separator = token.IndexOf('=');
+        if (separator < 0) return false;
+        var value = token[(separator + 1)..].TrimStart();
+        if (value.Length == 0 || value[0] is not ('[' or '{')) return false;
+        try { using var document = JsonDocument.Parse(value); return true; }
+        catch (JsonException) { return false; }
     }
 
     private static (string Key, string? Value) SplitKeyValue(string token, List<string> tokens, ref int index)
@@ -515,6 +526,9 @@ internal sealed class ArgumentImporter
         }
 
         var t = token.Trim();
+        // Keep JSON paired with its key, including '=' inside a phrase or font.
+        // Typed validation remains responsible for malformed object/array input.
+        if (t[0] is '[' or '{') return false;
         return t.StartsWith("--", StringComparison.Ordinal)
                || t.StartsWith("/", StringComparison.Ordinal)
                || t.StartsWith("?", StringComparison.Ordinal)

@@ -369,7 +369,7 @@ Supported input forms:
 Notes:
 
 - Values containing spaces or special shell characters should be quoted.
-- Key-exit uses a Windows low-level keyboard hook (WH_KEYBOARD_LL) and filters injected events (LLKHF_INJECTED / LLKHF_LOWER_IL_INJECTED), so typical software-injected keystrokes (SendInput/keybd_event) do not trigger exit.
+- Ordinary window/fullscreen key-exit uses a Windows low-level keyboard hook (WH_KEYBOARD_LL) and filters injected events (LLKHF_INJECTED / LLKHF_LOWER_IL_INJECTED). A genuine `/s` screensaver additionally exits on session input changes, including delivered software-injected keyboard or mouse input.
 - NOTE: input generated via a virtual HID keyboard driver is often indistinguishable from physical hardware in user-mode; if you need to block those too, you would need device allowlisting logic.
 - By default, key-exit only triggers when MatrixDesktop is the foreground app; use `--global-key-exit` to make it close on keypress even when not focused.
 - If both an enable and a disable flag are supplied for the same wrapper feature, the **last one wins**.

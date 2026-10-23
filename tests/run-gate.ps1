@@ -558,6 +558,9 @@ try {
         @{ Name = 'host pointer regressions'; Script = 'tests\host-pointer-tests.mjs' }
         @{ Name = 'UC3D host audio pause regressions'; Script = 'tests\uc3d-audio-tests.mjs' }
         @{ Name = 'native bootstrap generation regressions'; Script = 'tests\native-bootstrap-tests.mjs' }
+        @{ Name = 'camera acquisition and disposal regressions'; Script = 'tests\camera-tests.mjs' }
+        @{ Name = 'renderer grid and bitmap ownership regressions'; Script = 'tests\renderer-grid-resource-tests.mjs' }
+        @{ Name = 'Looking Glass calibration and tile bounds'; Script = 'tests\lkg-bounds-tests.mjs' }
     )) {
         if (-not $node) { Test-Unchecked $case.Name 'node is not on PATH'; continue }
         $path = Join-Path $RepoRoot $case.Script

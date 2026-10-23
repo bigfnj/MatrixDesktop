@@ -10,17 +10,16 @@ const loadTexture = async (device, url) => {
 	const response = await fetch(url);
 	const data = await response.blob();
 	const source = await createImageBitmap(data);
-	const size = [source.width, source.height, 1];
-
-	const texture = device.createTexture({
-		size,
-		format: "rgba8unorm",
-		usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-	});
-
-	device.queue.copyExternalImageToTexture({ source, flipY: true }, { texture }, size);
-
-	return texture;
+	try {
+		const size = [source.width, source.height, 1];
+		const texture = device.createTexture({
+			size,
+			format: "rgba8unorm",
+			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+		});
+		device.queue.copyExternalImageToTexture({ source, flipY: true }, { texture }, size);
+		return texture;
+	} finally { source.close(); }
 };
 
 const makeRenderTarget = (device, size, format, mipLevelCount = 1) =>

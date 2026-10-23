@@ -36,7 +36,9 @@ The wrapper accepts multiple input styles (you can mix them):
 Structured ZMatrix font/list arguments accept raw JSON or json64: followed by
 unpadded base64url UTF-8 JSON (at most 64 KB decoded). The configurator encodes
 these values in Copy commands so shell characters inside phrases stay literal.
-Direct Test Argument, live preview and Export .ps1 retain structured JSON.
+Direct Test Argument and live preview retain structured JSON. Export .ps1 uses
+Windows argument quoting and an ASCII-safe UTF-8 payload, preserving raw JSON
+under both Windows PowerShell 5.1 and PowerShell 7.
 Windows command lines are limited to 32767 UTF-16 characters; an oversized
 generated command or direct launch reports that limit instead of truncating it.
 
@@ -192,7 +194,7 @@ Cursor
   Default: ON (unless you explicitly hid it)
   Meaning: ensures the app does not hide the cursor.
 
-Exit behavior (physical keyboard only; injected keypresses ignored)
+Exit behavior for ordinary window/fullscreen launches
 - This build uses a Windows low-level keyboard hook (WH_KEYBOARD_LL). It is intended to:
   - exit on REAL keyboard hardware input
   - ignore typical software-injected keystrokes by filtering LLKHF_INJECTED /
@@ -201,6 +203,9 @@ Exit behavior (physical keyboard only; injected keypresses ignored)
   - keep working when focus is inside native child windows such as WebView2
   Note: virtual HID keyboard drivers can look like physical hardware to
   user-mode code, so they may not be distinguishable from real keyboards.
+  Wallpaper and child preview modes do not install this keyboard exit hook.
+  A genuine /s screensaver also exits on session input changes, including
+  delivered software-injected keyboard or mouse events.
 
 - --exit-on-any-key
   Aliases: --exit-on-anykey, --anykey-exit
@@ -279,6 +284,10 @@ version (string)
 - Examples:
   MatrixDesktop.exe --version resurrections
   MatrixDesktop.exe --version 3d
+
+  Looking Glass calibration is limited to 1024 quilt views with at least one
+  pixel per tile axis. Invalid calibration reports a warning and uses ordinary
+  rain. Physical Looking Glass hardware was not part of local verification.
 
 font (string)
 - Key: font
@@ -453,7 +462,7 @@ density (number)
 - Key: density
 - Default: 1
 - Meaning: in volumetric mode, multiplies the number of effective columns to increase depth density.
-- Range: clamped to 0.01–4.
+- Range: clamped to 0.01–8.
 - Note: when effect=none (debug view), density is effectively forced to 1.
 - Performance: high impact in volumetric mode.
 - Example:

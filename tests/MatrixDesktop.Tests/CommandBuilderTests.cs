@@ -18,8 +18,6 @@ internal static class CommandBuilderTests
         ("Shell significant characters are quoted", ShellQuoting),
         ("An empty value is quoted rather than dropped from the token list", EmptyValueQuoted),
         ("Generated arguments round trip through the importer", RoundTrip),
-        ("A PowerShell export escapes single quotes by doubling", PowerShellQuoting),
-        ("A PowerShell export references the script directory", PowerShellUsesScriptRoot),
         ("The preview query string skips defaults so effect palettes survive", PreviewQuerySkipsDefaults),
         ("The preview query string percent encodes its values", PreviewQueryEncodes),
         ("UC3D scene defaults generate a compact command and round trip", Uc3dSceneDefaultsRoundTrip),
@@ -146,23 +144,6 @@ internal static class CommandBuilderTests
         Check.Close(220, (double)reimported["numColumns"]!, 1e-9, "and the same column count");
         Check.Equal("windowed", (string)reimported["windowMode"]!, "and the same window mode");
         Check.True((bool)reimported["hideCursor"]!, "and the same cursor setting");
-    }
-
-    private static void PowerShellQuoting()
-    {
-        var d = Draft();
-        d["effect"] = "image";
-        d["url"] = "it's.png";
-        var script = Builder.BuildPowerShellScript(d, false);
-        Check.Contains(script, "'it''s.png'",
-            "PowerShell single quoted strings escape an embedded quote by doubling it");
-    }
-
-    private static void PowerShellUsesScriptRoot()
-    {
-        var script = Builder.BuildPowerShellScript(Draft(), false);
-        Check.Contains(script, "$PSScriptRoot",
-            "the exported script is meant to be dropped beside the exe, so it must resolve relative to itself");
     }
 
     private static void PreviewQuerySkipsDefaults()

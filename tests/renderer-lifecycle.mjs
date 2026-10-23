@@ -17,7 +17,7 @@ globalThis.fetch = async (path) => ({
 	text: () => readFile(new URL(path, root), "utf8"),
 	blob: async () => ({}),
 });
-globalThis.createImageBitmap = async () => ({ width: 4, height: 4 });
+globalThis.createImageBitmap = async () => ({ width: 4, height: 4, close() {} });
 globalThis.Image = class { width = 4; height = 4; decode() { return Promise.resolve(); } };
 class Events {
 	listeners = new Map();

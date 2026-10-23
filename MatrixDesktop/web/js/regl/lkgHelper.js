@@ -1,3 +1,5 @@
+const MAX_QUILT_VIEWS = 1024;
+
 const interpretDevice = (device) => {
 	const calibration = device?.calibration;
 	const quilt = device?.defaultQuilt;
@@ -7,7 +9,10 @@ const interpretDevice = (device) => {
 		&& calibration.DPI.value > 0 && calibration.screenW.value > 0 && calibration.screenH.value > 0
 		&& calibration.slope.value !== 0
 		&& ["tileX", "tileY", "quiltX", "quiltY", "quiltAspect"].every((key) => Number.isFinite(quilt[key]) && quilt[key] > 0)
-		&& Number.isInteger(quilt.tileX) && Number.isInteger(quilt.tileY);
+		&& Number.isInteger(quilt.tileX) && Number.isInteger(quilt.tileY)
+		&& quilt.tileX * quilt.tileY <= MAX_QUILT_VIEWS
+		&& Math.floor(quilt.quiltX / quilt.tileX) >= 1
+		&& Math.floor(quilt.quiltY / quilt.tileY) >= 1;
 	if (!valid) {
 		return { enabled: false, tileX: 1, tileY: 1 };
 	}
@@ -33,8 +38,8 @@ const interpretDevice = (device) => {
 	];
 
 	return {
-		...defaultQuilt,
 		...values,
+		...defaultQuilt,
 		pitch,
 		tilt,
 		subp,
@@ -64,7 +69,7 @@ export default async (useHoloplay = false, { loadCore = () => import("../../lib/
 			} catch { settle(null); }
 		});
 		const result = interpretDevice(device);
-		if (!result.enabled) console.warn("No calibrated Looking Glass device is available; rendering normal Matrix rain.");
+		if (!result.enabled) console.warn(`No supported calibrated Looking Glass device is available; rendering normal Matrix rain. Calibration requires at most ${MAX_QUILT_VIEWS} views and at least one pixel per quilt tile.`);
 		return result;
 	} catch (error) {
 		console.warn("Looking Glass discovery failed; rendering normal Matrix rain.", error);

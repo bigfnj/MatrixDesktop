@@ -17,6 +17,8 @@
     <Compile Include="..\..\MatrixDesktop\DesktopHostDiscovery.cs" Link="Production\DesktopHostDiscovery.cs" />
     <Compile Include="..\..\Shared\GdiGlyphAtlas.cs" Link="Production\GdiGlyphAtlas.cs" />
     <Compile Include="..\..\Shared\WallpaperBackground.cs" Link="Production\WallpaperBackground.cs" />
+    <Compile Include="..\..\Shared\CrashDumpWriter.cs" Link="Production\CrashDumpWriter.cs" />
+    <Compile Include="..\..\Shared\Logger.cs" Link="Production\Logger.cs" />
     <Content Include="..\..\MatrixDesktop\web\assets\zmatrix\matrix-code.ttf" Link="matrix-code.ttf" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\MatrixDesktop\web\assets\zmatrix\matrix-code.LICENSE" Link="matrix-code.LICENSE" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

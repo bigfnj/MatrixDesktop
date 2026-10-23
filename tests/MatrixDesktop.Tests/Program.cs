@@ -3,6 +3,16 @@ using MatrixDesktopConfigurator;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+// Export tests launch a renamed copy of this console apphost. Record real argv
+// before any test dispatch, without starting the renderer or touching user state.
+if (Environment.GetEnvironmentVariable("MATRIXDESKTOP_TEST_ARGV_CAPTURE") is string capturePath)
+{
+    var captured = JsonSerializer.Serialize(new { processId = Environment.ProcessId, executable = Environment.ProcessPath, arguments = args });
+    File.WriteAllText(capturePath + ".tmp", captured);
+    File.Move(capturePath + ".tmp", capturePath, overwrite: true);
+    return 0;
+}
+
 if (args.Length >= 2 && args[0] == "--verify-published-symbols")
 {
     return PublishedSymbols.Verify(args[1..]);
@@ -67,6 +77,8 @@ tests.AddRange(MatrixArgsTests.All);
 tests.AddRange(AppCliTests.All);
 tests.AddRange(ImporterTests.All);
 tests.AddRange(CommandBuilderTests.All);
+tests.AddRange(PowerShellExportTests.All);
+tests.AddRange(DraftCloseFlushTests.All);
 tests.AddRange(ParityTests.All);
 tests.AddRange(GuideTests.All);
 tests.AddRange(StorageTests.All);

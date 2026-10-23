@@ -9,6 +9,8 @@ internal static class MatrixArgsTests
         ("A GNU style double dash prefix is stripped", GnuPrefixStripped),
         ("A Windows style slash prefix is stripped", SlashPrefixStripped),
         ("A space separated key and value are joined", SpaceSeparatedJoined),
+        ("Explicit flag values keep literal ampersands and percent signs", PrefixedLiteralValues),
+        ("Standalone structured pairs keep JSON while bare queries still split", StructuredInlineValues),
         ("A negative numeric value is not mistaken for a flag", NegativeNumberIsAValue),
         ("The last value wins when a key repeats", LastValueWins),
         ("A bare boolean flag is treated as true", BareBooleanIsTrue),
@@ -47,6 +49,28 @@ internal static class MatrixArgsTests
     private static void NegativeNumberIsAValue()
         => Check.Equal("slant=-12", Build("--slant", "-12"),
             "a leading minus is not a flag prefix, so negative numbers must survive; only -- and / start a key");
+
+    private static void PrefixedLiteralValues()
+    {
+        const string value = "https://example.test/?left=a%20b&right=2#tail";
+        foreach (var prefix in new[] { "--", "/" })
+            Check.Equal("url=" + Uri.EscapeDataString(value), Build(prefix + "url=" + value),
+                "An explicit flag is literal argv, not an already encoded raw query.");
+    }
+
+    private static void StructuredInlineValues()
+    {
+        foreach (var prefix in new[] { "", "--", "/" })
+        foreach (var pair in new[] {
+            ("zmPhrases", """["A=B & C","\"quoted\"","漢"]"""),
+            ("zmFont", """{"name":"A=B & C","height":-12}""")
+        })
+            Check.Equal(pair.Item1 + "=" + Uri.EscapeDataString(pair.Item2),
+                Build(prefix + pair.Item1 + "=" + pair.Item2),
+                "Valid structured JSON is one literal value in each inline spelling.");
+        Check.Equal("items=%5B1%5D&camera=true", Build("items=[1]&camera=yes"),
+            "A real bare query following an array value must still split and normalize.");
+    }
 
     private static void LastValueWins()
         => Check.Equal("effect=stripes", Build("--effect", "palette", "--effect", "stripes"),

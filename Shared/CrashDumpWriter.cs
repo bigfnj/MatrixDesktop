@@ -47,7 +47,11 @@ internal static class CrashDumpWriter
     private static int _dumpsWritten;
 
     private static bool TryReserveDumpSlot()
-        => System.Threading.Interlocked.Increment(ref _dumpsWritten) <= MaxDumpsPerProcess;
+    {
+        if (System.Threading.Interlocked.Increment(ref _dumpsWritten) <= MaxDumpsPerProcess) return true;
+        System.Threading.Interlocked.Decrement(ref _dumpsWritten);
+        return false;
+    }
 
     // Reserving is not the same as succeeding. Without this, a dump that failed to write
     // still burned a slot, so three failures in a row (insufficient privilege, a full disk,
@@ -166,16 +170,23 @@ internal static class CrashDumpWriter
     }
 
     public static string? WriteDump(string reason)
+        => WriteDumpWithBackend(reason, ResolveDumpDirectory, WriteNativeDump);
+
+    private static string ResolveDumpDirectory()
     {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData)) localAppData = Path.GetTempPath();
+        return Path.Combine(localAppData, AppName, "dumps");
+    }
+
+    // The backend seam keeps reservation failures testable without writing a
+    // process dump or touching a user's diagnostics directory.
+    internal static string? WriteDumpWithBackend(string reason, Func<string> resolveDirectory, Func<string, bool> writeDump)
+    {
+        var reserved = false;
         try
         {
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            if (string.IsNullOrWhiteSpace(localAppData))
-            {
-                localAppData = Path.GetTempPath();
-            }
-
-            var dumpDir = Path.Combine(localAppData, AppName, "dumps");
+            var dumpDir = resolveDirectory();
             Directory.CreateDirectory(dumpDir);
 
             // The log rotates at 2 MB but nothing ever bounded this folder, and because the
@@ -186,6 +197,7 @@ internal static class CrashDumpWriter
                 Logger.Warn($"Dump suppressed: {MaxDumpsPerProcess} already written by this process. Reason='{reason}'.");
                 return null;
             }
+            reserved = true;
 
             PruneOldDumps(dumpDir);
 
@@ -195,22 +207,13 @@ internal static class CrashDumpWriter
             var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss.fff", CultureInfo.InvariantCulture);
             var path = Path.Combine(dumpDir, $"{_processLabel}-{stamp}-pid{Environment.ProcessId}.dmp");
 
-            using var process = Process.GetCurrentProcess();
-            using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-
-            var ok = MiniDumpWriteDump(
-                process.Handle,
-                (uint)process.Id,
-                stream.SafeFileHandle,
-                MiniDumpNormal,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                IntPtr.Zero);
+            var ok = writeDump(path);
 
             if (!ok)
             {
                 var err = Marshal.GetLastWin32Error();
                 ReleaseDumpSlot();
+                reserved = false;
                 Logger.Warn($"MiniDumpWriteDump returned false. Win32 error={err}. Reason='{reason}'.");
                 return null;
             }
@@ -220,10 +223,27 @@ internal static class CrashDumpWriter
         }
         catch (Exception ex)
         {
-            ReleaseDumpSlot();
+            if (reserved) ReleaseDumpSlot();
             try { Logger.Error($"WriteDump exception. Reason='{reason}'.", ex); }
             catch { /* ignore */ }
             return null;
         }
+    }
+
+    private static bool WriteNativeDump(string path)
+    {
+        bool written;
+        int error;
+        using (var process = Process.GetCurrentProcess())
+        using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            written = MiniDumpWriteDump(process.Handle, (uint)process.Id, stream.SafeFileHandle,
+                MiniDumpNormal, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            error = Marshal.GetLastPInvokeError();
+        }
+        // Closing the file/process handles must not replace the native failure
+        // code that the caller reports.
+        Marshal.SetLastPInvokeError(error);
+        return written;
     }
 }

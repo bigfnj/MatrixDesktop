@@ -69,6 +69,11 @@ const el = {
 };
 
 window.configHost = {
+    snapshotDraft() {
+        if (!state.metadata) return null;
+        window.clearTimeout(state.saveTimer);
+        return { draft: clone(state.draft), selectedPresetId: state.selectedPresetId };
+    },
 	receive(message) {
 		const pending = state.pending.get(message.id);
 		if (!pending) return;
@@ -229,7 +234,9 @@ const updateDraftValue = (field, value) => {
 		}
 	}
 	if (field.id !== "scene") editedSceneFields.add(field.id);
-	state.draft[field.id] = value;
+	// Editors retain their own arrays while a picker is open. Saved state must
+	// own a separate copy so a late disabled callback cannot mutate it in place.
+	state.draft[field.id] = value && typeof value === "object" ? clone(value) : value;
 	setDirty(true);
 	scheduleSaveDraft();
 	scheduleCommandBuild();
@@ -1228,7 +1235,7 @@ const bindEvents = () => {
 	el.importFileButton?.addEventListener("click", async () => {
 		try {
 			const result = await requestHost("browseConfig");
-			if (result?.text != null) { el.importInput.value = result.text; showImportPanel(true); }
+			if (result?.text != null) { showImportPanel(true); el.importInput.value = result.text; }
 		} catch (error) { setStatus(error.message, "error"); }
 	});
 	el.screensaverButton?.addEventListener("click", async () => {

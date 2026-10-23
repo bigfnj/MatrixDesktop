@@ -77,7 +77,9 @@ font request; excessive font-size/repertoire combinations report the limit.
 The [argument guide](../MatrixDesktop_Argument_Guide.txt) documents every setting
 and its units. Export `.ps1` when using structured font/list settings from
 PowerShell. The generated Windows command string uses Windows argument quoting;
-PowerShell has its own quote interpretation.
+PowerShell has its own quote interpretation. Exported scripts pass an ASCII-safe
+UTF-8 argument payload directly to Windows, preserving JSON under PowerShell 5.1
+and 7, including quotes, equals, backslashes and Unicode.
 
 Existing preset migrations retain their historical field sets. Adding ZMatrix
 does not make an untouched old UC3D starter look edited, or recreate a previously

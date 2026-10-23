@@ -2,6 +2,7 @@ using System;
 using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.Json;
 
 namespace MatrixDesktop;
 
@@ -88,8 +89,9 @@ internal static class MatrixArgs
         if (args.Count == 1)
         {
             var single = (args[0] ?? string.Empty).Trim();
+            var hasFlagPrefix = single.StartsWith("--", StringComparison.Ordinal) || single.StartsWith("/", StringComparison.Ordinal);
             var isRawQuery = single.StartsWith("?", StringComparison.Ordinal)
-                             || (single.Contains('=') && single.Contains('&'));
+                             || (single.Contains('=') && single.Contains('&') && !hasFlagPrefix && !IsStructuredPair(single));
 
             if (isRawQuery)
             {
@@ -271,6 +273,10 @@ internal static class MatrixArgs
         var t = token.Trim();
         if (IsHelpToken(t)) return true;
 
+        // A raw JSON value can contain '=' without starting another argument.
+        // Keep even malformed JSON paired so the typed parser can report it.
+        if (t[0] is '[' or '{') return false;
+
         // Treat explicit flag prefixes as a new key.
         if (t.StartsWith("--", StringComparison.Ordinal) || t.StartsWith("/", StringComparison.Ordinal))
         {
@@ -284,6 +290,16 @@ internal static class MatrixArgs
         }
 
         return false;
+    }
+
+    private static bool IsStructuredPair(string token)
+    {
+        var separator = token.IndexOf('=');
+        if (separator < 0) return false;
+        var value = token[(separator + 1)..].TrimStart();
+        if (value.Length == 0 || value[0] is not ('[' or '{')) return false;
+        try { using var document = JsonDocument.Parse(value); return true; }
+        catch (JsonException) { return false; }
     }
 
     private static string StripFlagPrefix(string token)

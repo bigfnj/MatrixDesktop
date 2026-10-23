@@ -48,7 +48,7 @@ export default ({ config, device: nativeDevice, timeBuffer, canvas, elapsedSecon
 	// The volumetric mode multiplies the number of columns
 	// to reach the desired density, and then overlaps them
 	const density = config.volumetric && config.effect !== "none" ? config.density : 1;
-	const gridSize = [Math.floor(config.numColumns * density), config.numColumns];
+	const gridSize = [Math.max(1, Math.floor(config.numColumns * density)), config.numColumns];
 	const numCells = gridSize[0] * gridSize[1];
 
 	// The volumetric mode requires us to create a grid of quads,

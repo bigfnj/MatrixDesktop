@@ -39,6 +39,8 @@ public sealed class ConfiguratorForm : Form
     private WebView2 _webView;
     private Process? _testProcess;
     private bool _isShuttingDown;
+    private readonly DraftCloseFlush _closeFlush = new();
+    private bool _closeFlushStarted;
     private MatrixDesktop.Shared.AppWindowIcon? _windowIcon;
 
     // Cached embedded argument-guide text for the "?" help modal.
@@ -115,8 +117,24 @@ public sealed class ConfiguratorForm : Form
         TryApplyNativeWindowIcons();
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    protected override async void OnFormClosing(FormClosingEventArgs e)
     {
+        if (!_closeFlush.Completed)
+        {
+            e.Cancel = true;
+            base.OnFormClosing(e);
+            if (_closeFlushStarted) return;
+            _closeFlushStarted = true;
+            if (!_webView.IsDisposed) _webView.Enabled = false;
+            await _closeFlush.FlushAsync(
+                () => _webView.CoreWebView2?.ExecuteScriptAsync("window.configHost?.snapshotDraft?.() ?? null")
+                    ?? throw new InvalidOperationException("WebView2 is unavailable."),
+                payload => SaveDraft(payload),
+                message => MatrixDesktop.Shared.Logger.Warn(message));
+            if (!IsDisposed) Close();
+            return;
+        }
+
         _isShuttingDown = true;
         _mediaBridge.Dispose();
         StopTestProcess();

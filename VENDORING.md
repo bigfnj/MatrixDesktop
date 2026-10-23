@@ -34,12 +34,12 @@ inventory; regenerate the diff before every upstream refresh.
 
 | Files | Local responsibility |
 | --- | --- |
-| `js/camera.js` | Camera setup and explicit track release. |
+| `js/camera.js` | Generation-owned camera setup, cancellation and explicit track release. |
 | `js/config.js` | Desktop defaults, accepted parameters, exact boolean parsing and UC3D/ZMatrix configuration. |
 | `js/main.js` | Renderer selection, compatibility fallback and visible initialization failures. |
 | `js/regl/main.js`, `js/webgpu/main.js` | Desktop lifecycle, pause-aware time, click ripples, camera ownership and scene entry points. |
 | `js/regl/bloomPass.js`, `imagePass.js`, `mirrorPass.js`, `palettePass.js`, `rainPass.js`, `stripePass.js`, `utils.js` | Local renderer behavior and resource ownership. |
-| `js/regl/lkgHelper.js`, `js/regl/quiltPass.js` | Looking Glass calibration and quilt resource ownership. |
+| `js/regl/lkgHelper.js`, `js/regl/quiltPass.js` | Looking Glass calibration, a 1024-view work budget and quilt resource ownership. |
 | `js/webgpu/bloomPass.js`, `imagePass.js`, `mirrorPass.js`, `palettePass.js`, `rainPass.js`, `stripePass.js`, `utils.js` | Local renderer behavior, cached views and resource ownership. |
 | `shaders/glsl/palettePass.frag.glsl`, `rainPass.effect.frag.glsl`, `stripePass.frag.glsl` | Glyph intensity and click-ripple behavior. |
 | `shaders/wgsl/palettePass.wgsl`, `rainPass.wgsl`, `stripePass.wgsl` | Glyph intensity and click-ripple behavior. |

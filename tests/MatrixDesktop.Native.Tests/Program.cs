@@ -22,6 +22,7 @@ tests.AddRange(HostLifecycleTests.All);
 tests.AddRange(AutostartTests.All);
 tests.AddRange(ScreensaverFocusTests.All);
 tests.AddRange(ForegroundActivationTests.All);
+tests.AddRange(CrashDumpTests.All);
 if (args.Length == 2 && args[0] == "--only") tests = tests.Where(item => item.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToList();
 if (tests.Count == 0) throw new ArgumentException("The native test filter matched no tests.");
 var failures = 0;

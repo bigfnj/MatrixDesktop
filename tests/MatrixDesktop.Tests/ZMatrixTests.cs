@@ -11,6 +11,9 @@ internal static class ZMatrixTests
     [
         ("ZMatrix defaults and scene exports retain independent settings", DefaultsAndFiltering),
         ("ZMatrix structured arguments preserve JSON quotes spaces and backslashes", StructuredRoundTrip),
+        ("ZMatrix raw command imports keep structured equals values paired", StructuredEqualsImport),
+        ("ZMatrix explicit inline command imports preserve literal ampersands and percent signs", ExplicitInlineImport),
+        ("ZMatrix bare structured imports distinguish literal values from real raw queries", BareStructuredImport),
         ("ZMatrix numeric controls clamp finite original units", NumericBounds),
         ("ZMatrix structured validators reject invalid glyph phrase and font payloads", StructuredLimits),
         ("ZMatrix CFG import maps source syntax and retains inactive settings", CfgImport),
@@ -74,12 +77,46 @@ internal static class ZMatrixTests
         Check.True(decodedTokens.SequenceEqual(Builder.BuildArguments(draft, false, false)), "decoded display command tokens must equal the raw launch argument list");
         Check.Contains(Builder.BuildCommand(draft, false, false), "json64:", "copied structured arguments must use the shell-neutral codec");
         Check.False(Builder.BuildArguments(draft, false, false).Any(token => token.StartsWith("json64:", StringComparison.Ordinal)), "direct launch must retain raw structured argv");
-        var script = Builder.BuildPowerShellScript(draft, false);
-        Check.Contains(script, "The", "PowerShell export must contain the phrase payload");
         var pathDraft = Builder.CreateDefaultDraft();
         pathDraft["url"] = "C:\\a folder\\with\\a \"quote\"\\";
         var parsed = Import(Builder.BuildCommand(pathDraft, false, false)).Draft;
         Check.True(JsonNode.DeepEquals(pathDraft["url"], parsed["url"]), "Windows quoting must preserve ordinary and trailing path backslashes");
+    }
+
+    private static void StructuredEqualsImport()
+    {
+        var result = Import("""--scene zmatrix --zmPhrases "[\"A=B & C\",\"\\\"quoted\\\"\",\"C:\\path\\file\",\"Ω\"]" --zmFont "{\"name\":\"Face = C\",\"height\":-21}" """);
+        Check.True(JsonNode.DeepEquals(new JsonArray("A=B & C", "\"quoted\"", "C:\\path\\file", "Ω"), result.Draft["zmPhrases"]), "raw JSON phrases must remain paired through command tokenization");
+        Check.Equal("Face = C", result.Draft["zmFont"]!["name"]!.GetValue<string>(), "raw JSON font names must retain equals signs");
+        Check.Equal(0, result.Ignored.Length, "valid structured payloads must not become separate ignored keys");
+        var invalid = Import("""--scene zmatrix --zmPhrases "[\"A=B\"" """);
+        Check.True(invalid.Ignored.SequenceEqual(new[] { "zmPhrases" }), "malformed JSON remains paired for typed validation");
+    }
+
+    private static void ExplicitInlineImport()
+    {
+        foreach (var prefix in new[] { "--", "/" })
+        {
+            var command = "--scene zmatrix \"" + prefix + "zmPhrases=[\\\"A=B&C%2F\\\"]\" \"" + prefix + "zmFont={\\\"name\\\":\\\"Face = & %2F\\\",\\\"height\\\":-21}\"";
+            var result = Import(command);
+            Check.Equal("A=B&C%2F", result.Draft["zmPhrases"]![0]!.GetValue<string>(), "explicit inline JSON must not be split or URL-decoded");
+            Check.Equal("Face = & %2F", result.Draft["zmFont"]!["name"]!.GetValue<string>(), "explicit inline font payload must remain literal");
+            Check.Equal(0, result.Ignored.Length, "explicit structured keys must be recognized");
+            var directory = Import("--scene uc3d \"" + prefix + "pictureDirectory=C:\\A&B%2F\"");
+            Check.Equal("C:\\A&B%2F", directory.Draft["pictureDirectory"]!.GetValue<string>(), "explicit non-JSON values must also remain literal rather than becoming raw queries");
+        }
+    }
+
+    private static void BareStructuredImport()
+    {
+        var literal = Import("""--scene zmatrix "zmPhrases=[\"A&B%2F\"]" """);
+        Check.Equal("A&B%2F", literal.Draft["zmPhrases"]![0]!.GetValue<string>(), "a complete bare structured pair is one literal value");
+        var query = Import("""--scene zmatrix "zmPhrases=[\"A\"]&zmMaxStream=321" """);
+        Check.Equal("A", query.Draft["zmPhrases"]![0]!.GetValue<string>(), "a real raw query retains its structured first value");
+        Check.Close(321, Num(query.Draft, "zmMaxStream"), 0, "a real raw query must still split later pairs");
+        var encoded = Import("?scene=zmatrix&zmPhrases=%5B%22A%3DB%26C%22%5D&zmMaxStream=456");
+        Check.Equal("A=B&C", encoded.Draft["zmPhrases"]![0]!.GetValue<string>(), "explicit raw queries continue decoding structured values");
+        Check.Close(456, Num(encoded.Draft, "zmMaxStream"), 0, "encoded queries retain subsequent fields");
     }
 
     private static void NumericBounds()
@@ -386,7 +423,7 @@ internal static class ZMatrixTests
         var arguments = Builder.BuildArguments(draft, false, false);
         Check.True(arguments.Contains("--zmPhrases") && arguments.All(argument => !argument.Contains("\\u03A9", StringComparison.OrdinalIgnoreCase)), "direct argv must keep valid BMP text compact instead of needlessly expanding it");
         Check.True(Builder.BuildTestCommandDescription(draft).Contains("direct structured launch", StringComparison.Ordinal), "a valid direct Test launch must not fail while formatting an oversized copied-command reply");
-        Check.True(Builder.BuildPowerShellScript(draft, false).Contains('Ω'), "PowerShell export must use raw Unicode JSON");
+        Check.True(Builder.BuildPowerShellScript(draft, false).All(character => character <= 127), "PowerShell export must remain encoding-independent for Windows PowerShell 5.1");
         draft["zmPhrases"] = new JsonArray(new string('A', 33_000));
         var launchRejected = false;
         try { _ = Builder.BuildArguments(draft, false, false); }

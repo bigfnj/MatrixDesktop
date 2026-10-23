@@ -85,5 +85,6 @@
     <Compile Include="..\..\MatrixDesktopConfigurator\ConfiguratorState.cs" Link="Production\ConfiguratorState.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\StorageService.cs" Link="Production\StorageService.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\DraftRandomizer.cs" Link="Production\DraftRandomizer.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\DraftCloseFlush.cs" Link="Production\DraftCloseFlush.cs" />
   </ItemGroup>
 </Project>

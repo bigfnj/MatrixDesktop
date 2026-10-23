@@ -36,6 +36,7 @@ STUB = """
         if (!response.ok) throw new Error(await response.text());
         payload = await response.json();
       } else if (msg.type === 'saveDraft') payload = {saved:true};
+      else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
       else if (msg.type === 'restoreScreensaver') payload = {restored:true,message:'Synthetic restore action recorded.'};
       window.__smokeReplies.push({type:msg.type,payload:structuredClone(payload)});
@@ -231,6 +232,64 @@ Strings=First|Second
     assert not any(message["type"] in ("useScreensaver", "restoreScreensaver", "testCommand") for message in page.evaluate("window.__smokeMessages")), "import caused a launch or registration action"
 
 
+def check_cfg_chooser(page, _fixture):
+    choose_zmatrix(page)
+    page.wait_for_function("document.querySelector('#commandOutput').value.includes('scene')")
+    cfg = "[General]\nMaxStream=789\n[Text]\nFontName=Consolas\nFontHeight=-19\nCharSet=A,0x42,Ω\n"
+    page.locator("#importButton").click()
+    page.evaluate("text=>window.__selectedCfgText=text", cfg)
+    page.locator("#importFileButton").click()
+    page.wait_for_function("text=>document.querySelector('#importInput').value===text", arg=cfg)
+    assert page.locator("#importPanel").is_visible(), "choosing a file left the import panel hidden"
+    page.evaluate("window.__selectedCfgText=null")
+    page.locator("#importFileButton").click()
+    page.wait_for_function("window.__smokeMessages.filter(message=>message.type==='browseConfig').length===2")
+    assert page.locator("#importInput").input_value() == cfg, "cancelling the chooser replaced the selected CFG text"
+    page.locator("#applyImportButton").click()
+    page.wait_for_function("document.querySelector('[data-field=\"zmMaxStream\"] input[type=number]').value==='789'")
+    assert field(page, "zmFont").locator('[data-font-field="height"]').input_value() == "-19"
+    assert field(page, "zmCharacters").locator("textarea").input_value() == "ABΩ"
+
+
+def check_late_picker(page, _fixture):
+    for key, effect in (("palette", "palette"), ("stripeColors", "stripes")):
+        field(page, "scene").locator("select").select_option("matrix")
+        field(page, "effect").locator("select").select_option(effect)
+        row = field(page, key).locator(".list-row").first
+        row.locator(".hex-input").fill("#123456")
+        row.locator(".color-swatch").click()
+        picker = page.locator(".color-popover .cp-hex")
+        picker.fill("#234567")
+        expected = saved(page)[key]
+        assert abs(expected[0]["r"] - 35 / 255) < 1e-10, "the enabled picker must first persist its color"
+        field(page, "scene").locator("select").select_option("zmatrix")
+        assert field(page, key).locator(".color-swatch").first.is_disabled()
+        assert picker.is_visible(), "the test must retain the open picker callback across the scene change"
+        picker.fill("#ff0000")
+        assert saved(page)[key] == expected, key + " changed saved state through a late disabled picker callback"
+        page.keyboard.press("Escape")
+        field(page, "scene").locator("select").select_option("matrix")
+        assert saved(page)[key] == expected, key + " lost its saved color after returning to Matrix"
+
+
+def check_close_snapshot(page, _fixture):
+    choose_zmatrix(page)
+    saved(page)
+    result = page.evaluate("""() => {
+        const before=window.__smokeMessages.filter(message=>message.type==='saveDraft').length;
+        const input=document.querySelector('[data-field="zmMaxStream"] input[type=number]');
+        input.value='2345';input.dispatchEvent(new Event('input',{bubbles:true}));
+        const snapshot=configHost.snapshotDraft();
+        const count=window.__smokeMessages.filter(message=>message.type==='saveDraft').length;
+        snapshot.draft.zmMaxStream=1;
+        return {before,count,latest:configHost.snapshotDraft()};
+    }""")
+    assert result["before"] == result["count"], "the test must snapshot before the ordinary save debounce fires"
+    assert result["latest"]["draft"]["zmMaxStream"] == 2345, "the native closing snapshot lost the latest unsaved field edit or exposed mutable state"
+    page.wait_for_timeout(400)
+    assert page.evaluate("window.__smokeMessages.filter(message=>message.type==='saveDraft').length") == result["before"], "closing snapshot did not cancel the pending ordinary draft save"
+
+
 def check_actions(page, _fixture):
     choose_zmatrix(page)
     field(page, "windowMode").locator("select").select_option("wallpaper")
@@ -314,6 +373,9 @@ CHECKS = [
     ("ZMatrix editor changes survive real C# command import", check_editors),
     ("ZMatrix scene and cleanup dependencies retain disabled values", check_gating),
     ("ZMatrix CFG import preserves launch choices and reports migration", check_cfg),
+    ("CFG chooser retains selected file text and cancellation", check_cfg_chooser),
+    ("Late picker callbacks preserve disabled palette and stripe saved values", check_late_picker),
+    ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
     ("Preview ignores obsolete and hidden asynchronous query replies", check_preview_race),
