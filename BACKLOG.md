@@ -91,7 +91,7 @@ assets and analysis/capture data remain private; no donor payload was added here
 
 | Post-push application audit finding | Disposition | Evidence |
 | --- | --- | --- |
-| Nonfinite generic numeric imports broke draft JSON serialization | FIXED | `ArgumentImporter` rejects all nonfinite numbers while retaining valid options. The named importer regression serializes and stores the resulting draft; removing the guard fails exactly that rebuilt test. |
+| Nonfinite generic numeric imports broke draft JSON serialization | FIXED | `ArgumentImporter` rejects all nonfinite numbers while retaining valid options. The named importer regression serializes the resulting draft; an actual published import verifies storage. Removing the guard fails exactly that rebuilt test. |
 | Null preset list records or value containers crashed startup | FIXED | `StorageService` removes null slots and repairs only absent values, preserving valid data and backup bytes. Synthetic live/backup/load/seed/save tests kill missing-filter and missing-repair mutations independently. |
 
 Both application fixes were verified in the published configurator with a
