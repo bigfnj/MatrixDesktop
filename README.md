@@ -1,10 +1,11 @@
-# MatrixDesktop (Visual Studio solution)
+# MatrixDesktop
 
-This is a minimal Windows desktop wrapper around the original **Rezmason/matrix** web project.
+MatrixDesktop brings **Rezmason/matrix** digital rain and a reconstructed **UC3D**
+screensaver scene to Windows, with a companion configurator for presets and launch arguments.
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
-Current version: **1.1.0**. Tagged releases are listed on the [releases page](https://github.com/bigfnj/MatrixDesktop/releases).
+Current source version: **1.1.0**. Tagged releases are listed on the [releases page](https://github.com/bigfnj/MatrixDesktop/releases).
 
 ### UC3D scene
 
@@ -14,16 +15,59 @@ automatic camera motion, pictures formed from code with optional 3D relief,
 clock and caption overlays, a desktop snapshot, and optional sound. The
 **UC3D Trilogy** starter preset uses the UC3D defaults: purple code, pink highlights,
 slow falling glyphs, 3D rotation and random forward/sideways motion, matching the
-owner's installed screensaver settings captured on 2026-10-23.
+owner's installed screensaver settings captured on 2026-10-23. This is a fixed
+profile; later changes to the screensaver's settings are not imported automatically.
+
+In the **UC3D** section, **Control units → Original screensaver controls** is the
+default. Each slider has a synchronized numeric input:
+
+| Original control | Argument | Range | Default |
+| --- | --- | --- | --- |
+| Code amount: Less / More | `uc3dAmount` | 100 to 1500 streams | 500 |
+| Code size: Small / Large | `uc3dGlyphSize` | 10 to 40 | 12 |
+| Fall speed: Slow / Fast | `uc3dFallSpeed` | 0 to 150 | 6 |
+| Travel: Backward / Forward | `uc3dForwardSpeed` | 0 to 120 | 6 |
+| Picture size: Large / Small | `uc3dPictureScale` | 100 to 300 | 100 |
+| Picture delay (seconds) | `uc3dPictureDelay` | 0 to 120 | 60 |
+| Clock size: Small / Large | `uc3dClockSize` | 50 to 170 | 90 |
+
+More/Less sets stream count independently of glyph size, viewport and 2D/3D mode.
+At animation speed 1, streams enter over ten seconds and grow toward lengths of
+10 to 39 glyphs; visible coverage also depends on perspective, fading and camera pose. Fall speed zero
+retains minimum falling motion. Travel 60 is stationary, and constant travel is
+editable when 3D forward/back movement is enabled and random travel is off.
+Higher picture-size values make the picture smaller.
+
+The **Legacy MatrixDesktop controls** mode preserves the earlier columns/density/speed
+mapping for customized older UC3D presets. Explicit native-unit arguments select
+Original controls; without native-unit arguments, explicit generic layout/speed
+arguments select Legacy controls. An explicit `uc3dControls=original|legacy`
+takes priority over either set. Both sets of saved values
+are retained, while generated commands emit only the active mode's units.
+
+For example, keep the captured defaults but increase the stream count:
+
+```cmd
+MatrixDesktop.exe --windowed --no-exit-on-any-key --scene uc3d uc3dAmount=800
+```
+
+Pictures, clock, sound, mouse control, desktop capture and bloom start off.
+Picture, clock and audio controls enable when the corresponding feature is selected.
+The bundled font is the default; an optional local donor atlas supplies the
+original character set. Random layouts and trajectories are reconstructed rather
+than pixel-identical copies of the native screensaver.
 
 Personal pictures and privately imported donor media are local inputs. The
 package includes no donor binaries, pictures, music or recovered source.
-See [UC3D options and local media](docs/UC3D.md).
+See [UC3D options and local media](docs/UC3D.md) and the
+[control mappings, comparison method and calibration results](docs/UC3D-CALIBRATION.md).
 
 ### Since 1.0.2
 
 - **1.1.0** adds the optional UC3D scene in both rendering backends, local picture and
   audio inputs, an optional privately imported glyph atlas, and a starter preset.
+  Original-unit sliders, native stream/movement behavior and picture formation are
+  shared across WebGL and WebGPU, with a compatibility mode for older presets.
   Release assemblies retain embedded debugging symbols without shipping separate PDBs.
   Renderer teardown, boolean parsing, Looking Glass selection and WebGPU resize behavior
   are covered by regression tests. See [UC3D options and local media](docs/UC3D.md).
@@ -31,8 +75,8 @@ See [UC3D options and local media](docs/UC3D.md).
   command; it now takes 27% and the field list gets the space back. The window icon is read
   from the executable's own resources instead of a second embedded copy, which takes 114,688
   bytes out of the payload. The argument guide, `ArgumentCatalog` and `config.js` are now held
-  to each other by tests, so a flag cannot be documented without existing, exist without being
-  documented, or disagree about its default.
+  to each other by tests: configurator fields need guide entries, documented flags must
+  exist, and stated defaults must agree with the catalog and renderer configuration.
 - **1.0.4**: `glyphIntensity` now works. It had been parsed, documented, offered in the
   configurator and set by Randomize since v1.0 while being read by no shader. It is now the
   glyph brightness multiplier alongside `cursorIntensity` and `glintIntensity`, in the palette
@@ -78,7 +122,7 @@ These screenshots are rendered by the same bundled offline web app that MatrixDe
   - Dark/light theme toggle (persisted).
   - Out-of-range numeric inputs show a red border + allowed-range hint inline.
   - "Export .ps1" button copies the current command as a runnable PowerShell script.
-- **Automated releases.** Push a `v*` tag and GitHub Actions builds, zips, and
+- **Automated releases.** Push a version tag such as `v1.1.0` and GitHub Actions builds, zips, and
   publishes a Release with both EXEs + assets + SHA256.
 
 ## Build warning cleanup (NETSDK1137 / MSB3277)
@@ -144,15 +188,13 @@ guards the same paths on the commit side. Two clauses remain active rules:
 - `web\.gitmodules`, `web\.gitignore`, `web\.gitattributes`: likewise defensive; the
   vendored copy is not a submodule.
 
-### Smaller publish output via invariant globalization
+### Invariant globalization
 
 Publish profiles now set:
 
 - `InvariantGlobalization=true`
 
-This reduces self-contained output size by omitting ICU/culture data.
-
-Tradeoff: if you later add code that depends on full culture-aware operations (rare for this app), revisit this setting.
+Revisit this setting before adding .NET code that requires culture-aware operations.
 
 ## Runtime configuration (EXE arguments)
 
@@ -177,15 +219,20 @@ single scrollable surface rather than tabbed pages:
   a section, and a filter box narrows the visible fields by name.
 - **Custom color picker.** Color, palette-stop, and stripe swatches open an in-app popover
   with a draggable saturation/value square, a hue bar, and precise hex / 0–1 RGB entry: no
-  OS color dialog, full float precision, and palette/stripe rows are directly editable.
+  OS color dialog, and palette/stripe rows are directly editable. RGB values in generated
+  commands use up to three decimal places.
 - **Embedded live preview.** A preview pane renders the matrix effect (served to an iframe
   from the bundled `web/` assets) and refreshes on any change: field edits, preset
-  selection, import, or randomize. The preview query mirrors the actual launch command, so
-  what you see matches what `MatrixDesktop.exe` would render.
+  selection, import, or randomize. Generated visual parameters also supply the preview
+  settings; its viewport, random layout and camera pose can differ from a launched app.
+  UC3D preview sound starts muted and has an explicit **Test sound** action.
+- **UC3D controls.** The seven original-unit sliders have synchronized numeric editors.
+  Controls that do not apply to the selected scene, mode or enabled feature are disabled
+  with an explanation. Original and Legacy control values remain available when switching modes.
 - **Range enforcement.** Out-of-range numeric inputs clamp to their allowed min/max on
   blur, and cleared fields revert to their default.
 
-The importer accepts full `MatrixDesktop.exe ...` commands, raw argument lines, query strings, and simple `start "" /min ...` batch lines. Recognized settings populate the current draft, which can then be saved as a preset. Stripe colors are only editable and emitted when the selected effect is stripe-based: `stripes`, `customStripes`, `pride`, `trans`, or `transPride`.
+The importer accepts full `MatrixDesktop.exe ...` commands, raw argument lines, query strings, and simple `start "" /min ...` batch lines. Recognized settings populate the current draft, which can then be saved as a preset. In the Matrix scene, stripe colors are only editable and emitted when the selected effect is stripe-based: `stripes`, `customStripes`, `pride`, `trans`, or `transPride`. UC3D uses its own code-color controls.
 
 The randomizer has three scopes: `Visual preset`, `Colors only`, and `Motion/Layout`. It keeps launch/window controls untouched, avoids camera/image/mirror/debug effects, caps generated `stripeColors` at 2–8 colors, and caps generated palettes at 3–6 stops.
 
@@ -193,6 +240,8 @@ On first launch, the configurator seeds `UC3D Trilogy`, `rainbow-haze`, `paradis
 `stripe effects`. These are regular user presets and can be edited, renamed, or deleted.
 Existing stores receive the UC3D preset once without restoring deleted older starters or
 overwriting edited presets.
+Only an exact untouched older UC3D starter is migrated to Original controls; customized
+older presets keep Legacy controls.
 
 Preset storage is portable-first:
 
@@ -291,7 +340,7 @@ Notes:
   `?camera=untrue` query do not enable the camera.
 - Never put a space inside a comma-separated value unless you quote the whole value. `--stripeColors 1,0,0, 1,1,0` is split by the shell and then silently dropped as malformed; `--stripeColors 1,0,0,1,1,0` or `--stripeColors "1,0,0, 1,1,0"` both work.
 - Monitor indices are 0-based and come from `Screen.AllScreens`; their order can change if displays are rearranged in Windows.
-- Any unknown parameters are passed through but will be ignored by the web app.
+- Unknown key/value parameters pass through but are ignored by the web app. Unknown bare flags are dropped.
 
 ### Allowed arguments
 
@@ -312,6 +361,12 @@ are described in [UC3D options and local media](docs/UC3D.md) and the embedded a
   - `regl` (default WebGL) or `webgpu` (if supported on the machine).
 
 #### Animation and layout
+
+UC3D Original controls uses its independent sliders in place of `numColumns`,
+`density`, `fallSpeed`, `forwardSpeed`, `cycleSpeed` and `raindropLength`.
+Those generic controls remain available for Matrix and UC3D Legacy modes where
+supported. `resolution` and `animationSpeed` remain shared; Original controls
+limits animation speed to 0 to 4.
 
 - `numColumns` (int): size of the glyph grid, clamped to 1–256.
 - `width` (int): alias of `numColumns`.
@@ -350,11 +405,11 @@ are described in [UC3D options and local media](docs/UC3D.md) and the embedded a
 
 - `glyphRotation` (number): rotate glyphs (degrees).
 - `cursorIntensity` (number): cursor glow intensity (>= 0).
-- `glyphIntensity` (number): glyph brightness multiplier (>= 0), the third of the set with
-  `cursorIntensity` and `glintIntensity`. Default 1 leaves the render unchanged, 0 removes the
-  glyphs entirely, higher values brighten them until they clamp. Applies to the palette and
-  stripe effects in both renderers, which is exactly where its two siblings apply; the image
-  and mirror effects have no glyph colour term, so it does nothing there.
+- `glyphIntensity` (number): glyph brightness multiplier (>= 0). In the Matrix scene,
+  it affects the palette and stripe effects in both renderers; image and mirror effects
+  have no glyph-color term. UC3D applies it directly to code bodies and picture glyphs.
+  Default 1 preserves brightness; 0 removes ordinary code bodies, while cursor heads have
+  their separate `cursorIntensity` control. Higher values brighten the affected glyphs.
   Inert until v1.0.4: it was parsed and documented but read by no shader.
 
 Color values are typically provided as comma-separated triples. RGB values are usually in the 0–1 range.
@@ -394,7 +449,13 @@ Palettes and stripes are lists:
 
 ## Build (Visual Studio)
 
-1. Open `MatrixDesktopApp.sln` in **Visual Studio 2022** (or newer).
+Use **Visual Studio 2026 (18.0 or newer)** with the .NET desktop development workload.
+Install the SDK selected by [global.json](global.json): currently **10.0.302**, with
+newer patches in the 10.0.3xx feature band accepted. Targeting .NET 10 requires
+Visual Studio 18.0 or newer; see Microsoft's
+[SDK and Visual Studio support matrix](https://learn.microsoft.com/en-us/dotnet/core/porting/versioning-sdk-msbuild-vs).
+
+1. Open `MatrixDesktopApp.sln` in Visual Studio.
 2. Restore NuGet packages (Visual Studio will usually prompt you automatically).
 3. Build and run:
    - **Debug**: `F5`
@@ -409,12 +470,12 @@ The output EXE will be in:
 
 ## Publish (portable, single-folder output)
 
-Publishing produces a folder you can copy to another machine. There are exactly **two**
-publish paths, and only one of them ships the configurator.
+The supported publish path produces a portable folder containing both executables
+and their runtime assets.
 
-### Option A (recommended): framework-dependent portable folder
+### Framework-dependent portable folder (recommended)
 
-The supported path. **This is the only publish output that contains both executables.**
+Publish both projects together to include the renderer and configurator.
 
 - Visual Studio publish profile: **Portable-win-x64-framework-dependent** (both projects have
   a profile with this name, and both target the same output folder on purpose)
@@ -433,22 +494,12 @@ Requires the **.NET 10 Desktop Runtime** on the target machine. Publish both pro
 together and at the same version: the script does this, and
 `Portable-win-x64-framework-dependent.pubxml` explains why it matters.
 
-### Option B (experimental): trimmed self-contained folder
+### Unsupported trimming experiment
 
-A size optimization only. It publishes **`MatrixDesktop.exe` without the configurator**.
-IL trimming can break code that relies on reflection or COM activation in ways that only
-show up at runtime. Validate on your target machines before shipping it.
-
-- Visual Studio publish profile: **Portable-win-x64-trimmed-experimental**
-
-- Or run:
-
-```bat
-publish-portable-win-x64-trimmed-experimental.cmd
-```
-
-Output: `publish\win-x64-trimmed\`. Self-contained, so no .NET runtime is needed on the
-target, but it is the larger folder of the two.
+The repository retains `Portable-win-x64-trimmed-experimental` and
+`publish-portable-win-x64-trimmed-experimental.cmd` as an unsupported experiment.
+With the pinned .NET SDK, enabling trimming for this Windows Forms application fails
+with **NETSDK1175** before publishing. Use the framework-dependent path above.
 
 There is no single-file publish. `publish-singlefile-fd.cmd` and its `SingleFile-FD` profile
 were removed after being verified non-functional: the profile used item metadata in a
@@ -459,6 +510,11 @@ publish (NETSDK1176), so it never produced an executable.
 
 `tests\run-gate.ps1` is the pre-release check. CI calls its tier 1 checks once, including
 the build and publish, rather than maintaining a second build sequence.
+
+Verification needs the pinned .NET SDK, PowerShell 7, Node.js, and Python with
+Playwright, Pillow and Chromium installed. PowerShell 7 is also used by a child probe
+when the gate starts under Windows PowerShell 5.1. Full runtime checks additionally
+use ImageMagick and an interactive Windows desktop session.
 
 ```pwsh
 powershell.exe -NoProfile -File tests\run-gate.ps1 -Tier1Only
@@ -500,8 +556,16 @@ not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a spe
 interpreter to override the search.
 
 Installed Edge can exercise both UC3D rendering backends with
-`python tests\uc3d-browser.py --renderer both --channel msedge`. The separate published-app
-and desktop-snapshot probes are documented in [SMOKE_TEST_PLAN.md](SMOKE_TEST_PLAN.md).
+`python tests\uc3d-browser.py --renderer both --channel msedge`. Original-control
+calibration runs 22 cases on each backend:
+
+```cmd
+python tests\uc3d-calibration.py --renderer both --channel msedge
+```
+
+The [calibration record](docs/UC3D-CALIBRATION.md) describes amount/size/speed endpoints,
+2D/portrait views, movement sequences, original-process comparisons and their limits.
+Published-app and desktop-snapshot probes are documented in [SMOKE_TEST_PLAN.md](SMOKE_TEST_PLAN.md).
 Use an interpreter with Playwright and Pillow installed. A missing WebGPU adapter reports
 unverified coverage; it does not establish a WebGPU pass.
 
