@@ -631,10 +631,12 @@ try {
     Test-Hdr 'tier 1: UC3D importer and WebGL smoke'
     if (-not $py) {
         Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
+        Test-Unchecked 'native smoke process lifecycle' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
     } else {
         foreach ($case in @(
             @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
+            @{ Name = 'native smoke process lifecycle'; Script = 'tests\test_native_smoke.py'; Arguments = '' },
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' }
         )) {
             $path = Join-Path $RepoRoot $case.Script
@@ -647,7 +649,12 @@ try {
                 -RedirectStandardOutput $log -RedirectStandardError "$log.err"
             if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
             elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
-            else { Test-Fail $case.Name "exit $($run.ExitCode); see $log" }
+            else {
+                Test-Fail $case.Name "exit $($run.ExitCode); see $log"
+                foreach ($line in @(Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40)) {
+                    Write-Host ("    " + $line)
+                }
+            }
         }
     }
 

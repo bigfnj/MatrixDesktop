@@ -5,6 +5,7 @@ import { formatClock } from "../MatrixDesktop/web/js/uc3d/overlays.js";
 import { createAudio } from "../MatrixDesktop/web/js/uc3d/audio.js";
 import { startLoop } from "../MatrixDesktop/web/js/uc3d/runtime.js";
 import { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
+import startWebGPU from "../MatrixDesktop/web/js/webgpu/uc3dPass.js";
 
 console.log(`SOURCE ${new URL("../MatrixDesktop/web/js/uc3d/scene.js", import.meta.url).pathname}`);
 let passed = 0, failures = 0;
@@ -163,5 +164,67 @@ try {
   if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
   if (previousAudio === undefined) delete globalThis.Audio; else globalThis.Audio = previousAudio;
 }
+
+async function asyncTest(name, run) {
+  try { await run(); passed++; console.log(`PASS ${name}`); }
+  catch (error) { failures++; console.error(`FAIL ${name}: ${error.message}`); }
+}
+await asyncTest("WebGPU initialization rejects missing contexts and preserves errors while releasing its device", async () => {
+  const globals = ["navigator", "window", "document", "Image", "fetch", "GPUBufferUsage", "GPUTextureUsage", "requestAnimationFrame", "cancelAnimationFrame"];
+  const descriptors = new Map(globals.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const previousWarn = console.warn;
+  try {
+    const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() {} });
+    globalThis.document = { createElement: element, body: { append() {} }, addEventListener() {}, removeEventListener() {} };
+    globalThis.Image = class { naturalWidth = 32; naturalHeight = 32; async decode() {} };
+    globalThis.fetch = async () => ({ ok: true, text: async () => "synthetic shader source" });
+    globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2, VERTEX: 4 };
+    globalThis.GPUTextureUsage = { TEXTURE_BINDING: 1, COPY_DST: 2, RENDER_ATTACHMENT: 4 };
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.cancelAnimationFrame = () => {};
+    for (const outcome of ["null-context", "configure", "unconfigure", "success"]) {
+      let destroyed = 0, unconfigured = 0, configured = 0, resources = 0, released = 0, cleanupWarnings = 0;
+      globalThis.window = { addEventListener() {}, removeEventListener() {} };
+      const resource = () => { resources++; return { createView: () => ({}), destroy() { released++; } }; };
+      const device = {
+        destroy() { destroyed++; }, queue: { copyExternalImageToTexture() {} },
+        createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+        createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
+        createBuffer: resource, createTexture: resource, createSampler: () => ({}), createBindGroup: () => ({}),
+        addEventListener() {}, lost: new Promise(() => {}),
+      };
+      Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: {
+        requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "rgba8unorm",
+      } } });
+      const originalError = new Error("controlled configure failure");
+      const context = {
+        configure() { configured++; if (outcome !== "success") throw originalError; },
+        unconfigure() { unconfigured++; if (outcome === "unconfigure") throw new Error("controlled unconfigure failure"); },
+      };
+      console.warn = () => { cleanupWarnings++; };
+      const initialize = startWebGPU({ dataset: {}, getContext: () => outcome === "null-context" ? null : context }, {});
+      if (outcome === "null-context") {
+        await assert.rejects(initialize, /canvas context is unavailable/);
+        assert.equal(configured, 0); assert.equal(unconfigured, 0);
+      } else if (outcome !== "success") {
+        await assert.rejects(initialize, error => error === originalError, "cleanup must preserve the original configure error");
+        assert.equal(configured, 1); assert.equal(unconfigured, 1);
+        assert.equal(cleanupWarnings, outcome === "unconfigure" ? 1 : 0);
+      } else {
+        const stop = await initialize;
+        assert.equal(destroyed, 0, "a live renderer must retain its device");
+        assert.equal(configured, 1); assert.equal(unconfigured, 0);
+        stop(); stop();
+        assert.equal(unconfigured, 1); assert.equal(released, resources, "normal teardown must release allocated buffers and textures");
+      }
+      assert.equal(destroyed, 1, `${outcome} must destroy the device exactly once`);
+    }
+  } finally {
+    console.warn = previousWarn;
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
+    }
+  }
+});
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;

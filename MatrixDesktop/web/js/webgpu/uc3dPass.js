@@ -4,15 +4,17 @@ export default async function startUC3D(canvas, config) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("UC3D WebGPU: no adapter available");
   const device = await adapter.requestDevice();
-  let runtime = null, stop = null, dead = false, geometry = null, target = null;
+  let runtime = null, stop = null, dead = false, geometry = null, target = null, context = null;
   const buffers = [], textures = [];
-  const context = canvas.getContext("webgpu");
-  const format = navigator.gpu.getPreferredCanvasFormat();
   const cleanup = () => {
     if (dead) return; dead = true;
-    runtime?.dispose(); geometry?.destroy(); target?.destroy();
-    for (const buffer of buffers) buffer.destroy(); for (const texture of textures) texture.destroy();
-    context.unconfigure(); device.destroy();
+    try {
+      runtime?.dispose(); geometry?.destroy(); target?.destroy();
+      for (const buffer of buffers) buffer.destroy(); for (const texture of textures) texture.destroy();
+    } finally {
+      try { context?.unconfigure(); }
+      finally { device.destroy(); }
+    }
   };
   const buffer = (size, usage) => { const item = device.createBuffer({ size, usage }); buffers.push(item); return item; };
   const imageTexture = (image, flipY = false) => {
@@ -24,6 +26,9 @@ export default async function startUC3D(canvas, config) {
   };
   const bind = (pipeline, entries) => device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: entries.map((resource, binding) => ({ binding, resource })) });
   try {
+    context = canvas.getContext("webgpu");
+    if (!context) throw new Error("UC3D WebGPU: canvas context is unavailable");
+    const format = navigator.gpu.getPreferredCanvasFormat();
     const source = glyphSource(config);
     const [shader, compositeShader, atlas] = await Promise.all([
       loadText("shaders/wgsl/uc3d.wgsl"), loadText("shaders/wgsl/uc3dComposite.wgsl"),
@@ -89,5 +94,9 @@ export default async function startUC3D(canvas, config) {
       device.queue.submit([encoder.finish()]);
     }, cleanup);
     return stop;
-  } catch (error) { runtime?.diagnostics.errors.push(error.message); cleanup(); throw error; }
+  } catch (error) {
+    runtime?.diagnostics.errors.push(error.message);
+    try { cleanup(); } catch (cleanupError) { console.warn("UC3D WebGPU cleanup failed:", cleanupError); }
+    throw error;
+  }
 }

@@ -31,6 +31,17 @@ def close_window(process):
     process.wait(timeout=12)
     assert process.returncode == 0, f"application exited {process.returncode}"
 
+def stop_application(process):
+    """Reap an application owned by this test, including a failed startup."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
 def open_application(playwright, exe, args, case):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -41,18 +52,23 @@ def open_application(playwright, exe, args, case):
     process = subprocess.Popen([str(exe), *args], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
     print(f"OPEN {case} pid={process.pid} debugger={port}", flush=True)
     endpoint = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        assert process.poll() is None, f"application exited before exposing its WebView: {process.returncode}"
-        try:
-            with urllib.request.urlopen(endpoint + "/json/version", timeout=1) as response:
-                assert json.load(response).get("webSocketDebuggerUrl")
-            browser = playwright.chromium.connect_over_cdp(endpoint)
-            return process, browser
-        except (OSError, ValueError):
-            time.sleep(0.15)
-    process.terminate()
-    raise AssertionError("WebView2 debug endpoint did not appear")
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            assert process.poll() is None, f"application exited before exposing its WebView: {process.returncode}"
+            try:
+                with urllib.request.urlopen(endpoint + "/json/version", timeout=1) as response:
+                    assert json.load(response).get("webSocketDebuggerUrl")
+                browser = playwright.chromium.connect_over_cdp(endpoint)
+                return process, browser
+            except (OSError, ValueError):
+                time.sleep(0.15)
+        raise AssertionError("WebView2 debug endpoint did not appear")
+    except BaseException:
+        # The caller has no process handle until this function returns, so it cannot
+        # clean up a CDP attachment failure or timeout in its own finally block.
+        stop_application(process)
+        raise
 
 def page_at(browser, origin):
     deadline = time.monotonic() + 20
@@ -114,9 +130,7 @@ def runtime_case(playwright, exe, renderer, donor):
         print(f"PASS published WebView2 {renderer}: exact backend, local images, grant boundaries, original media and render readiness")
         close_window(process)
     finally:
-        if process.poll() is None:
-            process.terminate()
-            process.wait(timeout=10)
+        stop_application(process)
         browser.close()
 
 def configurator_case(playwright, exe, donor):
@@ -159,7 +173,7 @@ def configurator_case(playwright, exe, donor):
         print("PASS published configurator: controls loaded, native preview bootstrap, muted UC3D frame rendered")
         close_window(process)
     finally:
-        if process.poll() is None: process.terminate(); process.wait(timeout=10)
+        stop_application(process)
         browser.close()
 
 def main():

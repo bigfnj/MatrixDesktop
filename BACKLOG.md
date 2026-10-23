@@ -8,8 +8,8 @@ resolved below. Deferred product features remain a separate-session list by owne
 **Verify before you trust anything.** One command, and it is the whole story:
 
 ```pwsh
-pwsh -File tests\run-gate.ps1              # 49 checks, needs a desktop session
-pwsh -File tests\run-gate.ps1 -Tier1Only   # 19 checks, what CI runs, no session needed
+pwsh -File tests\run-gate.ps1              # 50 checks, needs a desktop session
+pwsh -File tests\run-gate.ps1 -Tier1Only   # 20 checks, what CI runs, no session needed
 ```
 
 Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` is not a pass.**
@@ -29,7 +29,7 @@ gate is decoration.
 | --- | --- | --- |
 | `tests\MatrixDesktop.Tests` (98 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
-| `tests\web-smoke.py` (13 checks, headless Chromium, runs in CI) | geometry, theme contrast, whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+| `tests\web-smoke.py` (14 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 | `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
 | `tests\uc3d-browser.py`, `tests\native-uc3d-smoke.py` | actual backend readiness, picture/depth behavior and published native media delivery | physical Looking Glass hardware |
 
@@ -91,6 +91,24 @@ Open row; the historical sections below describe their original diagnoses.
 
 ZMatrix, marketplace, OBS/Spout/NDI and per-monitor configurations remain deferred by the
 owner's explicit scope selection. They are not silently closed or part of this burn-down.
+
+### Post-push audit, 2026-10-23
+
+The audit re-read native/media/importer code, both renderer families, configurator
+dependencies, test/gate failure paths and managed tooling after the initial main push.
+Every confirmed additional finding is recorded here and resolved in the follow-up commit.
+
+| Finding | Disposition | Evidence |
+| --- | --- | --- |
+| Slant stays enabled although UC3D does not consume it | FIXED | Scene dependency disables the legacy-only control. The grouped headless DOM check fails when slant suppression is removed. |
+| Greyed color/palette fields still accept edits | FIXED | Compound fields disable native descendants and reject late callbacks after a scene switch. Native-disable and callback-guard mutations each fail the grouped DOM check. |
+| Failed native test CDP connection can orphan its app | FIXED | Startup failures terminate and wait, escalating to kill on timeout; successful handoff stays live. Three mocked regressions, a cleanup-removal mutation and actual failed/successful host launches verify ownership cleanup. |
+| Null WebGPU context or failed unconfigure can skip device destruction | FIXED | Initialization rejects missing contexts explicitly and cleanup always destroys its owned device. Fault injection and a device-destruction mutation cover the failure path. |
+| Hosted Windows checkout fails the served-shader witness | FIXED | Fetch text retains CRLF while Python text reads normalize it. Witnesses now compare fetched bytes with file bytes; the failure reproduced on a clean Windows checkout and the corrected check retains exact content validation. Failed Python probes also print their logs in the gate. |
+
+No additional confirmed dead code, inert function or call to a missing target remained in
+the audited paths. Shader/device behavior was also exercised on this workstation; physical
+Looking Glass hardware and exact native visual equivalence were not certified.
 
 Outside this repo: both EXEs are unsigned, so every download trips SmartScreen. That is a
 cross-repo code-signing decision, not a MatrixDesktop task.

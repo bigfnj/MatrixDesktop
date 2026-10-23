@@ -26,6 +26,7 @@ Exit codes match the gate's own convention:
 """
 
 import functools
+import hashlib
 import http.server
 import io
 import json
@@ -70,9 +71,11 @@ def serve(directory):
 STUB = """
 (() => {
   const state = __STATE__;
+  window.__smokeMessages = [];
   window.chrome = window.chrome || {};
   window.chrome.webview = {
     postMessage: (msg) => {
+      window.__smokeMessages.push(structuredClone(msg));
       let payload = {};
       switch (msg.type) {
         case 'loadState':     payload = state; break;
@@ -91,6 +94,9 @@ STUB = """
 
 
 def check_configurator(page, origin, state_json):
+    source = page.request.get(f"{origin}/js/app.js").body()
+    assert source == (CONFIGURATOR / "js" / "app.js").read_bytes(), "configurator source witness differs from source on disk: js/app.js"
+    print(f"  SOURCE {CONFIGURATOR / 'js' / 'app.js'} sha256={hashlib.sha256(source).hexdigest()}")
     page.add_init_script(STUB.replace("__STATE__", state_json))
 
     errors = []
@@ -251,6 +257,52 @@ def check_configurator(page, origin, state_json):
                f"worst {worst['sel']} at {worst['ratio']:.2f}:1")
     page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
 
+    # Scene dependencies must disable the actual compound controls, survive a
+    # scene round trip, and reject late picker callbacks for a disabled field.
+    problems = []
+
+    def field(label):
+        return page.locator(".field").filter(has=page.get_by_text(label, exact=True))
+
+    def disabled(label, expected):
+        values = field(label).locator("input, select, button").evaluate_all(
+            "nodes => nodes.map(node => node.disabled)")
+        if not values or any(value != expected for value in values):
+            problems.append(f"{label}: disabled states {values}, expected {expected}")
+
+    scene = field("Scene").locator("select")
+    scene.select_option("matrix")
+    disabled("Normal code color", True)
+    disabled("Glint", False)
+    disabled("Slant degrees", False)
+    scene.select_option("uc3d")
+    disabled("Normal code color", False)
+    disabled("Glint", True)
+    disabled("Palette gradient", True)
+    disabled("Slant degrees", True)
+    page.wait_for_timeout(350)  # Settle the intentional scene change's draft save.
+    before = page.evaluate("window.__smokeMessages.filter(m => m.type === 'saveDraft').length")
+    for label, selector, value in (("Glint", "input", "0.123"),
+                                   ("Palette gradient", "input.hex-input", "#ff0000")):
+        field(label).locator(selector).first.evaluate(
+            "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }", value)
+    page.wait_for_timeout(350)
+    after = page.evaluate("window.__smokeMessages.filter(m => m.type === 'saveDraft').length")
+    if after != before:
+        problems.append("a disabled color/palette callback saved a draft mutation")
+    scene.select_option("matrix")
+    disabled("Normal code color", True)
+    disabled("Glint", False)
+    disabled("Slant degrees", False)
+    palette_editors = field("Palette gradient").locator("input, button.add-row").evaluate_all(
+        "nodes => nodes.map(node => node.disabled)")
+    if not palette_editors or any(palette_editors):
+        problems.append(f"Matrix palette did not re-enable: {palette_editors}")
+    if problems:
+        fail("scene dependencies disable compound editors and restore editable controls", "; ".join(problems))
+    else:
+        ok("scene dependencies disable compound editors and restore editable controls")
+
 
 def mean_luma(png_bytes):
     from PIL import Image  # imported lazily; main() reports CANNOT VERIFY if it is absent
@@ -307,7 +359,7 @@ def check_matrix_web(page, origin):
     try:
         page.wait_for_function("document.querySelector('canvas') != null", timeout=20000)
     except Exception:
-        fail("matrix web bundle creates a canvas", "no canvas after 20s")
+        fail("matrix web bundle creates a canvas", "no canvas after 20s; " + "; ".join(errors[:3]) + "; url=" + page.url)
         return
 
     page.wait_for_timeout(3000)

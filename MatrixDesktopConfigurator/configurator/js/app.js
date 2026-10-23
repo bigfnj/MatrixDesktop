@@ -200,6 +200,8 @@ const updateCommand = async () => {
 };
 
 const updateDraftValue = (field, value) => {
+	// A picker opened before a scene change can finish after its field is disabled.
+	if (getDisabledReason(field)) return;
 	state.draft[field.id] = value;
 	setDirty(true);
 	scheduleSaveDraft();
@@ -353,26 +355,19 @@ const renderFields = () => {
 };
 
 const renderField = (field) => {
-	switch (field.kind) {
-		case "bool":
-			return renderBoolField(field);
-		case "select":
-			return renderSelectField(field);
-		case "number":
-			return renderNumberField(field);
-		case "color":
-			return renderColorField(field);
-		case "palette":
-			return renderPaletteField(field);
-		case "stripes":
-			return renderStripesField(field);
-		default:
-			return renderTextField(field);
+	const renderers = { bool: renderBoolField, select: renderSelectField, number: renderNumberField,
+		color: renderColorField, palette: renderPaletteField, stripes: renderStripesField };
+	const shell = (renderers[field.kind] || renderTextField)(field);
+	// Compound editors contain several native controls. Disable every descendant,
+	// including swatches and palette actions, rather than only styling the shell.
+	if (getDisabledReason(field)) {
+		for (const control of shell.querySelectorAll("input, select, button")) control.disabled = true;
 	}
+	return shell;
 };
 
 const uc3dFields = new Set(["codeColor","donorGlyphs","shadedLines","sidewaysMovement","mouseRotation","codeRotation","forwardMovement","randomForwardMovement","showPictures","pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","pictureDuration","pictureSource","showClock","clock12Hour","clockSize","sound","soundVolume","pictureDirectory","donorDirectory","desktopBackground","musicFile"]);
-const legacyOnlyFields = new Set(["effect","url","camera","clickRipples","clickRippleShape","glintColor","palette","stripeColors","ditherMagnitude","loops","skipIntro","testFix"]);
+const legacyOnlyFields = new Set(["effect","url","camera","clickRipples","clickRippleShape","glintColor","palette","stripeColors","ditherMagnitude","slant","loops","skipIntro","testFix"]);
 
 const getDisabledReason = (field) => {
     const uc3d = state.draft.scene === "uc3d";

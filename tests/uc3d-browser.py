@@ -81,9 +81,9 @@ def main():
                 assert diagnostics["backend"] == backend, diagnostics
                 assert not diagnostics["errors"], diagnostics
                 shader_path = "shaders/glsl/uc3d.vert.glsl" if backend == "regl" else "shaders/wgsl/uc3d.wgsl"
-                served_shader = page.evaluate("url => fetch(url, {cache:'no-store'}).then(response => response.text())", f"{origin}/{shader_path}")
-                assert served_shader == (WEB / shader_path).read_text(encoding="utf-8"), "renderer source witness differs from source on disk"
-                print("SHADER WITNESS", backend, hashlib.sha256(served_shader.encode()).hexdigest())
+                served_shader = bytes(page.evaluate("async url => Array.from(new Uint8Array(await (await fetch(url, {cache:'no-store'})).arrayBuffer()))", f"{origin}/{shader_path}"))
+                assert served_shader == (WEB / shader_path).read_bytes(), f"renderer source witness differs from source on disk: {shader_path}"
+                print("SHADER WITNESS", backend, hashlib.sha256(served_shader).hexdigest())
                 first = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
                 assert sum(ImageStat.Stat(first).var) > 30, "blank 2D frame"
                 page.wait_for_timeout(250)
