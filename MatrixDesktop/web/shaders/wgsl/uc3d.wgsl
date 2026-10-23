@@ -7,8 +7,36 @@ struct Scene {
 @group(0) @binding(0) var<uniform> scene: Scene;
 @group(0) @binding(1) var atlasSampler: sampler;
 @group(0) @binding(2) var atlas: texture_2d<f32>;
-struct VertexInput { @location(0) cell: vec4<f32>, @location(1) corner: vec2<f32>, @location(2) photo: vec4<f32> };
-struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) color: vec3<f32> };
+struct VertexInput {
+  @location(0) cell: vec4<f32>, @location(1) corner: vec2<f32>, @location(2) photo: vec4<f32>,
+  @location(3) origin: vec4<f32>, @location(4) glyph: vec4<f32>,
+};
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) color: vec3<f32>, @location(2) alpha: f32,
+};
+fn originalGlyph(input: VertexInput) -> VertexOutput {
+  let halfSize = scene.reserved.z;
+  var p = input.origin.xyz + vec3<f32>((input.corner.x-0.5)*2.0*halfSize/max(scene.scene6.y,0.1),
+    (input.cell.y*scene.scene6.z+input.corner.y-0.5)*2.0*halfSize,0.0);
+  let weight = scene.scene2.z*input.photo.a;
+  let luminance = (input.photo.r+input.photo.g+input.photo.b)/3.0;
+  if (scene.scene2.w > 0.5 && input.photo.a > 0.0) { p.z = luminance*3.0*scene.scene4.x; }
+  let rainColor = select(scene.codeColor.rgb*scene.scene4.z,scene.cursorColor.rgb*scene.scene4.w*0.5,input.cell.y<0.5);
+  var pictureColor = scene.codeColor.rgb*luminance;
+  if (scene.scene4.y < 0.5) { pictureColor = mix(pictureColor,input.photo.rgb,weight); }
+  let color = select(rainColor,pictureColor*scene.scene4.z,input.photo.a>0.0);
+  var alpha = input.glyph.z*input.glyph.w;
+  if (scene.scene2.w < 0.5 && scene.scene3.w > 0.5) { alpha *= input.cell.w; }
+  alpha = select(clamp(alpha,0.0,1.0),1.0,input.photo.a>0.0);
+  let symbol = input.glyph.x-floor(input.glyph.x/scene.scene3.z)*scene.scene3.z;
+  var local = input.corner-0.5;
+  if (input.glyph.y > 0.5) { local.x *= -1.0; }
+  if (scene.scene5.z > 0.5) { local.x *= -1.0; }
+  let c = cos(scene.scene5.w); let s = sin(scene.scene5.w);
+  local = vec2<f32>(c*local.x-s*local.y,s*local.x+c*local.y)*clamp(1.0-scene.scene6.w,0.0,1.0);
+  let tile = vec2<f32>(symbol-floor(symbol/scene.scene5.x)*scene.scene5.x,scene.scene5.y-floor(symbol/scene.scene5.x)-1.0);
+  return VertexOutput(scene.projection*vec4<f32>(p,1.0),(local+0.5+tile)/scene.scene5.xy,color,alpha);
+}
 fn rotateScene(point: vec3<f32>) -> vec3<f32> {
   var p = point;
   let cy = cos(scene.scene1.z); let sy = sin(scene.scene1.z); let cp = cos(scene.scene1.w); let sp = sin(scene.scene1.w);
@@ -21,6 +49,7 @@ fn rotateScene(point: vec3<f32>) -> vec3<f32> {
   return p;
 }
 @vertex fn vertexMain(input: VertexInput) -> VertexOutput {
+  if (scene.reserved.y > 0.5) { return originalGlyph(input); }
   let cell = input.cell; let corner = input.corner; let photo = input.photo;
   let aspect = scene.scene0.x; let rows = scene.scene0.y; let columns = scene.scene0.z;
   let center = vec2<f32>((cell.x+0.5)/columns*2.0-1.0, 1.0-(cell.y+0.5)/rows*2.0);
@@ -65,7 +94,7 @@ fn rotateScene(point: vec3<f32>) -> vec3<f32> {
   let c = cos(scene.scene5.w); let s = sin(scene.scene5.w);
   local = vec2<f32>(c*local.x-s*local.y,s*local.x+c*local.y)*clamp(1.0-scene.scene6.w,0.0,1.0);
   let tile = vec2<f32>(symbol-floor(symbol/scene.scene5.x)*scene.scene5.x,scene.scene5.y-floor(symbol/scene.scene5.x)-1.0);
-  return VertexOutput(scene.projection*vec4<f32>(p,1.0),(local+0.5+tile)/scene.scene5.xy,color);
+  return VertexOutput(scene.projection*vec4<f32>(p,1.0),(local+0.5+tile)/scene.scene5.xy,color,1.0);
 }
 @fragment fn fragmentMain(input: VertexOutput) -> @location(0) vec4<f32> {
   let color = textureSample(atlas,atlasSampler,input.uv).rgb;
@@ -73,5 +102,5 @@ fn rotateScene(point: vec3<f32>) -> vec3<f32> {
   let width = max(fwidth(distance),0.015);
   var mask = smoothstep(0.5-width,0.5+width,distance);
   if (scene.reserved.x > 0.5) { mask = max(color.r,max(color.g,color.b)); }
-  return vec4<f32>(input.color*mask,mask);
+  return vec4<f32>(input.color*mask,mask*input.alpha);
 }

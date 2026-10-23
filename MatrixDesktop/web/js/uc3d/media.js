@@ -3,7 +3,7 @@ export function selectImages(images, source = "all") {
     (source === "all" || (image.group ?? "custom") === source || (Array.isArray(image.groups) && image.groups.includes(source))));
 }
 
-export function createMedia(images = []) {
+export function createMedia(images = [], options = {}) {
   let disposed = false;
   const cache = new Map();
   const pending = new Set();
@@ -18,10 +18,13 @@ export function createMedia(images = []) {
       try {
         image.src = entry.url; await image.decode();
         if (disposed) return null;
-        const scale = Math.min(1, 1024 / Math.max(image.naturalWidth, image.naturalHeight));
+        const custom = entry.group === "custom" || entry.groups?.includes("custom") || (!entry.group && !entry.groups?.length);
+        const maximum = options.original && custom ? 300 : 1024;
+        const scale = Math.min(1, maximum / Math.max(image.naturalWidth, image.naturalHeight));
         const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const dimension = options.original && custom ? Math.trunc : Math.round;
+        canvas.width = Math.max(1, dimension(image.naturalWidth * scale));
+        canvas.height = Math.max(1, dimension(image.naturalHeight * scale));
         const context = canvas.getContext("2d", { willReadFrequently: true });
         context.drawImage(image, 0, 0, canvas.width, canvas.height);
         const pixels = context.getImageData(0, 0, canvas.width, canvas.height);

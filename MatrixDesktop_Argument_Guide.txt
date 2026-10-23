@@ -669,12 +669,54 @@ UC3D scene options
 - Default: matrix
   Rendering scene: matrix or uc3d. UC3D uses its own camera, image formation and glyph renderer.
   Selecting uc3d applies its scene profile unless explicitly overridden:
-  volumetric=true, numColumns=100, density=5 (allowed range 0.01 to 8),
-  fallSpeed=0.045, forwardSpeed=-0.675, codeColor=0.501961,0,1,
+  uc3dControls=original, uc3dAmount=500, uc3dGlyphSize=12,
+  uc3dFallSpeed=6, uc3dForwardSpeed=6, bloomStrength=0,
+  volumetric=true, codeColor=0.501961,0,1,
   cursorColor=1,0.501961,1, sidewaysMovement=true, randomForwardMovement=true,
-  pictureMonochrome=false, pictureDelay=60, pictureDuration=30.
-  This fixed profile matches the owner's installed screensaver settings captured
-  on 2026-10-23. Other Default entries describe the ordinary Matrix scene.
+  pictureMonochrome=false, uc3dPictureDelay=60, pictureDuration=30.
+  Values come from the owner's installed screensaver settings captured on
+  2026-10-23. Original controls use independent amount and glyph size.
+  Explicit generic layout/motion options select legacy controls unless a native
+  option or uc3dControls explicitly selects original. Saved customized presets
+  retain legacy behavior. Other Default entries describe the ordinary Matrix scene.
+
+- Key: uc3dControls
+- Default: original
+  UC3D: original uses native slider units and stream simulation; legacy retains
+  generic numColumns, density, fallSpeed, forwardSpeed and raindropLength behavior.
+
+- Key: uc3dAmount
+- Default: 500
+  UC3D original: More/Less slider, 100 to 1500 streams, independent of glyph size.
+  Streams enter gradually over ten seconds; perspective and culling affect coverage.
+
+- Key: uc3dGlyphSize
+- Default: 12
+  UC3D original: glyph size, 10 to 40. World half-size is value times 0.01.
+
+- Key: uc3dFallSpeed
+- Default: 6
+  UC3D original: falling speed slider, 0 to 150. Zero still falls; randomized
+  per-stream world speed is 2 + (random integer below slider + 30) times 0.1.
+
+- Key: uc3dForwardSpeed
+- Default: 6
+  UC3D original: forward/backward slider, 0 to 120, neutral 60. Target world
+  speed is (value - 60) times 0.1. Requires 3D and forward movement; random
+  forward movement chooses its own target and disables this slider.
+
+- Key: uc3dPictureScale
+- Default: 100
+  UC3D original: Large / Small picture slider, 100 to 300. Higher values shrink
+  the image grid, as in the original; it is a sampling divisor, not zoom percent.
+
+- Key: uc3dPictureDelay
+- Default: 60
+  UC3D original: delay between picture sequences, 0 to 120 seconds.
+
+- Key: uc3dClockSize
+- Default: 90
+  UC3D original: clock size slider, 50 to 170; effective scale is value / 90.
 
 - Key: shadedLines
 - Default: true
@@ -694,7 +736,8 @@ UC3D scene options
 
 - Key: forwardMovement
 - Default: true
-  UC3D 3D: move through the code using forwardSpeed.
+  UC3D 3D: move through the code using uc3dForwardSpeed in Original controls,
+  or forwardSpeed in Legacy controls.
 
 - Key: randomForwardMovement
 - Default: false

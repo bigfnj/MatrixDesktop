@@ -71,6 +71,7 @@ Use the installed Edge channel for actual hardware backend coverage:
 
 ```pwsh
 python tests\uc3d-browser.py --renderer both --channel msedge
+python tests\uc3d-calibration.py --renderer both --channel msedge
 ```
 
 The probe asserts the selected backend rather than accepting silent fallback.
@@ -78,6 +79,16 @@ It checks animated 2D rain, photo RGB in the code field, visible relief, literal
 caption text, the clock and disposal. It records the served shader's digest and
 writes synthetic screenshots and a report to `artifacts\uc3d\`. A missing WebGPU
 adapter returns exit 2. A shader/device failure is a failure, not a WebGPU pass.
+
+The calibration probe checks 22 original-control cases per backend: slider
+endpoints, captured values, isolated motion, 2D and portrait. It advances a
+controlled clock to 20 and 20.25 seconds, inspects the actual running population,
+size and stream state, captures frames and verifies disposal. It records served
+source digests. `--only amount-500,flat` selects a focused subset. Optional
+`--donor-atlas C:\Private\UC3D-media\glyphs.bmp --output C:\Private\comparison`
+uses a local atlas and requires a destination outside the repository. Such images
+remain private. The unchanged original-process harness and comparison evidence
+are recorded in [UC3D calibration](docs/UC3D-CALIBRATION.md).
 
 After publishing, exercise the native applications and their media bridge:
 

@@ -128,18 +128,20 @@ internal sealed partial class CommandBuilder
         var scene = GetString(values, "scene", "matrix");
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
+            if (!Uc3dControlProfile.IsActive(field.Id, values)) continue;
             if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
             {
                 continue;
             }
 
-            var value = values[field.Id];
+            var value = field.Id == "uc3dControls" && Uc3dControlProfile.IsUc3d(values)
+                ? JsonValue.Create(Uc3dControlProfile.Mode(values)) : values[field.Id];
             if (value is null)
             {
                 continue;
             }
 
-            if (!includeDefaults && IsDefault(field, value, scene))
+            if (!includeDefaults && IsDefault(field, value, scene, Uc3dControlProfile.Mode(values)))
             {
                 continue;
             }
@@ -175,13 +177,14 @@ internal sealed partial class CommandBuilder
     // once ArgumentCatalog.Create has run, so caching is safe by construction.
     private readonly Dictionary<string, string?> _defaultJsonByFieldId = [];
 
-    private bool IsDefault(ArgumentDefinition field, JsonNode value, string scene)
+    private bool IsDefault(ArgumentDefinition field, JsonNode value, string scene, string? uc3dMode = null)
     {
-        var cacheKey = scene + ":" + field.Id;
+        var cacheKey = scene + ":" + uc3dMode + ":" + field.Id;
         if (!_defaultJsonByFieldId.TryGetValue(cacheKey, out var defaultJson))
         {
             var defaultValue = _metadata.SceneDefaults.TryGetValue(scene, out var defaults) && defaults.TryGetValue(field.Id, out var sceneDefault)
                 ? sceneDefault : field.DefaultValue;
+            if (scene == "uc3d" && uc3dMode == "legacy" && field.Id == "bloomStrength") defaultValue = field.DefaultValue;
             var defaultNode = JsonSerializer.SerializeToNode(defaultValue, _jsonOptions);
             defaultJson = defaultNode is null ? null : NormalizeJson(defaultNode);
             _defaultJsonByFieldId[cacheKey] = defaultJson;
@@ -431,15 +434,17 @@ internal sealed partial class CommandBuilder
 
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
+            if (!Uc3dControlProfile.IsActive(field.Id, values)) continue;
             if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
             {
                 continue;
             }
 
-            var value = values[field.Id];
+            var value = field.Id == "uc3dControls" && Uc3dControlProfile.IsUc3d(values)
+                ? JsonValue.Create(Uc3dControlProfile.Mode(values)) : values[field.Id];
             if (value is null) continue;
 
-            if (IsDefault(field, value, scene)) continue;
+            if (IsDefault(field, value, scene, Uc3dControlProfile.Mode(values))) continue;
 
             var serialized = SerializeWebValue(field, value);
             if (string.IsNullOrWhiteSpace(serialized)) continue;

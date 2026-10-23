@@ -113,7 +113,7 @@ def page_at(browser, origin):
 
 def default_snapshot(frame):
     """Read the configuration and geometry produced by the deployed web modules."""
-    for relative in ("js/config.js", "js/uc3d/defaults.js", "js/uc3d/scene.js"):
+    for relative in ("js/config.js", "js/uc3d/defaults.js", "js/uc3d/scene.js", "js/uc3d/native.js", "js/uc3d/runtime.js"):
         deployed = frame.evaluate("""async relative => {
             const response = await fetch(new URL(relative, location.href));
             if (!response.ok) throw new Error(`Source witness failed: ${relative}`);
@@ -124,19 +124,22 @@ def default_snapshot(frame):
         print(f"SOURCE {relative} sha256={hashlib.sha256(source).hexdigest()}", flush=True)
     return frame.evaluate("""async () => {
         const {default:makeConfig} = await import('./js/config.js');
-        const {createGrid} = await import('./js/uc3d/scene.js');
         const config = makeConfig(Object.fromEntries(new URLSearchParams(location.search)));
         const canvas = document.querySelector('canvas');
         const aspect = canvas.clientWidth / canvas.clientHeight;
-        const {columns,rows,baseColumns,count} = createGrid(config, aspect);
-        return {config,grid:{columns,rows,baseColumns,count},aspect,
-            runtime:window.__matrixRuntime,bootstrap:window.matrixHostBootstrap};
+        const runtime = window.__matrixRuntime;
+        if (typeof runtime?.inspect !== 'function') throw new Error('The deployed runtime has no simulation inspector');
+        const simulation = runtime.inspect();
+        const grid = {columns:runtime.targetStreams,rows:40,baseColumns:simulation.screenColumns,
+            instanceCount:runtime.glyphInstances,glyphHalfSize:runtime.glyphHalfSize};
+        return {config,grid,aspect,simulation,runtime,bootstrap:window.matrixHostBootstrap};
     }""")
 
 def assert_default_snapshot(report, preview=False, volumetric=True):
     config = report["config"]
-    expected = {"scene": "uc3d", "volumetric": volumetric, "numColumns": 100,
-                "density": 5, "fallSpeed": 0.045, "forwardSpeed": -0.675,
+    expected = {"scene": "uc3d", "volumetric": volumetric, "uc3dControls": "original",
+                "uc3dAmount": 500, "uc3dGlyphSize": 12, "uc3dFallSpeed": 6, "uc3dForwardSpeed": 6,
+                "uc3dPictureScale": 100, "uc3dPictureDelay": 60, "uc3dClockSize": 90, "bloomStrength": 0,
                 "sidewaysMovement": True, "randomForwardMovement": True,
                 "showPictures": False, "showClock": False, "sound": "off",
                 "desktopBackground": False, "pictureMonochrome": False,
@@ -151,8 +154,15 @@ def assert_default_snapshot(report, preview=False, volumetric=True):
             math.isclose(actual, wanted, rel_tol=0, abs_tol=1e-12)
             for actual, wanted in zip(color["values"], value)), f"UC3D default {name}: {color}"
     grid = report["grid"]
-    expected_columns = grid["baseColumns"] * (5 if volumetric else 1)
-    assert grid["columns"] == expected_columns, f"UC3D default stream population: {grid}"
+    assert grid["columns"] == 500 and grid["baseColumns"] == 116, f"UC3D default stream population: {grid}"
+    assert math.isclose(grid["glyphHalfSize"], .12, abs_tol=1e-12), grid
+    simulation = report["simulation"]
+    assert simulation["targetStreams"] == 500 and simulation["activeStreams"] == 500, simulation
+    assert simulation["elapsed"] >= 12 and simulation["streams"], "default inspection ran before original startup completed"
+    assert all(2 <= stream["fallSpeed"] <= 5.5 and stream["halfSize"] == .12 and 10 <= stream["length"] <= 39
+               for stream in simulation["streams"]), simulation["streams"]
+    assert report["runtime"]["controls"] == "original" and report["runtime"]["activeStreams"] == 500, report["runtime"]
+    assert 0 < grid["instanceCount"] <= 500 * 39, grid
     assert report["runtime"]["scene"] == "uc3d" and not report["runtime"]["errors"], report["runtime"]
     bootstrap = report["bootstrap"]
     assert bootstrap and bootstrap["preview"] is preview, "native UC3D bootstrap has the wrong preview mode"
@@ -170,6 +180,7 @@ def default_case(playwright, exe, renderer):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.wait_for_function("window.__matrixRuntime?.ready === true", timeout=25000)
+        page.wait_for_function("window.__matrixRuntime.inspect().elapsed >= 12", timeout=25000)
         report = default_snapshot(page)
         assert_default_snapshot(report)
         assert report["runtime"]["backend"] == renderer, "default UC3D requested backend silently fell back"
@@ -228,18 +239,33 @@ def default_configurator_case(playwright, exe):
                 page.wait_for_timeout(100)
             assert frame, f"published configurator preview did not navigate to {target}"
             frame.wait_for_function("window.__matrixRuntime?.scene === 'uc3d' && window.__matrixRuntime.ready === true", timeout=25000)
+            frame.wait_for_function("window.__matrixRuntime.inspect().elapsed >= 12", timeout=25000)
             return frame
 
         report = default_snapshot(preview())
         assert_default_snapshot(report, preview=True)
         assert field("Volumetric / 3D").locator("input").is_checked(), "configurator scene switch kept Matrix's flat default"
-        for label, value in (("Columns", "100"), ("Fall speed", "0.045"), ("Forward speed", "-0.675")):
-            control = field(label).locator("input[type=number]")
-            assert control.input_value() == value and control.evaluate("node => node.checkValidity()"), f"configurator default {label} is absent or invalid"
-        columns = field("Columns").locator("input[type=number]")
-        columns.fill("")
-        columns.press("Tab")
-        assert columns.input_value() == "100", "clearing Columns reset to Matrix's default instead of UC3D's"
+        assert field("Control units").locator("select").input_value() == "original", "new UC3D preset did not choose original controls"
+        for key, label, value, minimum, maximum in (
+                ("uc3dAmount", "Code amount: Less / More", "500", "100", "1500"),
+                ("uc3dGlyphSize", "Code size: Small / Large", "12", "10", "40"),
+                ("uc3dFallSpeed", "Fall speed: Slow / Fast", "6", "0", "150"),
+                ("uc3dForwardSpeed", "Travel: Backward / Forward", "6", "0", "120"),
+                ("uc3dPictureScale", "Picture size: Large / Small", "100", "100", "300"),
+                ("uc3dPictureDelay", "Picture delay (seconds)", "60", "0", "120"),
+                ("uc3dClockSize", "Clock size: Small / Large", "90", "50", "170")):
+            native_field = page.locator(f'.field[data-field="{key}"]')
+            number, slider = native_field.locator("input[type=number]"), native_field.locator("input[type=range]")
+            for control in (number, slider):
+                assert control.input_value() == value and control.evaluate("node => node.checkValidity()"), f"configurator default {label} is absent or invalid"
+                assert control.get_attribute("min") == minimum and control.get_attribute("max") == maximum and control.get_attribute("step") == "1", label
+            assert number.is_disabled() == slider.is_disabled(), f"paired {label} controls disagree about disabled state"
+        for label in ("Columns", "Density", "Fall speed", "Forward speed", "Raindrop length"):
+            assert field(label).locator("input[type=number]").is_disabled(), f"generic {label} is operable in original mode"
+        amount = field("Code amount: Less / More").locator("input[type=number]")
+        amount.fill("")
+        amount.press("Tab")
+        assert amount.input_value() == "500", "clearing code amount did not restore the current UC3D default"
         field("Volumetric / 3D").locator("input").uncheck()
         page.wait_for_function("new URL(document.querySelector('#previewFrame').src, location.href).searchParams.get('volumetric') === 'false'")
         override = default_snapshot(preview())
@@ -259,18 +285,21 @@ def default_configurator_case(playwright, exe):
         stop_application(process)
         browser.close()
 
-def runtime_case(playwright, exe, renderer, donor):
-    case = "runtime-" + renderer
+def runtime_case(playwright, exe, renderer, donor, original=False):
+    case = ("runtime-original-" if original else "runtime-legacy-") + renderer
     fixture = ARTIFACTS / "pictures"
     fixture.mkdir(parents=True, exist_ok=True)
     picture = Image.new("RGB", (160, 120), "red")
     picture.paste("lime", (80, 0, 160, 120))
     picture.save(fixture / "Red and green.png")
     args = ["--windowed", "--no-exit-on-any-key", "--scene", "uc3d", "--renderer", renderer,
+            "--uc3dControls", "original" if original else "legacy",
             "--volumetric", "true", "--showClock", "true", "--codeRotation", "false",
             "--showPictures", "true", "--pictureDelay", "1", "--pictureDuration", "8",
             "--pictureMonochrome", "false", "--pictureDepth", "0.7", "--pictureDirectory", str(fixture),
             "--sound", "effects", "--soundVolume", "0", "--suppressWarnings", "true"]
+    if original:
+        args += ["--uc3dPictureDelay", "0", "--pictureSource", "custom"]
     if donor:
         args += ["--donorDirectory", donor, "--donorGlyphs", "true"]
     process, browser = open_application(playwright, exe, args, case)
@@ -293,12 +322,25 @@ def runtime_case(playwright, exe, renderer, donor):
         if donor:
             assert bootstrap.get("glyphUrl") and bootstrap.get("effectsUrl"), "imported glyph/sound resources missing"
             assert len(bootstrap["images"]) == 107, "106 donor selections plus one personal picture must survive native import"
-        page.wait_for_timeout(1800)
+        if original:
+            page.wait_for_function("window.__matrixRuntime.simulationTime >= 22 && window.__matrixRuntime.pictureWeight > .6", timeout=45000)
+            assert page.evaluate("window.__matrixRuntime.controls") == "original", "native media case used legacy controls"
+            assert page.evaluate("window.__matrixRuntime.inspect().activeStreams") == 500, "original media runtime lost configured streams"
+        else:
+            page.wait_for_timeout(1800)
         page.mouse.click(12, 12)
         page.screenshot(path=str(ARTIFACTS / f"{case}.png"))
+        if original:
+            rendered = Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
+            pixels = rendered.get_flattened_data() if hasattr(rendered, "get_flattened_data") else rendered.getdata()
+            red, green = 0, 0
+            for r, g, b in pixels:
+                red += r > 40 and r > g*1.5 and r > b*1.5
+                green += g > 40 and g > r*1.5 and g > b*1.5
+            assert red > 20 and green > 20, f"original code picture lacks the granted red/green fixture: red={red}, green={green}"
         report = page.evaluate("({runtime:window.__matrixRuntime,clock:document.querySelector('[data-uc3d-clock]')?.textContent})")
         (ARTIFACTS / f"{case}.json").write_text(json.dumps({"media": response, "diagnostics": report}, indent=2), encoding="utf-8")
-        print(f"PASS published WebView2 {renderer}: exact backend, local images, grant boundaries, original media and render readiness")
+        print(f"PASS published WebView2 {renderer} {'original' if original else 'legacy'} controls: exact backend, local images, grant boundaries, original media and render readiness")
         close_window(process)
     finally:
         stop_application(process)
@@ -319,7 +361,7 @@ def configurator_case(playwright, exe, donor):
             const result=new Promise((resolve,reject)=>{
               window.configHost.receive=m=>{if(m.id===id){window.configHost.receive=prior;m.ok?resolve(m.payload):reject(new Error(m.payload.message));}else prior(m);};
             });
-            window.chrome.webview.postMessage({id,type:'buildWebQuery',payload:{draft:{scene:'uc3d',showClock:true,volumetric:true,showPictures:!!donor,donorDirectory:donor||'',donorGlyphs:!!donor,sound:donor?'effects':'off',soundVolume:0}}});
+            window.chrome.webview.postMessage({id,type:'buildWebQuery',payload:{draft:{scene:'uc3d',uc3dControls:'legacy',showClock:true,volumetric:true,showPictures:!!donor,donorDirectory:donor||'',donorGlyphs:!!donor,sound:donor?'effects':'off',soundVolume:0}}});
             return await result;
         }""", donor)
         target = page.evaluate("query => {const frame=document.querySelector('#previewFrame');frame.src='https://matrix-preview.local/index.html'+query;return frame.src;}", result["query"])
@@ -353,7 +395,7 @@ def main():
     parser.add_argument("--publish",type=Path,default=ROOT/"artifacts/gate/win-x64-fd")
     parser.add_argument("--donor-directory",default="")
     parser.add_argument("--renderer",choices=["regl","webgpu","both"],default="both")
-    parser.add_argument("--case",choices=["runtime","configurator","defaults","all"],default="all")
+    parser.add_argument("--case",choices=["runtime","original","configurator","defaults","all"],default="all")
     options=parser.parse_args()
     ARTIFACTS.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as playwright:
@@ -364,6 +406,9 @@ def main():
         if options.case in ("runtime", "all"):
             for renderer in (["regl","webgpu"] if options.renderer=="both" else [options.renderer]):
                 runtime_case(playwright,options.publish/"MatrixDesktop.exe",renderer,options.donor_directory)
+        if options.case in ("original", "all"):
+            for renderer in (["regl","webgpu"] if options.renderer=="both" else [options.renderer]):
+                runtime_case(playwright,options.publish/"MatrixDesktop.exe",renderer,options.donor_directory,original=True)
         if options.case in ("configurator", "all"):
             configurator_case(playwright,options.publish/"MatrixDesktopConfigurator.exe",options.donor_directory)
     return 0

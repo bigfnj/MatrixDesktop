@@ -595,6 +595,14 @@ try {
         if ($LASTEXITCODE -ne 0) {
             Test-Fail 'headless web smoke' 'could not generate the loadState fixture'
         } else {
+            if ($node) {
+                $configTest = Join-Path $RepoRoot 'tests\uc3d-config-tests.mjs'
+                $configLog = Join-Path $env:TEMP 'md-gate-uc3d-config.log'
+                $configRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $configTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
+                    -RedirectStandardOutput $configLog -RedirectStandardError "$configLog.err"
+                if ($configRun.ExitCode -eq 0) { Test-Ok 'UC3D rebuilt slider metadata and web parsers agree' }
+                else { Test-Fail 'UC3D rebuilt slider metadata and web parsers agree' "see $configLog" }
+            } else { Test-Unchecked 'UC3D rebuilt slider metadata and web parsers agree' 'node is not on PATH' }
             $smokeLog = Join-Path $env:TEMP 'md-gate-web-smoke.log'
             $smokeRun = Start-Process -FilePath $py -ArgumentList ('"' + $smokeScript + '"') -Wait -PassThru -NoNewWindow `
                 -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"
@@ -633,11 +641,13 @@ try {
         Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
         Test-Unchecked 'native smoke process lifecycle' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
+        Test-Unchecked 'UC3D original WebGL calibration' 'Python with Playwright is unavailable'
     } else {
         foreach ($case in @(
             @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
             @{ Name = 'native smoke process lifecycle'; Script = 'tests\test_native_smoke.py'; Arguments = '' },
-            @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' }
+            @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
+            @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' }
         )) {
             $path = Join-Path $RepoRoot $case.Script
             $log = Join-Path $env:TEMP ('md-gate-' + ($case.Name -replace ' ', '-') + '.log')

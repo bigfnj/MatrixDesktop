@@ -6,7 +6,7 @@ Choose **UC3D** in the configurator's Theme section, or run:
 MatrixDesktop.exe --scene uc3d
 ```
 
-The UC3D defaults match the owner's installed screensaver settings captured on
+The UC3D defaults use the owner's installed screensaver settings captured on
 2026-10-23: purple code (`#8000FF`), pink highlights (`#FF80FF`), black background,
 3D rotation, random forward travel and sideways motion. Pictures, clock, sound,
 mouse control and desktop background start off. Explicit arguments override the
@@ -14,10 +14,10 @@ profile, including values that equal the ordinary Matrix defaults.
 
 | Installed setting | UC3D default |
 | --- | --- |
-| 500 lines, glyph size 12 | `numColumns=100`, `density=5`, giving 500 streams in landscape windows and native glyph half-size 0.12 |
-| Fall speed 6 | `fallSpeed=0.045` |
-| Forward speed 6 | `forwardSpeed=-0.675`; random travel is enabled, so this constant applies after random travel is disabled |
-| Picture delay 60, original episode timing | `pictureDelay=60`, `pictureDuration=30` |
+| 500 lines, glyph size 12 | `uc3dAmount=500`, `uc3dGlyphSize=12`; independent stream count and world half-size 0.12 |
+| Fall speed 6 | `uc3dFallSpeed=6`, randomized speeds 2 to 5.5 world units/second |
+| Forward speed 6 | `uc3dForwardSpeed=6`, target -5.4 world units/second; random travel is enabled, so this constant applies after random travel is disabled |
+| Picture delay 60, original episode timing | `uc3dPictureDelay=60`, `pictureDuration=30`; first picture starts after 20 seconds |
 | Green-only pictures disabled | `pictureMonochrome=false` |
 
 New **UC3D Trilogy** starter presets and untouched copies of the old starter
@@ -34,16 +34,28 @@ MatrixDesktop.exe --windowed --no-exit-on-any-key --scene uc3d --volumetric true
 
 ## Controls
 
-Use the existing font, columns, density, fall/forward speed, color, intensity,
-resolution, frame-rate and bloom controls alongside the UC3D section. Controls
-that apply only to the Matrix scene are disabled while UC3D is selected.
+**Original controls** provides independent sliders and numeric editors in the
+original units. More/Less is 100 to 1500 streams; glyph size is 10 to 40. Their
+values do not depend on the viewport, aspect ratio or 2D/3D choice. Streams enter
+over ten seconds, and each trail grows from one glyph to its chosen length.
+Visible coverage also depends on size, perspective, fading and the current pose.
+The fall slider's zero still falls. The forward slider's neutral point is 60.
+
+**Legacy controls** preserves the earlier columns/density/speed mapping for saved
+customized presets. Explicit generic layout or speed arguments select that mode;
+native-unit arguments select Original controls. An explicit `uc3dControls` wins.
+Inactive controls are disabled in the configurator and omitted from commands.
+Font, color, intensity, resolution, frame-rate and optional bloom remain shared.
+Original controls starts with bloom disabled, matching the native rain composition.
 
 - Enable **Mouse-controlled rotation** in 3D: move the pointer to rotate,
   right-click to stop, left-click to reset, and turn the wheel to roll. After
-  20 seconds without movement, automatic motion resumes. Pictures fade away
-  during interaction.
+  20 seconds without movement, automatic motion resumes. Original controls defers
+  a new picture while manual control is active; an existing formation continues.
 - Enable **Form pictures from code**, choose a personal picture folder, and
-  select a source. Picture scale preserves aspect ratio. Monochrome uses the
+  select a source. Original **Picture size: Large / Small** uses the native
+  sampling divisor, so higher values make the image smaller. Legacy scale fits
+  the image while preserving aspect ratio. Monochrome uses the
   code color; disabling it preserves picture colors. Relief depth changes
   glyph depth in 3D. Captions use imported titles or personal filenames.
 - Enable the clock for local 12- or 24-hour time. Clock size is independent
@@ -61,14 +73,21 @@ selection entries, with a 32 MiB limit per file. Personal folders are not walked
 recursively. Local music supports MP3, WAV, OGG and M4A with the same file limit.
 Unavailable folders, missing film groups and decoding failures are reported.
 Pictures are decoded at a maximum dimension of 1024 pixels for glyph sampling;
-the slideshow retains current/next decoded pictures rather than the entire
+Original controls caps personal pictures at 300 pixels, as the native loader did.
+The slideshow retains current/next decoded pictures rather than the entire
 library. GIF input is sampled as a picture, not played as a movie.
 
 The full flag list and allowed ranges are in the configurator and embedded
 argument guide. Useful defaults are `scene=matrix`, `showPictures=false`,
 `showClock=false`, `desktopBackground=false`, `sound=off`, `donorGlyphs=false`
 and `mouseRotation=false`. Selecting UC3D alone does not opt into desktop
-capture, pictures or sound. `fps=0` and `once=true` draw one frame.
+capture, pictures or sound. `fps=0` and `once=true` draw one frame. Original controls
+uses a ten-second simulation snapshot at the selected animation speed for that
+frame; at speed 1 the startup ramp is complete.
+Original pictures form through newly spawned streams, pan across the sampled
+image and retain those streams until they fall clear. The next image and selected
+gap begin after that clearance, so total time between pictures exceeds the forming
+duration and configured gap.
 
 ## Optional original donor media
 
@@ -116,7 +135,14 @@ exports outside a public checkout.
 This is fresh renderer source informed by the native program and its documented
 behavior. Native camera velocity ranges, mouse timeout, stream length, tail
 fade, shading range, world wrap and luminance relief informed the implementation.
-Existing MatrixDesktop speed/size controls use this compatibility mapping:
+Original controls uses a shared CPU stream simulation and instanced glyphs on
+both renderers. It reconstructs the 45-degree view, source-alpha composition,
+distance and tail fades, cell-sized glyph movement, growing trails, integrated
+and eased travel, automatic camera rest/move phases and mouse rotation. The CRT
+random generator is reproduced, but random call order and stream scheduling
+are modern implementations, so identical random frames are not claimed.
+
+Legacy controls retains the earlier compatibility mapping:
 
 | Control | UC3D interpretation |
 | --- | --- |
@@ -126,11 +152,11 @@ Existing MatrixDesktop speed/size controls use this compatibility mapping:
 | Raindrop length | `0.75` retains the native-style 10 to 39 glyph stream lengths and eight-glyph tail fade; other values scale the length. |
 | Picture relief | Sample luminance multiplied by `3 * pictureDepth` supplies the 3D offset; zero keeps the picture flat. |
 
-These mappings are implemented in the shared scene and both shaders. Picture assembly,
-the glyph layout and ambient synthesis are modern implementations; a byte-
-identical native rebuild and exact visual equivalence are not claimed. The
-native random-number sequence is not reproduced. Stream count still scales with
-window aspect ratio and the columns/density controls. The bundled font remains
+These legacy mappings are implemented in the shared scene and both shaders.
+Picture assembly, glyph layout and ambient synthesis remain reconstructed
+implementations; a byte-identical native rebuild is not claimed. Original-mode
+stream count stays independent of size and viewport. Legacy count still scales
+with aspect ratio and columns/density. The bundled font remains
 the default; choose a local donor atlas for the original character set.
 
 Both WebGL and WebGPU have a UC3D implementation. Browser tests assert the actual
@@ -145,7 +171,10 @@ rather than being hidden by a second backend. Initialization failures show
 an error notice and console error. An initialized runtime exposes
 `window.matrixRuntimeDiagnostics` (also `window.__matrixRuntime`) with the
 actual backend, readiness, frame count, picture/audio state, warnings, errors
-and disposal state. `ready` becomes true only after drawing a frame.
+and disposal state. Original mode also exposes actual active/target stream counts,
+glyph instance count, motion and `inspect()` stream/camera samples. `ready` becomes
+true only after drawing a frame. Following a long sleep or lock, original mode
+advances at most one simulation second on a resumed frame and drops the gap.
 
 Run `tests\run-gate.ps1` for the build, native regression harness, renderer
 lifecycle tests, importer tests, WebGL smoke and actual application smoke.
@@ -154,5 +183,8 @@ Hardware WebGPU browser coverage is available with
 adapter is an unverified result. `tests\native-uc3d-smoke.py` checks the published
 WebView2 runtime and configurator, including local-media grant boundaries and
 the preview bootstrap. The snapshot probe uses only a synthetic desktop cover.
-See [smoke and regression commands](../SMOKE_TEST_PLAN.md) for prerequisites,
+The [calibration record](UC3D-CALIBRATION.md) documents the original-runtime
+comparison, settings matrix and visual limits. Run
+`python tests\uc3d-calibration.py --channel msedge` for the original-unit cases
+on both backends, using bundled glyphs. See [smoke and regression commands](../SMOKE_TEST_PLAN.md) for prerequisites,
 artifact locations and physical hardware coverage limits.

@@ -303,6 +303,128 @@ def check_configurator(page, origin, state_json):
     else:
         ok("scene dependencies disable compound editors and restore editable controls")
 
+    # Exercise the actual paired editors and their saved payload, rather than
+    # merely asserting that range inputs exist in source or metadata.
+    scene.select_option("uc3d")
+    page.locator('[data-field="uc3dControls"] select').select_option("original")
+    page.locator('[data-field="showPictures"] input').check()
+    page.locator('[data-field="showClock"] input').check()
+    page.locator('[data-field="randomForwardMovement"] input').uncheck()
+    ranges = {
+        "uc3dAmount": (100, 1500, 500), "uc3dGlyphSize": (10, 40, 12),
+        "uc3dFallSpeed": (0, 150, 6), "uc3dForwardSpeed": (0, 120, 6),
+        "uc3dPictureScale": (100, 300, 100), "uc3dPictureDelay": (0, 120, 60),
+        "uc3dClockSize": (50, 170, 90),
+    }
+    problems = []
+    for key, (minimum, maximum, current) in ranges.items():
+        editor = page.locator(f'[data-field="{key}"]')
+        slider = editor.locator('input[type="range"]')
+        number = editor.locator('input[type="number"]')
+        if slider.count() != 1 or number.count() != 1:
+            problems.append(f"{key} is missing its paired slider/number editor")
+            continue
+        actual_range = slider.evaluate("node => [Number(node.min), Number(node.max), Number(node.step)]")
+        if actual_range != [minimum, maximum, 1]:
+            problems.append(f"{key} range {actual_range}")
+        for value in (minimum, (minimum + maximum) // 2, maximum, current):
+            slider.evaluate("(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }", value)
+            if number.input_value() != str(value):
+                problems.append(f"{key} slider {value} did not update its number")
+            number.fill(str(maximum if value != maximum else minimum))
+            if slider.input_value() != number.input_value():
+                problems.append(f"{key} number did not update its slider")
+        number.fill(str(current))
+    amount = page.locator('[data-field="uc3dAmount"] input[type="range"]')
+    amount.focus()
+    amount.press("End")
+    if page.locator('[data-field="uc3dAmount"] input[type="number"]').input_value() != "1500":
+        problems.append("the amount slider did not support keyboard End")
+    amount.press("Home")
+    page.locator('[data-field="uc3dAmount"] input[type="number"]').fill("500.9")
+    page.locator('[data-field="uc3dAmount"] input[type="number"]').blur()
+    page.wait_for_timeout(350)
+    saved = page.evaluate("window.__smokeMessages.filter(m => m.type === 'saveDraft').at(-1)?.payload.draft")
+    if not saved or saved.get("uc3dAmount") != 500 or saved.get("uc3dControls") != "original":
+        problems.append(f"paired edits saved the wrong amount or mode: {saved}")
+    if problems:
+        fail("UC3D sliders and numeric editors stay synchronized across their full ranges", "; ".join(problems))
+    else:
+        ok("UC3D sliders and numeric editors stay synchronized across their full ranges")
+
+    problems = []
+    def disabled_key(key, expected):
+        states = page.locator(f'[data-field="{key}"]').locator("input, select, button").evaluate_all(
+            "nodes => nodes.map(node => node.disabled)")
+        if not states or any(value != expected for value in states):
+            problems.append(f"{key} disabled states {states}, expected {expected}")
+    for key in ("numColumns", "density", "fallSpeed", "forwardSpeed", "raindropLength", "pictureScale", "pictureDelay", "clockSize", "cycleSpeed", "isometric"):
+        disabled_key(key, True)
+    for key in ranges:
+        disabled_key(key, False)
+    page.locator('[data-field="randomForwardMovement"] input').check()
+    disabled_key("uc3dForwardSpeed", True)
+    page.locator('[data-field="randomForwardMovement"] input').uncheck()
+    disabled_key("uc3dForwardSpeed", False)
+    page.locator('[data-field="forwardMovement"] input').uncheck()
+    disabled_key("uc3dForwardSpeed", True)
+    page.locator('[data-field="forwardMovement"] input').check()
+    page.locator('[data-field="volumetric"] input').uncheck()
+    disabled_key("uc3dForwardSpeed", True)
+    disabled_key("sidewaysMovement", True)
+    page.locator('[data-field="volumetric"] input').check()
+    late_number = page.locator('[data-field="uc3dAmount"] input[type="number"]').element_handle()
+    late_range = page.locator('[data-field="uc3dAmount"] input[type="range"]').element_handle()
+    page.locator('[data-field="uc3dControls"] select').select_option("legacy")
+    page.locator('[data-field="volumetric"] input').uncheck()
+    disabled_key("sidewaysMovement", False)
+    page.locator('[data-field="volumetric"] input').check()
+    for key in ranges:
+        disabled_key(key, True)
+    for key in ("numColumns", "density", "fallSpeed", "forwardSpeed", "raindropLength", "pictureScale", "pictureDelay", "clockSize", "cycleSpeed", "isometric"):
+        disabled_key(key, False)
+    page.wait_for_timeout(350)
+    before = page.evaluate("window.__smokeMessages.filter(m => m.type === 'saveDraft').length")
+    for node in (late_number, late_range):
+        node.evaluate("node => { node.value = 1499; node.dispatchEvent(new Event('input', {bubbles:true})); }")
+    page.wait_for_timeout(350)
+    after = page.evaluate("window.__smokeMessages.filter(m => m.type === 'saveDraft').length")
+    if after != before:
+        problems.append("late original-control callbacks changed a legacy draft")
+    page.locator('[data-field="uc3dControls"] select').select_option("original")
+    if page.locator('[data-field="uc3dAmount"] input[type="number"]').input_value() != "500":
+        problems.append("switching control units lost the original amount")
+    if problems:
+        fail("UC3D control modes disable inactive units and retain independent saved edits", "; ".join(problems))
+    else:
+        ok("UC3D control modes disable inactive units and retain independent saved edits")
+
+    problems = []
+    animation = page.locator('[data-field="animationSpeed"] input[type="number"]')
+    if animation.get_attribute("min") != "0":
+        problems.append("original animation speed did not expose a minimum of zero")
+    animation.fill("-2")
+    if animation.get_attribute("aria-invalid") != "true":
+        problems.append("negative original animation speed did not report validation")
+    animation.blur()
+    if animation.input_value() != "0":
+        problems.append("original animation speed did not clamp on blur")
+    page.locator('[data-field="uc3dControls"] select').select_option("legacy")
+    animation = page.locator('[data-field="animationSpeed"] input[type="number"]')
+    animation.fill("-2")
+    animation.blur()
+    if animation.input_value() != "-2" or animation.get_attribute("min") != "-4":
+        problems.append("legacy reverse animation was lost")
+    bloom = page.locator('[data-field="bloomStrength"] input[type="number"]')
+    bloom.fill("")
+    bloom.blur()
+    if bloom.input_value() != "0.7":
+        problems.append("legacy bloom did not revert to its own default")
+    if problems:
+        fail("UC3D animation validation respects original and legacy motion units", "; ".join(problems))
+    else:
+        ok("UC3D animation validation respects original and legacy motion units")
+
 
 def mean_luma(png_bytes):
     from PIL import Image  # imported lazily; main() reports CANNOT VERIFY if it is absent

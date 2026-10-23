@@ -1,4 +1,5 @@
 import uc3dDefaults from "./defaults.js";
+import { createNativeScene, nativeViewProjection } from "./native.js";
 
 // Independent recreation from the donor's documented behavior. Motion constants are
 // intentionally explicit: they are not claimed to be recovered original constants.
@@ -49,6 +50,7 @@ export const defaults = {
 
 export function createScene(options = {}, pictureCount = 0) {
   const config = { ...defaults, ...options };
+  if (config.uc3dControls !== "legacy") return createNativeScene(config, pictureCount);
   let elapsed = 0;
   let forwardPhase = 0;
   let lastInteraction = -Infinity;
@@ -198,4 +200,8 @@ export function projection(aspect, volumetric, webgpu = false, isometric = false
   m[10] = webgpu ? far / (near - far) : (far + near) / (near - far);
   m[14] = (webgpu ? far : 2 * far) * near / (near - far);
   return m;
+}
+
+export function viewProjection(aspect, config, state, webgpu = false) {
+  return config.uc3dControls !== "legacy" ? nativeViewProjection(aspect, config, state, webgpu) : projection(aspect, config.volumetric, webgpu, config.isometric);
 }

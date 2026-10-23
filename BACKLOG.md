@@ -8,8 +8,8 @@ resolved below. Deferred product features remain a separate-session list by owne
 **Verify before you trust anything.** One command, and it is the whole story:
 
 ```pwsh
-pwsh -File tests\run-gate.ps1              # 50 checks, needs a desktop session
-pwsh -File tests\run-gate.ps1 -Tier1Only   # 20 checks, what CI runs, no session needed
+pwsh -File tests\run-gate.ps1              # 52 checks, needs a desktop session
+pwsh -File tests\run-gate.ps1 -Tier1Only   # 22 checks, what CI runs, no session needed
 ```
 
 Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` is not a pass.**
@@ -27,11 +27,11 @@ gate is decoration.
 
 | Layer | Catches | Blind to |
 | --- | --- | --- |
-| `tests\MatrixDesktop.Tests` (103 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
+| `tests\MatrixDesktop.Tests` (108 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
-| `tests\web-smoke.py` (14 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+| `tests\web-smoke.py` (17 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies, paired sliders and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 | `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
-| `tests\uc3d-browser.py`, `tests\native-uc3d-smoke.py` | actual backend readiness, picture/depth behavior and published native media delivery | physical Looking Glass hardware |
+| `tests\uc3d-browser.py`, `tests\uc3d-calibration.py`, `tests\native-uc3d-smoke.py` | actual backend readiness, original slider/stream semantics, picture/depth behavior and published native media delivery | physical Looking Glass hardware |
 
 That middle blind spot is not hypothetical. v1.0.2 shipped with the configurator's entire
 command panel below the bottom of the window and every pixel statistic looked fine.
@@ -60,8 +60,32 @@ two of them used to share the heading "Worth doing", which is how a v1.0.5 summa
 claim the backlog was empty when three items were still open. Anything struck through below
 has shipped.
 
-No active items remain in the agreed scope. This closure ledger preserves every former
-Open row; the historical sections below describe their original diagnoses.
+No active items remain. The owner requested a further UC3D calibration pass after
+the earlier compatibility implementation; every item from that pass is retained
+with its disposition below. Deferred features remain a separate-session list.
+
+| Calibration item | Disposition | Implementation and checkable evidence |
+| --- | --- | --- |
+| Independent original sliders and complete amount range | FIXED | Seven native-unit sliders plus numeric editors; amount 100 to 1500 independent of size/view/2D; compatibility preserves custom drafts. C# command/migration tests, rebuilt metadata parity and actual UI synchronization checks. Disabled export/synchronization guards cause their named failures. |
+| Native stream population, size and visible coverage | FIXED | Bounded instanced stream simulation, startup/growth, 45-degree view, native 2D sizing, source-alpha/tail/distance fade and replaced leaders. 44 actual-backend calibration cases plus inspected original/backend triptychs. Coupled amount, instant startup, wrong FOV and zero shader alpha mutations are killed. |
+| Native motion and camera behavior | FIXED | Integrated/eased/wrapped travel, zero fall-slider movement, rest/move phases, neutral returns and quaternion input. Equation tests kill frozen fall/nonintegrated travel/no-rest mutations. Published apps verify move, stop, reset, roll and idle return on both backends. |
+| Original-runtime comparison evidence | CLOSED-VERIFIED | 23 original-process cases, nine captures each; four 25-frame motion recordings. Binary hashes and both registry branches unchanged. Accelerated versus unaccelerated control has byte-identical images and state at all nine timestamps. Comparison method and measured limitations are recorded in `docs/UC3D-CALIBRATION.md`. |
+
+The concrete implementation and comparison plan is in [UC3D calibration](docs/UC3D-CALIBRATION.md).
+
+| Calibration audit finding | Disposition | Evidence |
+| --- | --- | --- |
+| Inactive units, cycle timing, isometric and original 2D sideways controls remained operable | FIXED | Mode-aware UI gating and active-unit command export, preserving alternate saved values. Explicit old cycle/isometric commands select legacy unless native controls or an explicit mode override them; order and command/preview round trips are checked. Control-lane mutations fail their intended checks, including the 2D sideways guard. |
+| Original animation accepted reverse values without reversing | FIXED | Original multiplier is 0 to 4 in import, UI and native simulation. Legacy reverse values remain. Import/UI/direct-simulation mutation witnesses cover all paths. |
+| Sleep/resume could simulate the entire missed interval | FIXED | Original render loop caps resumed work at one second and drops debt. Cadence/resume test kills the uncapped-time mutation. |
+| Disposed runtime retained packed geometry and picture references | FIXED | Runtime clears grid/photo/desktop references; native scene frees its packed buffer and streams. Actual-backend disposal checks stop frames and remove overlays. |
+| Once and FPS-zero mode captured empty startup | FIXED | Original single-frame modes render at ten seconds of selected animation speed. Named test kills time-zero mutation; four published-app cases show visible code with exactly one frame. |
+| Picture formation colored old rain and used fitted scale/fixed timing | FIXED | Tagged-only image sampling, inverse native size, sinusoidal grid and wait-for-clear countdown; original personal decode limit 300 pixels. Native tests kill missing tag, reversed scale, static pan, early image switch and wrong decode cap. Both published backends render granted red/green pictures. |
+| Grayscale atlas mask appeared to be applied twice | CLOSED-VERIFIED | Native loader preserves grayscale RGB and sets alpha to max RGB, then uses source-alpha blending. Double intensity is intentional for the original bitmap atlas. |
+
+Existing Frida, Ghidra, UPX, FFmpeg and the toolbox Python were sufficient. No new
+tool installation or scripts-utilities catalog addition was needed. Original
+assets and analysis/capture data remain private; no donor payload was added here.
 
 | Former Open item | Disposition | Implementation and checkable evidence |
 | --- | --- | --- |

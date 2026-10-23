@@ -72,6 +72,14 @@ const rgb = (...values) => ({ space: "rgb", values });
 const defaults = {
 	// UC3D is opt-in; the original scene remains the default.
 	scene: "matrix",
+	uc3dControls: "original",
+	uc3dAmount: 500,
+	uc3dGlyphSize: 12,
+	uc3dFallSpeed: 6,
+	uc3dForwardSpeed: 6,
+	uc3dPictureScale: 100,
+	uc3dPictureDelay: 60,
+	uc3dClockSize: 90,
 	donorGlyphs: false,
 	codeColor: rgb(0, 0.698, 0),
 	shadedLines: true,
@@ -495,7 +503,21 @@ const parsePalette = (isHSL) => (s) => {
 		});
 };
 
+const parseSliderInt = (min, max) => (s) => {
+	const value = String(s).trim();
+	const parsed = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value) ? Number(value) : NaN;
+	return Number.isFinite(parsed) ? range(Math.trunc(parsed), min, max) : null;
+};
+
 const paramMapping = {
+	uc3dControls: { key: "uc3dControls", parser: (s) => ["original", "legacy"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
+	uc3dAmount: { key: "uc3dAmount", parser: parseSliderInt(100, 1500) },
+	uc3dGlyphSize: { key: "uc3dGlyphSize", parser: parseSliderInt(10, 40) },
+	uc3dFallSpeed: { key: "uc3dFallSpeed", parser: parseSliderInt(0, 150) },
+	uc3dForwardSpeed: { key: "uc3dForwardSpeed", parser: parseSliderInt(0, 120) },
+	uc3dPictureScale: { key: "uc3dPictureScale", parser: parseSliderInt(100, 300) },
+	uc3dPictureDelay: { key: "uc3dPictureDelay", parser: parseSliderInt(0, 120) },
+	uc3dClockSize: { key: "uc3dClockSize", parser: parseSliderInt(50, 170) },
 	donorGlyphs: { key: "donorGlyphs", parser: isTrue },
 	codeColor: { key: "codeColor", parser: parseColor(false) },
 	scene: { key: "scene", parser: (s) => ["matrix", "uc3d"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
@@ -618,6 +640,12 @@ export default (urlParams) => {
 			.map(([key, value]) => [paramMapping[key].key, paramMapping[key].parser(value)])
 			.filter(([_, value]) => value != null),
 	);
+	if (validParams.scene === "uc3d" && validParams.uc3dControls == null) {
+		const nativeKeys = ["uc3dAmount", "uc3dGlyphSize", "uc3dFallSpeed", "uc3dForwardSpeed", "uc3dPictureScale", "uc3dPictureDelay", "uc3dClockSize"];
+		const legacyKeys = ["numColumns", "density", "fallSpeed", "forwardSpeed", "raindropLength", "pictureScale", "pictureDelay", "clockSize", "cycleSpeed", "isometric"];
+		validParams.uc3dControls = nativeKeys.some(key => key in validParams) ? "original"
+			: legacyKeys.some(key => key in validParams) ? "legacy" : "original";
+	}
 
 	if (validParams.effect != null) {
 		if (validParams.cursorColor == null && validParams.scene !== "uc3d") {
@@ -657,6 +685,14 @@ export default (urlParams) => {
 		hasBaseTexture,
 		hasGlintTexture,
 	};
+	if (config.scene === "uc3d" && config.uc3dControls === "original") {
+		config.animationSpeed = range(config.animationSpeed, 0, 4);
+		config.pictureScale = config.uc3dPictureScale / 100;
+		config.pictureDelay = config.uc3dPictureDelay;
+		config.clockSize = config.uc3dClockSize / 90;
+	}
+	if (config.scene === "uc3d" && config.uc3dControls === "legacy" && validParams.bloomStrength == null)
+		config.bloomStrength = defaults.bloomStrength;
 
 	if (config.bloomSize <= 0) {
 		config.bloomStrength = 0;

@@ -473,7 +473,8 @@ every referenced shader and asset resolving, a headless DOM smoke, the embedded 
 guide, a window icon in both executables at every size the app asks for, the guide header's
 version matching both csproj, embedded source-line symbols, and the publish payload.
 The UC3D WebGL browser smoke checks rendered picture colors and relief as well as
-animation and disposal. The runtime tiers create real windows
+animation and disposal. The original-control WebGL calibration checks slider endpoints, independent
+population/size, 2D/portrait, motion and cleanup. The runtime tiers create real windows
 and capture frames, so they need an attached session and cannot run on a headless runner.
 
 One tier-1 check is about the gate itself: it asserts the publish flags it uses appear in

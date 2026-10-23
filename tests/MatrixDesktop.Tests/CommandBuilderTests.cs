@@ -26,6 +26,11 @@ internal static class CommandBuilderTests
         ("UC3D overrides equal to Matrix defaults survive commands and previews", Uc3dMatrixDefaultOverrides),
         ("The untouched UC3D starter migrates to the current profile once", Uc3dStarterMigrates),
         ("UC3D starter migration preserves edited renamed and deleted presets", Uc3dStarterEditsSurvive),
+        ("UC3D original slider ranges retain endpoints and clamp finite integers", Uc3dSliderRanges),
+        ("UC3D explicit control mode and native options take precedence in either order", Uc3dControlInference),
+        ("UC3D commands omit inactive units while preserving saved values", Uc3dInactiveUnits),
+        ("The untouched version 4 UC3D starter migrates without changing custom drafts", Uc3dVersion4Migration),
+        ("UC3D randomization edits active controls and retains the alternate unit set", Uc3dRandomization),
     ];
 
     private static readonly ConfiguratorMetadata Metadata = ArgumentCatalog.Create();
@@ -196,6 +201,7 @@ internal static class CommandBuilderTests
     private static void Uc3dMatrixDefaultOverrides()
     {
         var draft = Builder.CreateSceneDefaultDraft("uc3d");
+        draft["uc3dControls"] = "legacy";
         draft["volumetric"] = false;
         draft["sidewaysMovement"] = false;
         draft["fallSpeed"] = 0.3;
@@ -212,6 +218,7 @@ internal static class CommandBuilderTests
     private static UserPreset PreviousUc3dStarter()
     {
         var draft = Draft();
+        RemoveOriginalControls(draft);
         draft["scene"] = "uc3d";
         draft["volumetric"] = true;
         draft["randomForwardMovement"] = true;
@@ -232,7 +239,7 @@ internal static class CommandBuilderTests
             SelectedPresetId = previous.Id,
             LastDraft = StorageService.CloneObject(previous.Values),
         };
-        Check.True(PresetSeeder.Seed(state, Builder, Importer), "version 4 must run for the previous starter");
+        Check.True(PresetSeeder.Seed(state, Builder, Importer), "the current migration must run for the previous starter");
         Check.True(JsonNode.DeepEquals(Builder.CreateSceneDefaultDraft("uc3d"), previous.Values), "the exact old starter must use the current profile");
         Check.True(JsonNode.DeepEquals(previous.Values, state.LastDraft), "an untouched selected starter draft must migrate with its preset");
         Check.Equal(1, state.UserPresets.Count, "migration updates the starter without duplicates");
@@ -247,8 +254,11 @@ internal static class CommandBuilderTests
             if (edit == "value") previous.Values["numColumns"] = 123.0;
             if (edit == "name") previous.Name = "My UC3D";
             var savedValues = previous.Values.DeepClone();
+            savedValues["uc3dControls"] = "legacy";
             var lastDraft = StorageService.CloneObject(previous.Values);
             lastDraft["numColumns"] = 111.0;
+            var expectedDraft = StorageService.CloneObject(lastDraft);
+            expectedDraft["uc3dControls"] = "legacy";
             var state = new ConfiguratorState
             {
                 PresetSeedVersion = 3,
@@ -256,11 +266,176 @@ internal static class CommandBuilderTests
                 SelectedPresetId = previous.Id,
                 LastDraft = StorageService.CloneObject(lastDraft),
             };
-            Check.True(PresetSeeder.Seed(state, Builder, Importer), "version 4 advances even when no preset can change");
+            Check.True(PresetSeeder.Seed(state, Builder, Importer), "the seed version advances even when no preset can change");
             if (edit == "deleted") Check.Equal(0, state.UserPresets.Count, "a deleted starter must remain deleted");
             else if (edit != "unsaved draft") Check.True(JsonNode.DeepEquals(savedValues, previous.Values), "a user-owned starter must retain its values: " + edit);
-            Check.True(JsonNode.DeepEquals(lastDraft, state.LastDraft), "a custom unsaved draft must survive: " + edit);
+            Check.True(JsonNode.DeepEquals(expectedDraft, state.LastDraft), "a custom unsaved draft must survive: " + edit);
             Check.Equal(edit == "name" ? "My UC3D" : "UC3D Trilogy", previous.Name, "preset names must survive migration");
         }
+    }
+
+    private static void RemoveOriginalControls(JsonObject draft)
+    {
+        draft.Remove("uc3dControls");
+        foreach (var key in Uc3dControlProfile.NativeKeys) draft.Remove(key);
+    }
+
+    private static void Uc3dSliderRanges()
+    {
+        var ranges = new (string Key, double Min, double Max, double Default)[]
+        {
+            ("uc3dAmount", 100, 1500, 500), ("uc3dGlyphSize", 10, 40, 12),
+            ("uc3dFallSpeed", 0, 150, 6), ("uc3dForwardSpeed", 0, 120, 6),
+            ("uc3dPictureScale", 100, 300, 100), ("uc3dPictureDelay", 0, 120, 60),
+            ("uc3dClockSize", 50, 170, 90),
+        };
+        foreach (var (key, min, max, expectedDefault) in ranges)
+        {
+            var field = Metadata.Groups.SelectMany(group => group.Fields).Single(field => field.Id == key);
+            Check.True(field.Slider && field.Step == 1 && field.Min == min && field.Max == max, key + " must expose the original integer slider range");
+            foreach (var input in new[] { min - 1, min, (min + max) / 2, max, max + 1, expectedDefault })
+            {
+                var draft = Importer.Import($"--scene uc3d --{key} {input.ToString(System.Globalization.CultureInfo.InvariantCulture)}", Draft()).Draft;
+                Check.Close(Math.Clamp(Math.Truncate(input), min, max), (double)draft[key]!, 1e-9, key + " must retain and clamp original values");
+                Check.Equal("original", (string)draft["uc3dControls"]!, key + " must select original units");
+                var reimported = Importer.Import(Cmd(draft), Draft()).Draft;
+                Check.True(JsonNode.DeepEquals(draft[key], reimported[key]), key + " must survive command export");
+            }
+            foreach (var invalid in new[] { "NaN", "Infinity", "broken", "0x10", "0b1100" })
+            {
+                var result = Importer.Import($"--scene uc3d --{key} {invalid}", Draft());
+                Check.True(result.Ignored.Contains(key), key + " must reject " + invalid);
+                Check.Close(expectedDefault, (double)result.Draft[key]!, 1e-9, key + " invalid input must retain its default");
+            }
+        }
+    }
+
+    private static void Uc3dControlInference()
+    {
+        foreach (var options in new[] { "--numColumns 120 --uc3dAmount 800", "--uc3dAmount 800 --numColumns 120" })
+        {
+            var original = Importer.Import("--scene uc3d " + options, Draft()).Draft;
+            Check.Equal("original", (string)original["uc3dControls"]!, "native keys must win over inferred legacy mode");
+            foreach (var explicitOptions in new[] { "--uc3dControls legacy " + options, options + " --uc3dControls legacy" })
+            {
+                var legacy = Importer.Import("--scene uc3d " + explicitOptions, Draft()).Draft;
+                Check.Equal("legacy", (string)legacy["uc3dControls"]!, "explicit mode must win in either order");
+            }
+        }
+        foreach (var key in Uc3dControlProfile.LegacyKeys)
+        {
+            var legacy = Importer.Import($"--{key} 1 --scene uc3d", Draft()).Draft;
+            Check.Equal("legacy", (string)legacy["uc3dControls"]!, "generic " + key + " must preserve legacy commands");
+        }
+        foreach (var (key, requested) in new[] { ("cycleSpeed", "--cycleSpeed 0.2"), ("isometric", "--isometric true") })
+        {
+            foreach (var (options, expectedMode) in new[]
+            {
+                (requested, "legacy"),
+                (requested + " --uc3dAmount 800", "original"),
+                ("--uc3dAmount 800 " + requested, "original"),
+                ("--uc3dControls original " + requested, "original"),
+                (requested + " --uc3dControls original", "original"),
+            })
+            {
+                var draft = Importer.Import("--scene uc3d " + options, Draft()).Draft;
+                Check.Equal(expectedMode, (string)draft["uc3dControls"]!, key + " must respect native and explicit mode precedence in either order");
+                foreach (var exported in new[] { Cmd(draft), Builder.BuildWebQueryString(draft) })
+                {
+                    var imported = Importer.Import(exported, Draft()).Draft;
+                    Check.Equal(expectedMode, (string)imported["uc3dControls"]!, key + " mode must survive command and preview exports");
+                    if (expectedMode == "legacy") Check.True(JsonNode.DeepEquals(draft[key], imported[key]), key + " requested value must survive legacy exports");
+                }
+            }
+        }
+        foreach (var (value, expected) in new[] { (-2.0, 0.0), (0.0, 0.0), (1.5, 1.5), (10.0, 4.0) })
+        {
+            var original = Importer.Import("--scene uc3d --animationSpeed " + value.ToString(System.Globalization.CultureInfo.InvariantCulture), Draft()).Draft;
+            Check.Close(expected, (double)original["animationSpeed"]!, 1e-9, "original controls must accept only nonnegative animation multipliers");
+        }
+        var reverseLegacy = Importer.Import("--scene uc3d --uc3dControls legacy --animationSpeed -2", Draft()).Draft;
+        Check.Close(-2, (double)reverseLegacy["animationSpeed"]!, 1e-9, "legacy controls must retain reverse animation");
+    }
+
+    private static void Uc3dInactiveUnits()
+    {
+        var original = Builder.CreateSceneDefaultDraft("uc3d");
+        original["cycleSpeed"] = 0.987;
+        original["isometric"] = true;
+        original["numColumns"] = 123.0;
+        original["density"] = 7.0;
+        original["pictureScale"] = 2.0;
+        original["uc3dAmount"] = 800.0;
+        var before = original.DeepClone();
+        foreach (var key in new[] { "cycleSpeed", "isometric" }.Concat(Uc3dControlProfile.LegacyKeys))
+        {
+            Check.DoesNotContain(Builder.BuildCommand(original, true, false), "--" + key + " ", "original exports must omit inactive " + key);
+            Check.DoesNotContain(Builder.BuildWebQueryString(original), key + "=", "original preview must omit inactive " + key);
+        }
+        Check.Equal("original", (string)Importer.Import(Cmd(original), Draft()).Draft["uc3dControls"]!, "export must retain original mode");
+        Check.True(JsonNode.DeepEquals(before, original), "export must preserve inactive values in the saved draft");
+        original["uc3dControls"] = "legacy";
+        foreach (var key in Uc3dControlProfile.NativeKeys)
+            Check.DoesNotContain(Builder.BuildCommand(original, true, false), "--" + key + " ", "legacy exports must omit native " + key);
+        var command = Cmd(original);
+        Check.Contains(command, "--uc3dControls legacy", "legacy mode must be explicit even when generic values happen to match defaults");
+        var restored = Importer.Import(command, Draft()).Draft;
+        Check.Close(123, (double)restored["numColumns"]!, 1e-9, "legacy columns must survive");
+        Check.Close(7, (double)restored["density"]!, 1e-9, "legacy density must survive");
+    }
+
+    private static void Uc3dVersion4Migration()
+    {
+        foreach (var edit in new[] { "none", "value", "name", "deleted", "draft" })
+        {
+            var values = Builder.CreateSceneDefaultDraft("uc3d");
+            RemoveOriginalControls(values);
+            values["bloomStrength"] = 0.7;
+            if (edit == "value") values["fallSpeed"] = -3.75;
+            var preset = new UserPreset { Id = "seed-uc3d-trilogy", Name = edit == "name" ? "My UC3D" : "UC3D Trilogy", Values = values };
+            var lastDraft = StorageService.CloneObject(values);
+            if (edit == "draft") lastDraft["density"] = 7.333;
+            var state = new ConfiguratorState { PresetSeedVersion = 4, UserPresets = edit == "deleted" ? [] : [preset], SelectedPresetId = preset.Id, LastDraft = lastDraft };
+            var saved = StorageService.CloneObject(values);
+            saved["uc3dControls"] = "legacy";
+            var expectedDraft = StorageService.CloneObject(lastDraft);
+            expectedDraft["uc3dControls"] = "legacy";
+            Check.True(PresetSeeder.Seed(state, Builder, Importer), "version 5 must run");
+            if (edit is "none" or "draft")
+                Check.True(JsonNode.DeepEquals(Builder.CreateSceneDefaultDraft("uc3d"), preset.Values), "untouched starter must use original controls");
+            else if (edit != "deleted")
+                Check.True(JsonNode.DeepEquals(saved, preset.Values), "custom starter must preserve its complete values");
+            Check.True(JsonNode.DeepEquals(edit == "none" ? Builder.CreateSceneDefaultDraft("uc3d") : expectedDraft, state.LastDraft), "selected or custom draft must migrate deliberately: " + edit);
+            if (edit == "deleted") Check.Equal(0, state.UserPresets.Count, "a deleted starter must remain deleted");
+            Check.Equal(5, state.PresetSeedVersion, "seed version must advance once");
+            Check.True(!PresetSeeder.Seed(state, Builder, Importer), "a second load must not migrate again");
+        }
+    }
+
+    private static void Uc3dRandomization()
+    {
+        var original = Builder.CreateSceneDefaultDraft("uc3d");
+        original["numColumns"] = 123.0;
+        original["fallSpeed"] = -3.75;
+        var randomized = new DraftRandomizer(1234).Randomize(original, "motion");
+        Check.True(new[] { "uc3dAmount", "uc3dGlyphSize", "uc3dFallSpeed", "uc3dForwardSpeed" }.Any(key => !JsonNode.DeepEquals(original[key], randomized[key])), "motion randomization must change original sliders");
+        foreach (var key in Uc3dControlProfile.LegacyKeys)
+            Check.True(JsonNode.DeepEquals(original[key], randomized[key]), "randomization must retain inactive " + key);
+        foreach (var key in new[] { "uc3dAmount", "uc3dGlyphSize", "uc3dFallSpeed", "uc3dForwardSpeed" })
+        {
+            var field = Metadata.Groups.SelectMany(group => group.Fields).Single(field => field.Id == key);
+            var value = (double)randomized[key]!;
+            Check.True(value >= field.Min && value <= field.Max && value == Math.Truncate(value), key + " randomized outside original slider units");
+        }
+        var colors = new DraftRandomizer(1234).Randomize(original, "colors");
+        Check.True(!JsonNode.DeepEquals(original["codeColor"], colors["codeColor"]), "color randomization must change the active UC3D code color");
+        original["uc3dControls"] = "legacy";
+        var legacy = new DraftRandomizer(1234).Randomize(original, "motion");
+        Check.True(!JsonNode.DeepEquals(original["numColumns"], legacy["numColumns"]), "legacy randomization must keep editing legacy columns");
+        foreach (var key in Uc3dControlProfile.NativeKeys)
+            Check.True(JsonNode.DeepEquals(original[key], legacy[key]), "legacy randomization must retain inactive " + key);
+        var importedLegacy = Importer.Import("--scene uc3d --fallSpeed -3.75", Draft()).Draft;
+        Check.Close(0.7, (double)importedLegacy["bloomStrength"]!, 1e-9, "legacy commands must retain the earlier bloom default");
+        Check.DoesNotContain(Cmd(importedLegacy), "--bloomStrength", "legacy bloom at its default must remain compact");
     }
 }

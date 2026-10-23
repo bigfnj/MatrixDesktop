@@ -6,7 +6,7 @@ namespace MatrixDesktopConfigurator;
 
 internal static class PresetSeeder
 {
-    private const int CurrentSeedVersion = 4;
+    private const int CurrentSeedVersion = 5;
 
     private static readonly StarterPreset[] StarterPresets =
     [
@@ -27,24 +27,26 @@ internal static class PresetSeeder
 
     public static bool Seed(ConfiguratorState state, CommandBuilder commandBuilder, ArgumentImporter importer)
     {
-        if (state.PresetSeedVersion >= CurrentSeedVersion)
-        {
-            return false;
-        }
-
         var isFirstSeed = state.PresetSeedVersion == 0;
         var now = DateTimeOffset.UtcNow;
-        // Only the exact, untouched starter from version 3 belongs to this migration.
+        // Only the exact, untouched starters from versions 3 and 4 belong to this migration.
         // Renaming, editing, or deleting it is a user choice that must survive.
         var previousUc3d = state.UserPresets.FirstOrDefault(preset => preset.Id == "seed-uc3d-trilogy");
-        if (state.PresetSeedVersion == 3 && previousUc3d?.Name == "UC3D Trilogy"
-            && JsonNode.DeepEquals(previousUc3d.Values, PreviousUc3dTemplate(commandBuilder)))
+        if (previousUc3d?.Name == "UC3D Trilogy"
+            && ((state.PresetSeedVersion == 3 && JsonNode.DeepEquals(previousUc3d.Values, PreviousUc3dTemplate(commandBuilder)))
+                || (state.PresetSeedVersion == 4 && JsonNode.DeepEquals(previousUc3d.Values, PreviousUc3dProfile(commandBuilder)))))
         {
             if (state.SelectedPresetId == previousUc3d.Id && JsonNode.DeepEquals(state.LastDraft, previousUc3d.Values))
                 state.LastDraft = commandBuilder.CreateSceneDefaultDraft("uc3d");
             previousUc3d.Values = commandBuilder.CreateSceneDefaultDraft("uc3d");
             previousUc3d.UpdatedUtc = now;
         }
+        // Mark old drafts before the UI merges new defaults. Generic values and names
+        // remain intact; only the exact untouched starter opts into original controls.
+        var normalized = Uc3dControlProfile.NormalizeSavedDraft(state.LastDraft);
+        foreach (var preset in state.UserPresets)
+            normalized |= Uc3dControlProfile.NormalizeSavedDraft(preset.Values);
+        if (state.PresetSeedVersion >= CurrentSeedVersion) return normalized;
         foreach (var preset in StarterPresets)
         {
             var imported = importer.Import(preset.Command, commandBuilder.CreateDefaultDraft());
@@ -80,6 +82,7 @@ internal static class PresetSeeder
     private static JsonObject PreviousUc3dTemplate(CommandBuilder commandBuilder)
     {
         var draft = commandBuilder.CreateDefaultDraft();
+        RemoveOriginalControls(draft);
         draft["scene"] = "uc3d";
         draft["volumetric"] = true;
         draft["randomForwardMovement"] = true;
@@ -88,6 +91,20 @@ internal static class PresetSeeder
         draft["pictureDelay"] = 60.0;
         draft["pictureDuration"] = 30.0;
         return draft;
+    }
+
+    private static JsonObject PreviousUc3dProfile(CommandBuilder commandBuilder)
+    {
+        var draft = commandBuilder.CreateSceneDefaultDraft("uc3d");
+        RemoveOriginalControls(draft);
+        draft["bloomStrength"] = 0.7;
+        return draft;
+    }
+
+    private static void RemoveOriginalControls(JsonObject draft)
+    {
+        draft.Remove("uc3dControls");
+        foreach (var key in Uc3dControlProfile.NativeKeys) draft.Remove(key);
     }
 
     private sealed record StarterPreset(string Id, string Name, string Command, int IntroducedVersion = 1);

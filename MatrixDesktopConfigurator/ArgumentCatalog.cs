@@ -10,6 +10,15 @@ internal static class ArgumentCatalog
         {
             ["uc3d"] = new()
             {
+                ["uc3dControls"] = "original",
+                ["uc3dAmount"] = 500.0,
+                ["uc3dGlyphSize"] = 12.0,
+                ["uc3dFallSpeed"] = 6.0,
+                ["uc3dForwardSpeed"] = 6.0,
+                ["uc3dPictureScale"] = 100.0,
+                ["uc3dPictureDelay"] = 60.0,
+                ["uc3dClockSize"] = 90.0,
+                ["bloomStrength"] = 0.0,
                 ["volumetric"] = true,
                 ["numColumns"] = 100.0,
                 ["density"] = 5.0,
@@ -183,6 +192,16 @@ internal static class ArgumentCatalog
                 Title = "UC3D",
                 Fields =
                 [
+                    Select("uc3dControls", "Control units", "web", "original",
+                        "Original controls use the screensaver's slider values. Legacy controls preserve existing MatrixDesktop presets.",
+                        ("original", "Original screensaver controls"), ("legacy", "Legacy MatrixDesktop controls")),
+                    Slider("uc3dAmount", "Code amount: Less / More", 500, 100, 1500, "Number of falling code streams. Independent of code size."),
+                    Slider("uc3dGlyphSize", "Code size: Small / Large", 12, 10, 40, "Original code-size slider units."),
+                    Slider("uc3dFallSpeed", "Fall speed: Slow / Fast", 6, 0, 150, "Original fall-speed slider. Zero retains the original minimum falling motion."),
+                    Slider("uc3dForwardSpeed", "Travel: Backward / Forward", 6, 0, 120, "60 is stationary. Used for constant travel when random movement is off."),
+                    Slider("uc3dPictureScale", "Picture size: Large / Small", 100, 100, 300, "Original slider units. Higher values form a smaller picture."),
+                    Slider("uc3dPictureDelay", "Picture delay (seconds)", 60, 0, 120, "Original wait between picture sequences."),
+                    Slider("uc3dClockSize", "Clock size: Small / Large", 90, 50, 170, "Original clock-size slider units; 90 is the installed default."),
                     Color("codeColor", "Normal code color", "web", 0, 0.698, 0),
                     Toggle("donorGlyphs", "Use local donor glyphs", "web", false, "donorGlyphs", help: "Use the original character atlas from your imported donor media folder."),
                     Toggle("shadedLines", "Shaded 2D lines", "web", true, "shadedLines"),
@@ -273,6 +292,21 @@ internal static class ArgumentCatalog
         Help = help,
     };
 
+    private static ArgumentDefinition Slider(string id, string label, double defaultValue, double min, double max, string help) => new()
+    {
+        Id = id,
+        ArgName = id,
+        Label = label,
+        Kind = "number",
+        Scope = "web",
+        DefaultValue = defaultValue,
+        Min = min,
+        Max = max,
+        Step = 1,
+        Slider = true,
+        Help = help,
+    };
+
     private static ArgumentDefinition Text(string id, string label, string scope, string defaultValue) => new()
     {
         Id = id,
@@ -354,6 +388,7 @@ internal sealed class ArgumentDefinition
     public double? Min { get; init; }
     public double? Max { get; init; }
     public double? Step { get; init; }
+    public bool Slider { get; init; }
 }
 
 internal sealed class ArgumentOption

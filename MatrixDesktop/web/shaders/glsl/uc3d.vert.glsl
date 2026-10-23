@@ -2,10 +2,38 @@ precision highp float;
 attribute vec4 cell;
 attribute vec2 corner;
 attribute vec4 photo;
+attribute vec4 origin, glyphState;
 uniform mat4 projection;
 uniform vec4 scene0, scene1, scene2, scene3, scene4, scene5, scene6, codeColor, cursorColor;
+uniform vec4 glyphOptions;
 varying vec2 glyphUV;
 varying vec3 glyphColor;
+varying float glyphAlpha;
+
+void originalGlyph() {
+  float halfSize = glyphOptions.z;
+  vec3 p = origin.xyz + vec3((corner.x - 0.5) * 2.0 * halfSize / max(scene6.y, 0.1),
+    (cell.y * scene6.z + corner.y - 0.5) * 2.0 * halfSize, 0.0);
+  float weight = scene2.z * photo.a;
+  float luminance = (photo.r + photo.g + photo.b) / 3.0;
+  if (scene2.w > 0.5 && photo.a > 0.0) p.z = luminance * 3.0 * scene4.x;
+  gl_Position = projection * vec4(p, 1.0);
+  vec3 rainColor = cell.y < 0.5 ? cursorColor.rgb * scene4.w * 0.5 : codeColor.rgb * scene4.z;
+  vec3 pictureColor = codeColor.rgb * luminance;
+  if (scene4.y < 0.5) pictureColor = mix(pictureColor, photo.rgb, weight);
+  glyphColor = photo.a > 0.0 ? pictureColor * scene4.z : rainColor;
+  float alpha = glyphState.z * glyphState.w;
+  if (scene2.w < 0.5 && scene3.w > 0.5) alpha *= cell.w;
+  glyphAlpha = photo.a > 0.0 ? 1.0 : clamp(alpha, 0.0, 1.0);
+  float symbol = mod(glyphState.x, scene3.z);
+  vec2 local = corner - 0.5;
+  if (glyphState.y > 0.5) local.x *= -1.0;
+  if (scene5.z > 0.5) local.x *= -1.0;
+  float c = cos(scene5.w), s = sin(scene5.w);
+  local = mat2(c, s, -s, c) * local * clamp(1.0 - scene6.w, 0.0, 1.0);
+  vec2 tile = vec2(mod(symbol, scene5.x), scene5.y - floor(symbol / scene5.x) - 1.0);
+  glyphUV = (local + 0.5 + tile) / scene5.xy;
+}
 
 vec3 rotateScene(vec3 p) {
   float cy = cos(scene1.z), sy = sin(scene1.z), cp = cos(scene1.w), sp = sin(scene1.w);
@@ -18,6 +46,8 @@ vec3 rotateScene(vec3 p) {
   return p;
 }
 void main() {
+  if (glyphOptions.y > 0.5) { originalGlyph(); return; }
+  glyphAlpha = 1.0;
   float aspect = scene0.x, rows = scene0.y, columns = scene0.z;
   vec2 center = vec2((cell.x + 0.5) / columns * 2.0 - 1.0, 1.0 - (cell.y + 0.5) / rows * 2.0);
   vec2 offset = (corner - 0.5) * vec2(2.0 * aspect / scene0.w, 2.0 / rows) * 0.93;

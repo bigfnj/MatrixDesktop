@@ -6,6 +6,7 @@ uniform sampler2D glyphAtlas;
 uniform vec4 glyphOptions;
 varying vec2 glyphUV;
 varying vec3 glyphColor;
+varying float glyphAlpha;
 void main() {
   vec3 sampleColor = texture2D(glyphAtlas, glyphUV).rgb;
   float distance = max(min(sampleColor.r, sampleColor.g), min(max(sampleColor.r, sampleColor.g), sampleColor.b));
@@ -16,5 +17,5 @@ void main() {
 #endif
   float mask = smoothstep(0.5 - width, 0.5 + width, distance);
   if (glyphOptions.x > 0.5) mask = max(sampleColor.r, max(sampleColor.g, sampleColor.b));
-  gl_FragColor = vec4(glyphColor * mask, mask);
+  gl_FragColor = vec4(glyphColor * mask, mask * glyphAlpha);
 }

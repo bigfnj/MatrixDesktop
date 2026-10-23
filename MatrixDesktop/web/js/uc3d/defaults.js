@@ -1,8 +1,16 @@
 // Snapshot of the owner's installed Matrix3D settings, 2026-10-23.
-// Native GlyphSize12 -> 100 base columns; 500 lines -> density5.
-// Native FallSpeed6 -> .045; ForwardSpeed6 -> (6-60)*.1/8.
+// Original slider units are independent. Generic values are retained for legacy presets.
 // Explicit URL/CLI values override this scene profile.
 export default {
+  uc3dControls: "original",
+  uc3dAmount: 500,
+  uc3dGlyphSize: 12,
+  uc3dFallSpeed: 6,
+  uc3dForwardSpeed: 6,
+  uc3dPictureScale: 100,
+  uc3dPictureDelay: 60,
+  uc3dClockSize: 90,
+  bloomStrength: 0,
   volumetric: true,
   numColumns: 100,
   density: 5,

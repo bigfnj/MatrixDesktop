@@ -93,6 +93,14 @@ internal sealed class ArgumentImporter
             foreach (var (key, value) in defaults)
                 if (!applied.Contains(key)) draft[key] = JsonSerializer.SerializeToNode(value, JsonOptions);
         }
+        if (scene == "uc3d")
+        {
+            draft["uc3dControls"] = Uc3dControlProfile.Infer(applied, draft);
+            if (Uc3dControlProfile.Mode(draft) == "legacy" && !applied.Contains("bloomStrength"))
+                draft["bloomStrength"] = JsonSerializer.SerializeToNode(_fieldsByKey["bloomstrength"].DefaultValue, JsonOptions);
+            if (Uc3dControlProfile.Mode(draft) == "original" && draft["animationSpeed"] is JsonValue speed && speed.TryGetValue<double>(out var animationSpeed))
+                draft["animationSpeed"] = Math.Clamp(animationSpeed, 0, 4);
+        }
 
         return new ImportResult
         {
@@ -248,8 +256,8 @@ internal sealed class ArgumentImporter
                 return JsonValue.Create(FlagNormalization.ParseBool(value, true));
 
             case "number":
-                return TryParseDouble(value, out var number)
-                    ? JsonValue.Create(Clamp(number, field.Min, field.Max))
+                return TryParseDouble(value, out var number) && (!field.Slider || double.IsFinite(number))
+                    ? JsonValue.Create(Clamp(field.Slider ? Math.Truncate(number) : number, field.Min, field.Max))
                     : null;
 
             case "select":

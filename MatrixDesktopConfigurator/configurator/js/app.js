@@ -136,7 +136,8 @@ const makeSwatchButton = (color, { disabled = false } = {}) => {
 };
 
 const allFields = () => state.metadata.groups.flatMap((group) => group.fields);
-const defaultValueFor = (field) => state.metadata.sceneDefaults?.[state.draft.scene]?.[field.id] ?? field.defaultValue;
+const defaultValueFor = (field) => state.draft.scene === "uc3d" && state.draft.uc3dControls === "legacy" && field.id === "bloomStrength"
+	? field.defaultValue : state.metadata.sceneDefaults?.[state.draft.scene]?.[field.id] ?? field.defaultValue;
 const editedSceneFields = new Set();
 const rememberDraftEdits = (explicitKeys = []) => {
 	editedSceneFields.clear();
@@ -150,13 +151,15 @@ const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "tr
 // Fields whose value changes which *other* fields are gated (see
 // getDisabledReason). Editing one of these must re-render the whole group so
 // the dependent fields pick up their new enabled/disabled state.
-const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "volumetric", "forwardMovement", "showPictures", "showClock", "sound"]);
+const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "uc3dControls", "volumetric", "forwardMovement", "randomForwardMovement", "showPictures", "showClock", "sound"]);
 
-const normalizeDraft = (draft) => ({
-	...clone(state.defaultDraft),
-	...clone(state.metadata?.sceneDefaults?.[draft?.scene] || {}),
-	...(draft ? clone(draft) : {}),
-});
+const normalizeDraft = (draft) => {
+	const saved = draft ? clone(draft) : {};
+	// Preserve old full drafts before the new scene defaults can claim their controls.
+	if (saved.scene === "uc3d" && !["original", "legacy"].includes(saved.uc3dControls))
+		saved.uc3dControls = Object.keys(saved).some(key => nativeUc3dFields.has(key)) ? "original" : "legacy";
+	return { ...clone(state.defaultDraft), ...clone(state.metadata?.sceneDefaults?.[saved.scene] || {}), ...saved };
+};
 
 const setStatus = (message, tone = "normal") => {
 	el.statusLine.textContent = message || "";
@@ -385,20 +388,29 @@ const renderField = (field) => {
 	return shell;
 };
 
-const uc3dFields = new Set(["codeColor","donorGlyphs","shadedLines","sidewaysMovement","mouseRotation","codeRotation","forwardMovement","randomForwardMovement","showPictures","pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","pictureDuration","pictureSource","showClock","clock12Hour","clockSize","sound","soundVolume","pictureDirectory","donorDirectory","desktopBackground","musicFile"]);
+const nativeUc3dFields = new Set(["uc3dAmount","uc3dGlyphSize","uc3dFallSpeed","uc3dForwardSpeed","uc3dPictureScale","uc3dPictureDelay","uc3dClockSize"]);
+const legacyUc3dFields = new Set(["numColumns","density","fallSpeed","forwardSpeed","raindropLength","pictureScale","pictureDelay","clockSize"]);
+const uc3dFields = new Set(["uc3dControls",...nativeUc3dFields,"codeColor","donorGlyphs","shadedLines","sidewaysMovement","mouseRotation","codeRotation","forwardMovement","randomForwardMovement","showPictures","pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","pictureDuration","pictureSource","showClock","clock12Hour","clockSize","sound","soundVolume","pictureDirectory","donorDirectory","desktopBackground","musicFile"]);
 const legacyOnlyFields = new Set(["effect","url","camera","clickRipples","clickRippleShape","glintColor","palette","stripeColors","ditherMagnitude","slant","loops","skipIntro","testFix"]);
 
 const getDisabledReason = (field) => {
     const uc3d = state.draft.scene === "uc3d";
     if (uc3dFields.has(field.id) && !uc3d) return "Choose the UC3D scene in Theme to use this setting.";
+    const original = state.draft.uc3dControls !== "legacy";
+    if (uc3d && original && legacyUc3dFields.has(field.id)) return "Use the original screensaver sliders in UC3D, or choose Legacy MatrixDesktop controls.";
+    if (uc3d && !original && nativeUc3dFields.has(field.id)) return "Choose Original screensaver controls to use this slider.";
+    if (uc3d && original && ["cycleSpeed", "isometric"].includes(field.id)) return "Used by Legacy MatrixDesktop controls. Original controls use the screensaver's glyph timing and perspective.";
+    if (uc3d && original && field.id === "sidewaysMovement" && !state.draft.volumetric) return "Original sideways movement is used by 3D code. Enable Volumetric / 3D to use it.";
     if (uc3d && legacyOnlyFields.has(field.id)) return "Used by the Matrix scene. UC3D has its own code colors and picture controls.";
     if (uc3d && ["mouseRotation","codeRotation","forwardMovement","randomForwardMovement","pictureDepth"].includes(field.id) && !state.draft.volumetric)
         return "Enable Volumetric / 3D to use this setting.";
     if (uc3d && field.id === "shadedLines" && state.draft.volumetric) return "Used by 2D code.";
     if (uc3d && field.id === "randomForwardMovement" && !state.draft.forwardMovement) return "Enable forward/back movement first.";
-    if (uc3d && ["pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","pictureDuration","pictureSource","pictureDirectory"].includes(field.id) && !state.draft.showPictures)
+    if (uc3d && field.id === "uc3dForwardSpeed" && (!state.draft.volumetric || !state.draft.forwardMovement || state.draft.randomForwardMovement))
+        return "Enable 3D forward/back movement and turn off random movement to set constant travel.";
+    if (uc3d && ["pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","uc3dPictureScale","uc3dPictureDelay","pictureDuration","pictureSource","pictureDirectory"].includes(field.id) && !state.draft.showPictures)
         return "Enable Form pictures from code first.";
-    if (uc3d && ["clock12Hour","clockSize"].includes(field.id) && !state.draft.showClock) return "Enable Show clock first.";
+    if (uc3d && ["clock12Hour","clockSize","uc3dClockSize"].includes(field.id) && !state.draft.showClock) return "Enable Show clock first.";
     if (uc3d && field.id === "soundVolume" && state.draft.sound === "off") return "Choose a sound mode first.";
     if (uc3d && field.id === "musicFile" && state.draft.sound !== "music") return "Choose Ambient music / local file first.";
 	const windowMode = state.draft.windowMode || "borderless";
@@ -428,6 +440,7 @@ const createFieldShell = (field, extraClass = "") => {
 	const shell = document.createElement("div");
 	const disabledReason = getDisabledReason(field);
 	shell.className = `field ${extraClass}${disabledReason ? " disabled-field" : ""}`.trim();
+	shell.dataset.field = field.id;
 	const label = document.createElement("label");
 	label.textContent = field.label;
 	shell.append(label);
@@ -475,15 +488,36 @@ const renderSelectField = (field) => {
 	return shell;
 };
 
-const renderNumberField = (field) => {
+const renderNumberField = (definition) => {
+	const field = definition.id === "animationSpeed" && state.draft.scene === "uc3d" && state.draft.uc3dControls !== "legacy"
+		? { ...definition, min: 0 } : definition;
 	const shell = createFieldShell(field, "number-field");
 	const input = document.createElement("input");
 	input.type = "number";
+	input.setAttribute("aria-label", `${field.label} value`);
 	if (field.min != null) input.min = field.min;
 	if (field.max != null) input.max = field.max;
 	if (field.step != null) input.step = field.step;
 	input.disabled = Boolean(getDisabledReason(field));
 	input.value = state.draft[field.id] ?? "";
+	let range = null;
+	const syncRange = () => { if (range && input.value !== "") range.value = input.value; };
+	if (field.slider) {
+		range = document.createElement("input");
+		range.type = "range";
+		range.min = field.min;
+		range.max = field.max;
+		range.step = field.step;
+		range.value = input.value;
+		range.disabled = input.disabled;
+		range.setAttribute("aria-label", `${field.label} slider`);
+		range.addEventListener("input", () => {
+			if (getDisabledReason(field)) return;
+			input.value = range.value;
+			updateDraftValue(field, Number(range.value));
+			applyValidation();
+		});
+	}
 
 	// v1.0 validation feedback — re-evaluate on every input.
 	let hint = null;
@@ -523,6 +557,7 @@ const renderNumberField = (field) => {
 	input.addEventListener("input", () => {
 		const value = input.value === "" ? null : toNumber(input.value, defaultValueFor(field) ?? 0);
 		updateDraftValue(field, value);
+		syncRange();
 		applyValidation();
 	});
 
@@ -546,15 +581,18 @@ const renderNumberField = (field) => {
 			let num = toNumber(input.value, defaultValueFor(field) ?? 0);
 			if (field.min != null && num < field.min) num = field.min;
 			if (field.max != null && num > field.max) num = field.max;
+			if (field.slider) num = Math.trunc(num);
 			if (String(num) !== input.value) {
 				input.value = num;
 				updateDraftValue(field, num);
 			}
 		}
+		syncRange();
 		applyValidation();
 	});
 	applyValidation();
 
+	if (range) shell.append(range);
 	shell.append(input);
 	return shell;
 };

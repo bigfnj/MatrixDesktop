@@ -1,4 +1,4 @@
-import { createScene, attachMouse, createGrid, projection, defaults } from "./scene.js";
+import { createScene, attachMouse, createGrid, viewProjection, defaults } from "./scene.js";
 import { createMedia, selectImages } from "./media.js";
 import { createOverlays } from "./overlays.js";
 import { createAudio } from "./audio.js";
@@ -32,7 +32,7 @@ export async function createRuntime(canvas, options, backend) {
   if (config.showPictures && !images.length) warnings.push("No pictures are available for the selected source.");
   if (config.donorGlyphs && !config.bitmapGlyphs) warnings.push("Original glyphs are unavailable. Using the bundled font.");
   if (config.renderer?.toLowerCase() === "webgpu" && backend !== "webgpu") warnings.push("WebGPU is unavailable. Using WebGL.");
-  const media = createMedia(images);
+  const media = createMedia(images, { original: config.uc3dControls !== "legacy" });
   const scene = createScene(config, images.length);
   const overlays = createOverlays(config, warnings);
   const audio = createAudio(config, bootstrap, canvas);
@@ -60,12 +60,15 @@ export async function createRuntime(canvas, options, backend) {
   };
   requestPhoto(images.length ? 0 : -1);
   let desktop = null;
+  diagnostics.inspect = () => dead ? { disposed: true } : scene.snapshot?.(8) ?? { controls: "legacy" };
   const dispose = () => {
     if (dead) return;
     dead = true; diagnostics.disposed = true; diagnostics.ready = false;
     window.removeEventListener("pagehide", dispose);
     detachMouse(); scene.dispose(); media.dispose(); overlays.dispose(); audio.dispose();
+    grid = null; photo = null;
     if (desktop) desktop.src = "";
+    desktop = null;
   };
   window.addEventListener("pagehide", dispose, { once: true });
   try { desktop = await loadImage(bootstrap.desktopUrl); }
@@ -78,17 +81,20 @@ export async function createRuntime(canvas, options, backend) {
       currentTime = seconds;
       const nextAspect = Math.max(1, width) / Math.max(1, height);
       if (Math.abs(nextAspect - aspect) > 0.0001) { aspect = nextAspect; dirty = true; }
+      scene.viewport?.(aspect);
       const state = scene.update(seconds);
       if (state.pictureIndex !== currentIndex) requestPhoto(state.pictureIndex);
       if (diagnostics.pictureStatus !== "ready") state.pictureWeight = 0;
       // A forming picture returns to a front-facing pose, as manual movement already
       // suppresses the picture. Keep the relief visible without shearing its silhouette.
-      state.yaw *= 1 - state.pictureWeight; state.pitch *= 1 - state.pictureWeight; state.roll *= 1 - state.pictureWeight;
-      if (config.volumetric && config.isometric) { state.yaw += Math.PI / 4 * (1 - state.pictureWeight); state.pitch += Math.PI / 8 * (1 - state.pictureWeight); }
-      const changed = dirty;
-      if (dirty) { grid = createGrid(config, aspect, photo); dirty = false; }
+      if (!scene.grid) {
+        state.yaw *= 1 - state.pictureWeight; state.pitch *= 1 - state.pictureWeight; state.roll *= 1 - state.pictureWeight;
+        if (config.volumetric && config.isometric) { state.yaw += Math.PI / 4 * (1 - state.pictureWeight); state.pitch += Math.PI / 8 * (1 - state.pictureWeight); }
+      }
+      const changed = dirty || Boolean(scene.grid);
+      if (changed) { grid = scene.grid ? scene.grid(aspect, photo) : createGrid(config, aspect, photo); dirty = false; }
       const uniforms = new Float32Array(56);
-      uniforms.set(projection(aspect, config.volumetric, backend === "webgpu", config.isometric), 0);
+      uniforms.set(viewProjection(aspect, config, state, backend === "webgpu"), 0);
       uniforms.set([aspect, grid.rows, grid.columns, grid.baseColumns], 16);
       uniforms.set([state.time, state.forwardPhase, state.yaw, state.pitch], 20);
       uniforms.set([state.roll, state.sidewaysOffset, state.pictureWeight, config.volumetric ? 1 : 0], 24);
@@ -98,9 +104,18 @@ export async function createRuntime(canvas, options, backend) {
       uniforms.set([config.raindropLength ?? 0.75, config.glyphHeightToWidth ?? 1, config.glyphVerticalSpacing ?? 1, config.glyphEdgeCrop ?? 0], 40);
       uniforms.set([...normal, 0], 44); uniforms.set([...cursor, 0], 48);
       uniforms[52] = config.bitmapGlyphs ? 1 : 0;
-      // The last vector carries bitmap-atlas mode without shifting existing offsets.
+      uniforms[53] = grid.nativeMode ? 1 : 0;
+      uniforms[54] = grid.glyphHalfSize ?? 0;
+      uniforms[55] = grid.worldWidth ?? grid.baseColumns * (grid.glyphHalfSize ?? 0) * 2;
       overlays.update(state, photo);
       diagnostics.frames++; diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
+      diagnostics.controls = config.uc3dControls ?? "legacy";
+      diagnostics.simulationTime = state.time; diagnostics.targetStreams = grid.columns;
+      diagnostics.activeStreams = state.activeStreams ?? grid.columns;
+      diagnostics.glyphInstances = grid.instanceCount ?? grid.count / 6;
+      diagnostics.glyphHalfSize = grid.glyphHalfSize ?? 12 / grid.baseColumns;
+      diagnostics.motion = { sideways: state.sidewaysOffset, forward: state.forwardPhase,
+        yaw: state.yaw, pitch: state.pitch, roll: state.roll, eye: state.eye };
       return { uniforms, grid, changed, state };
     },
     dispose,
@@ -110,7 +125,7 @@ export async function createRuntime(canvas, options, backend) {
 // Both backends use one lifecycle and throttling implementation. No rendering callback
 // can survive pagehide, explicit teardown, or an initialization/runtime failure.
 export function startLoop(canvas, runtime, draw, cleanup) {
-  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0;
+  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null;
   const requestedFps = Number(runtime.config.fps ?? 60);
   const fps = Number.isFinite(requestedFps) ? Math.max(0, Math.min(120, requestedFps)) : 60;
   const dispose = () => {
@@ -125,7 +140,13 @@ export function startLoop(canvas, runtime, draw, cleanup) {
       const ratio = window.devicePixelRatio || 1;
       const width = Math.max(1, Math.ceil(canvas.clientWidth * ratio * (runtime.config.resolution ?? 0.75)));
       const height = Math.max(1, Math.ceil(canvas.clientHeight * ratio * (runtime.config.resolution ?? 0.75)));
-      elapsed = (now - start) / 1000;
+      if (runtime.config.uc3dControls === "original") {
+        // Do not simulate an entire sleep/lock interval on the first resumed frame.
+        // Dropped time is intentional; active simulation resumes without catch-up debt.
+        if (lastDraw !== null) elapsed += Math.min(1, Math.max(0, (now-lastDraw)/1000));
+        else if (runtime.config.once || fps === 0) elapsed = 10;
+      } else elapsed = (now - start) / 1000;
+      lastDraw = now;
       try { draw(runtime.update(elapsed, width, height), width, height); runtime.diagnostics.ready = true; }
       catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); dispose(); return; }
       previous = now;

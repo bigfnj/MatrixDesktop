@@ -69,6 +69,7 @@
 
     <!-- Configurator argument metadata, import and command generation. -->
     <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentCatalog.cs" Link="Production\ArgumentCatalog.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\Uc3dControlProfile.cs" Link="Production\Uc3dControlProfile.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentImporter.cs" Link="Production\ArgumentImporter.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\CommandBuilder.cs" Link="Production\CommandBuilder.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\ColorConverter.cs" Link="Production\ColorConverter.cs" />

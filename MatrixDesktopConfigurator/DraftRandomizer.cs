@@ -115,6 +115,8 @@ internal sealed class DraftRandomizer
 
         var accentHue = NextDouble();
         draft["cursorColor"] = ColorFromHsl(accentHue, Range(0.7, 1), Range(0.55, 0.75));
+        if (Uc3dControlProfile.IsUc3d(draft))
+            draft["codeColor"] = ColorFromHsl(accentHue, Range(0.7, 1), Range(0.3, 0.55));
         draft["glintColor"] = ColorFromHsl(WrapHue(accentHue + Range(0.08, 0.24)), Range(0.5, 0.95), Range(0.72, 0.92));
         draft["palette"] = BuildPalette(accentHue);
 
@@ -127,6 +129,8 @@ internal sealed class DraftRandomizer
 
     private void RandomizeMotionAndLayout(JsonObject draft)
     {
+        var original = Uc3dControlProfile.IsUc3d(draft) && Uc3dControlProfile.Mode(draft) == "original";
+        var retainedLegacy = original ? Uc3dControlProfile.LegacyKeys.ToDictionary(key => key, key => draft[key]?.DeepClone()) : null;
         draft["fps"] = Pick(FrameRates);
         draft["animationSpeed"] = Round(Range(0.3, 1.4));
         draft["fallSpeed"] = Round(Range(0.16, 0.65));
@@ -145,6 +149,16 @@ internal sealed class DraftRandomizer
         draft["ditherMagnitude"] = Round(Range(0.02, 0.12));
         draft["cursorIntensity"] = Round(Range(1.2, 3.8));
         draft["glyphIntensity"] = Round(Range(0.8, 2.4));
+        if (original)
+        {
+            // Vary the controls the active renderer actually consumes. Preserve the
+            // alternate unit set so switching control modes does not discard edits.
+            draft["uc3dAmount"] = (double)NextInt(100, 1501);
+            draft["uc3dGlyphSize"] = (double)NextInt(10, 41);
+            draft["uc3dFallSpeed"] = (double)NextInt(0, 151);
+            draft["uc3dForwardSpeed"] = (double)NextInt(0, 121);
+            foreach (var (key, value) in retainedLegacy!) draft[key] = value;
+        }
     }
 
     private JsonArray BuildPalette(double baseHue)
