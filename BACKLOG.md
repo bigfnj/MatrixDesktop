@@ -93,6 +93,7 @@ assets and analysis/capture data remain private; no donor payload was added here
 | --- | --- | --- |
 | Nonfinite generic numeric imports broke draft JSON serialization | FIXED | `ArgumentImporter` rejects all nonfinite numbers while retaining valid options. The named importer regression serializes the resulting draft; an actual published import verifies storage. Removing the guard fails exactly that rebuilt test. |
 | Null preset list records or value containers crashed startup | FIXED | `StorageService` removes null slots and repairs only absent values, preserving valid data and backup bytes. Synthetic live/backup/load/seed/save tests kill missing-filter and missing-repair mutations independently. |
+| Hosted actions declared retired Node 20 runtimes | FIXED | CI and release now pin Node 24 releases of checkout 7.0.1, setup-dotnet 6.0.0, setup-python 7.1.0 and action-gh-release 3.0.3 by full commit SHA. Upstream `action.yml` files confirm the runtime and supported existing inputs; SDK/Python versions, permissions and credential settings are preserved. Release publication requires a tag and was not triggered by this maintenance change. |
 
 Both application fixes were verified in the published configurator with a
 synthetic portable store and an actual command import. Valid values survived;

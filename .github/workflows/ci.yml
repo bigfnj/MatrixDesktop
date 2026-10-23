@@ -24,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout
-        # actions/checkout v4.4.0, pinned to a full commit SHA. A tag is mutable:
-        # whoever controls the action repo can repoint v4 at different code, and
+        # actions/checkout v7.0.1 (Node 24), pinned to a full commit SHA. A tag is mutable:
+        # whoever controls the action repo can repoint it at different code, and
         # this workflow would run it with no diff here. A SHA cannot be repointed.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # Do not leave GITHUB_TOKEN in .git/config after checkout. Nothing here
           # pushes or fetches again, so no later step needs it, and a compromised
@@ -35,8 +35,8 @@ jobs:
           persist-credentials: false
 
       - name: Setup .NET SDK
-        # actions/setup-dotnet v4.3.1, pinned for the same reason.
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        # actions/setup-dotnet v6.0.0 (Node 24), pinned for the same reason.
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           # Must match global.json. global.json is what actually selects the SDK,
           # so if these two disagree the resolved SDK wins and this input becomes
@@ -44,8 +44,8 @@ jobs:
           dotnet-version: '10.0.302'
 
       - name: Setup Python (for the headless web smoke)
-        # actions/setup-python v5.6.0, pinned to a SHA for the same reason as the others.
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        # actions/setup-python v7.1.0 (Node 24), pinned for the same reason.
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
 
