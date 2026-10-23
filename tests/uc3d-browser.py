@@ -61,6 +61,16 @@ def main():
             for backend in ["regl", "webgpu"] if args.renderer == "both" else [args.renderer]:
                 context = browser.new_context(viewport={"width": 800, "height": 450}, device_scale_factor=1)
                 page = context.new_page()
+                # Pixel assertions can outlast a short picture episode on a slow CI
+                # worker. Hold its displayed RAF timestamp while inspecting that frame.
+                # Resume before the teardown assertion so a leaked loop cannot pass it.
+                page.add_init_script("""(() => {
+                    const raf=window.requestAnimationFrame.bind(window);
+                    const clock=window.__uc3dSmokeClock={held:null,last:0};
+                    window.requestAnimationFrame=callback=>raf(now=>{
+                        clock.last=now; callback(clock.held ?? now);
+                    });
+                })();""")
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
@@ -95,23 +105,29 @@ def main():
                 # green palette or a raw picture placed behind otherwise unchanged rain.
                 page.goto(base + "&volumetric=true&showPictures=true&pictureSource=custom&pictureDelay=0&pictureDuration=8&pictureMonochrome=false&pictureCaptions=true&pictureDepth=1&showClock=true", wait_until="load")
                 page.wait_for_function("window.matrixRuntimeDiagnostics?.pictureStatus === 'ready' && matrixRuntimeDiagnostics.pictureWeight > .98 && matrixRuntimeDiagnostics.frames > 5", timeout=20000)
+                page.evaluate("__uc3dSmokeClock.held=__uc3dSmokeClock.last")
                 picture = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
                 pixels = list(picture.get_flattened_data() if hasattr(picture, "get_flattened_data") else picture.getdata())
                 red = sum(r > 50 and r > g * 1.8 and r > b * 1.8 for r, g, b in pixels)
                 green = sum(g > 50 and g > r * 1.8 and g > b * 1.8 for r, g, b in pixels)
                 assert red > 300 and green > 300, f"photo RGB absent: red={red}, green={green}"
-                assert page.locator("[data-uc3d-caption]").inner_text() == "<script>literal caption</script>"
+                caption = page.locator("[data-uc3d-caption]").inner_text()
+                assert caption == "<script>literal caption</script>", f"photo caption changed during frame inspection: {caption!r}"
                 assert page.locator("[data-uc3d-clock]").inner_text(), "clock was empty"
                 assert not page.locator(".uc3d-overlays script").count(), "caption interpreted markup"
                 picture.save(OUTPUT / f"{backend}-photo.png")
                 page.goto(base + "&volumetric=true&showPictures=true&pictureSource=custom&pictureDelay=0&pictureDuration=8&pictureMonochrome=false&pictureCaptions=false&pictureDepth=0", wait_until="load")
                 page.wait_for_function("window.matrixRuntimeDiagnostics?.pictureStatus === 'ready' && matrixRuntimeDiagnostics.pictureWeight > .98", timeout=20000)
+                page.evaluate("__uc3dSmokeClock.held=__uc3dSmokeClock.last")
                 flat = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
                 flat_pixels = list(flat.get_flattened_data() if hasattr(flat, "get_flattened_data") else flat.getdata())
                 flat_green = sum(g > 50 and g > r * 1.8 and g > b * 1.8 for r, g, b in flat_pixels)
                 assert green > flat_green * 1.1, f"picture depth expands bright relief [{shader_path}]: raised={green}, flat={flat_green}"
                 # Lifetime behavior is observable: frames stop advancing and DOM overlays
                 # disappear. A cleanup function that merely exists does not pass this.
+                held_frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+                page.evaluate("__uc3dSmokeClock.held=null")
+                page.wait_for_function("frames => matrixRuntimeDiagnostics.frames > frames", arg=held_frames, timeout=10000)
                 page.evaluate("matrixRuntimeDiagnostics.dispose()")
                 count = page.evaluate("matrixRuntimeDiagnostics.frames")
                 page.wait_for_timeout(150)

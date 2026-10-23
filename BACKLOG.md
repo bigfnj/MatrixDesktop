@@ -105,6 +105,7 @@ Every confirmed additional finding is recorded here and resolved in the follow-u
 | Failed native test CDP connection can orphan its app | FIXED | Startup failures terminate and wait, escalating to kill on timeout; successful handoff stays live. Three mocked regressions, a cleanup-removal mutation and actual failed/successful host launches verify ownership cleanup. |
 | Null WebGPU context or failed unconfigure can skip device destruction | FIXED | Initialization rejects missing contexts explicitly and cleanup always destroys its owned device. Fault injection and a device-destruction mutation cover the failure path. |
 | Hosted Windows checkout fails the served-shader witness | FIXED | Fetch text retains CRLF while Python text reads normalize it. Witnesses now compare fetched bytes with file bytes; the failure reproduced on a clean Windows checkout and the corrected check retains exact content validation. Failed Python probes also print their logs in the gate. |
+| Slow CI screenshot processing races the slideshow caption lifetime | FIXED | Browser probes hold the displayed RAF timestamp while inspecting picture pixels and captions. They resume and prove frames advance before teardown assertions, preserving a live-loop failure witness. Production slideshow timing is unchanged. |
 
 No additional confirmed dead code, inert function or call to a missing target remained in
 the audited paths. Shader/device behavior was also exercised on this workstation; physical
