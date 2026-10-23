@@ -2,6 +2,7 @@
 import argparse
 import ctypes
 from ctypes import wintypes
+from functools import wraps
 import hashlib
 import io
 import json
@@ -44,6 +45,25 @@ def stop_application(process):
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
+
+def preserve_portable_presets(case):
+    """Restore the exact preset files after the case has reaped its owned app."""
+    @wraps(case)
+    def protected(playwright, exe, *args, **kwargs):
+        preset = Path(exe).resolve().parent / "MatrixDesktopConfigurator.presets.json"
+        paths = (preset, preset.with_name(preset.name + ".bak"))
+        original = {path: path.read_bytes() if path.exists() else None for path in paths}
+        try:
+            return case(playwright, exe, *args, **kwargs)
+        finally:
+            for path, contents in original.items():
+                if contents is None:
+                    # Only files created during this case are removed. An existing
+                    # preset store or backup is always restored byte for byte.
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(contents)
+    return protected
 
 def open_application(playwright, exe, args, case):
     with socket.socket() as sock:
@@ -180,6 +200,7 @@ def default_case(playwright, exe, renderer):
         stop_application(process)
         browser.close()
 
+@preserve_portable_presets
 def default_configurator_case(playwright, exe):
     """Exercise the real scene selector and its generated native preview query."""
     process, browser = open_application(playwright, exe, [], "defaults-configurator")
@@ -283,6 +304,7 @@ def runtime_case(playwright, exe, renderer, donor):
         stop_application(process)
         browser.close()
 
+@preserve_portable_presets
 def configurator_case(playwright, exe, donor):
     process, browser = open_application(playwright, exe, [], "configurator")
     try:
