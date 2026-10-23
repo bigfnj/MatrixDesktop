@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import resolveConfig from "../MatrixDesktop/web/js/config.js";
 import { createScene, createGrid, projection, attachMouse } from "../MatrixDesktop/web/js/uc3d/scene.js";
 import { selectImages } from "../MatrixDesktop/web/js/uc3d/media.js";
 import { formatClock } from "../MatrixDesktop/web/js/uc3d/overlays.js";
@@ -11,6 +12,32 @@ console.log(`SOURCE ${new URL("../MatrixDesktop/web/js/uc3d/scene.js", import.me
 let passed = 0, failures = 0;
 function test(name, run) { try { run(); passed++; console.log(`PASS ${name}`); } catch (error) { failures++; console.error(`FAIL ${name}: ${error.message}`); } }
 const near = (a, b, epsilon = 1e-7) => assert.ok(Math.abs(a - b) < epsilon, `${a} differs from ${b}`);
+
+test("bare UC3D uses the installed purple 3D screensaver profile and 500 landscape streams", () => {
+  const config = resolveConfig({ scene: "uc3d" });
+  assert.equal(config.volumetric, true);
+  assert.equal(config.numColumns, 100); assert.equal(config.density, 5);
+  near(12 / config.numColumns, 0.12); near(config.fallSpeed, 0.045); near(config.forwardSpeed, -0.675);
+  assert.deepEqual(config.codeColor, { space: "rgb", values: [128 / 255, 0, 1] });
+  assert.deepEqual(config.cursorColor, { space: "rgb", values: [1, 128 / 255, 1] });
+  for (const key of ["sidewaysMovement", "randomForwardMovement", "forwardMovement", "codeRotation", "shadedLines"]) assert.equal(config[key], true, key);
+  for (const key of ["showPictures", "showClock", "mouseRotation", "desktopBackground", "pictureMonochrome"]) assert.equal(config[key], false, key);
+  assert.equal(config.sound, "off"); assert.equal(config.pictureDelay, 60); assert.equal(config.pictureDuration, 30);
+  assert.equal(createGrid(config, 16 / 9).columns, 500);
+});
+
+test("UC3D explicit generic defaults override its profile regardless of effect or version", () => {
+  const config = resolveConfig({ scene: "uc3d", volumetric: "false", numColumns: "80", density: "1", fallSpeed: "0.3", forwardSpeed: "0.25", sidewaysMovement: "false", randomForwardMovement: "false", effect: "palette", version: "paradise" });
+  assert.equal(config.volumetric, false); assert.equal(config.numColumns, 80); assert.equal(config.density, 1);
+  near(config.fallSpeed, 0.3); near(config.forwardSpeed, 0.25);
+  assert.equal(config.sidewaysMovement, false); assert.equal(config.randomForwardMovement, false);
+  assert.deepEqual(config.cursorColor.values, [1, 128 / 255, 1]);
+  assert.equal(resolveConfig({ scene: "uc3d", density: "5" }).density, 5);
+  assert.equal(resolveConfig({ scene: "uc3d", density: "100" }).density, 8);
+  const matrix = resolveConfig({});
+  assert.equal(matrix.scene, "matrix"); assert.equal(matrix.volumetric, false);
+  assert.equal(matrix.numColumns, 80); assert.equal(matrix.density, 1); near(matrix.fallSpeed, 0.3);
+});
 
 test("WebGL program initialization releases shaders and failed programs on every compile and link outcome", () => {
   for (const outcome of ["vertex", "fragment", "link", "success"]) {
@@ -39,7 +66,7 @@ test("WebGL program initialization releases shaders and failed programs on every
 });
 
 test("signed constant travel has the same phase at 30 and 120 fps", () => {
-  const first = createScene({ forwardSpeed: -0.17 }), second = createScene({ forwardSpeed: -0.17 });
+  const first = createScene({ forwardSpeed: -0.17, randomForwardMovement: false }), second = createScene({ forwardSpeed: -0.17, randomForwardMovement: false });
   let a, b;
   for (let i = 0; i <= 300; i++) a = first.update(i / 30);
   for (let i = 0; i <= 1200; i++) b = second.update(i / 120);

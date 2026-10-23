@@ -25,6 +25,7 @@ internal static class ImporterTests
         ("Legacy aliases width, dropLength and angle are mapped", LegacyAliases),
         ("An image URL containing a scheme is not treated as a query string", ImageUrlNotQuery),
         ("Stripe effects are recognised by name", StripeEffectRecognition),
+        ("UC3D profile imports without replacing explicit options in any order", Uc3dSceneProfile),
     ];
 
     private static readonly ConfiguratorMetadata Metadata = ArgumentCatalog.Create();
@@ -39,6 +40,24 @@ internal static class ImporterTests
 
     private static string Str(JsonObject draft, string key)
         => draft[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : string.Empty;
+
+    private static void Uc3dSceneProfile()
+    {
+        foreach (var command in new[]
+        {
+            "--scene uc3d --volumetric false --fallSpeed 0.3 --density 6",
+            "--volumetric false --fallSpeed 0.3 --density 6 --scene uc3d",
+            "?volumetric=false&fallSpeed=0.3&density=6&scene=uc3d",
+        })
+        {
+            var imported = Import(command).Draft;
+            Check.True(!(bool)imported["volumetric"]!, "explicit false must win over the scene profile");
+            Check.Close(0.3, Num(imported, "fallSpeed"), 1e-9, "explicit numeric values must win");
+            Check.Close(6, Num(imported, "density"), 1e-9, "the density range must retain native stream populations");
+            Check.Close(100, Num(imported, "numColumns"), 1e-9, "missing values use the selected scene profile");
+            Check.True((bool)imported["sidewaysMovement"]!, "UC3D uses the captured sideways setting");
+        }
+    }
 
     private static void EmptyCommandRejected()
     {

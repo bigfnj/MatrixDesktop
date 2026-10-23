@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using MatrixDesktop.Shared;
 
@@ -22,6 +23,7 @@ internal sealed class ArgumentImporter
 
     private readonly ConfiguratorMetadata _metadata;
     private readonly Dictionary<string, ArgumentDefinition> _fieldsByKey;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public ArgumentImporter(ConfiguratorMetadata metadata)
     {
@@ -81,6 +83,15 @@ internal sealed class ArgumentImporter
             {
                 ignored.Add(key);
             }
+        }
+
+        // Apply the scene profile after parsing so explicit options win regardless
+        // of whether they appeared before or after --scene in the imported command.
+        var scene = draft["scene"]?.GetValue<string>() ?? "matrix";
+        if (_metadata.SceneDefaults.TryGetValue(scene, out var defaults))
+        {
+            foreach (var (key, value) in defaults)
+                if (!applied.Contains(key)) draft[key] = JsonSerializer.SerializeToNode(value, JsonOptions);
         }
 
         return new ImportResult

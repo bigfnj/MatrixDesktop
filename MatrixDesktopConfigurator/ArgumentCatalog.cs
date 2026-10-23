@@ -6,6 +6,24 @@ internal static class ArgumentCatalog
 {
     public static ConfiguratorMetadata Create() => new()
     {
+        SceneDefaults = new()
+        {
+            ["uc3d"] = new()
+            {
+                ["volumetric"] = true,
+                ["numColumns"] = 100.0,
+                ["density"] = 5.0,
+                ["fallSpeed"] = 0.045,
+                ["forwardSpeed"] = -0.675,
+                ["codeColor"] = new ColorValue(128.0 / 255.0, 0, 1),
+                ["cursorColor"] = new ColorValue(1, 128.0 / 255.0, 1),
+                ["sidewaysMovement"] = true,
+                ["randomForwardMovement"] = true,
+                ["pictureMonochrome"] = false,
+                ["pictureDelay"] = 60.0,
+                ["pictureDuration"] = 30.0,
+            },
+        },
         Groups =
         [
             new ArgumentGroup
@@ -135,9 +153,9 @@ internal static class ArgumentCatalog
                 Fields =
                 [
                     Number("animationSpeed", "Animation speed", "web", 1, -4, 4, 0.01),
-                    Number("fallSpeed", "Fall speed", "web", 0.3, -4, 4, 0.01),
+                    Number("fallSpeed", "Fall speed", "web", 0.3, -4, 4, 0.001),
                     Number("cycleSpeed", "Cycle speed", "web", 0.03, -1, 1, 0.001),
-                    Number("forwardSpeed", "Forward speed", "web", 0.25, -4, 4, 0.01),
+                    Number("forwardSpeed", "Forward speed", "web", 0.25, -4, 4, 0.001),
                     Number("raindropLength", "Raindrop length", "web", 0.75, 0.01, 4, 0.01),
                     Number("slant", "Slant degrees", "web", 0, -180, 180, 1),
                     Toggle("volumetric", "Volumetric / 3D", "web", false, "volumetric"),
@@ -151,7 +169,7 @@ internal static class ArgumentCatalog
                 Fields =
                 [
                     Number("numColumns", "Columns", "web", 80, 1, 256, 1),
-                    Number("density", "Density", "web", 1, 0.01, 4, 0.01),
+                    Number("density", "Density", "web", 1, 0.01, 8, 0.01),
                     Number("resolution", "Resolution", "web", 0.75, 0.05, 2, 0.01),
                     Number("fps", "FPS", "web", 60, 0, 60, 1),
                     Number("bloomSize", "Bloom size", "web", 0.4, 0, 1, 0.01),
@@ -311,6 +329,7 @@ internal static class ArgumentCatalog
 internal sealed class ConfiguratorMetadata
 {
     public List<ArgumentGroup> Groups { get; init; } = [];
+    public Dictionary<string, Dictionary<string, object?>> SceneDefaults { get; init; } = [];
 }
 
 internal sealed class ArgumentGroup

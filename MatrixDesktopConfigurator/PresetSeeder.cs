@@ -1,15 +1,16 @@
 ﻿using System;
 using System.Linq;
+using System.Text.Json.Nodes;
 
 namespace MatrixDesktopConfigurator;
 
 internal static class PresetSeeder
 {
-    private const int CurrentSeedVersion = 3;
+    private const int CurrentSeedVersion = 4;
 
     private static readonly StarterPreset[] StarterPresets =
     [
-        new("seed-uc3d-trilogy", "UC3D Trilogy", "--scene uc3d --volumetric true --randomForwardMovement true --codeColor 0,0.698,0 --cursorColor 0,1,0.698 --pictureDelay 60 --pictureDuration 30", 3),
+        new("seed-uc3d-trilogy", "UC3D Trilogy", "--scene uc3d", 3),
         new(
             "seed-rainbow-haze",
             "rainbow-haze",
@@ -33,6 +34,17 @@ internal static class PresetSeeder
 
         var isFirstSeed = state.PresetSeedVersion == 0;
         var now = DateTimeOffset.UtcNow;
+        // Only the exact, untouched starter from version 3 belongs to this migration.
+        // Renaming, editing, or deleting it is a user choice that must survive.
+        var previousUc3d = state.UserPresets.FirstOrDefault(preset => preset.Id == "seed-uc3d-trilogy");
+        if (state.PresetSeedVersion == 3 && previousUc3d?.Name == "UC3D Trilogy"
+            && JsonNode.DeepEquals(previousUc3d.Values, PreviousUc3dTemplate(commandBuilder)))
+        {
+            if (state.SelectedPresetId == previousUc3d.Id && JsonNode.DeepEquals(state.LastDraft, previousUc3d.Values))
+                state.LastDraft = commandBuilder.CreateSceneDefaultDraft("uc3d");
+            previousUc3d.Values = commandBuilder.CreateSceneDefaultDraft("uc3d");
+            previousUc3d.UpdatedUtc = now;
+        }
         foreach (var preset in StarterPresets)
         {
             var imported = importer.Import(preset.Command, commandBuilder.CreateDefaultDraft());
@@ -63,6 +75,19 @@ internal static class PresetSeeder
 
         state.PresetSeedVersion = CurrentSeedVersion;
         return true;
+    }
+
+    private static JsonObject PreviousUc3dTemplate(CommandBuilder commandBuilder)
+    {
+        var draft = commandBuilder.CreateDefaultDraft();
+        draft["scene"] = "uc3d";
+        draft["volumetric"] = true;
+        draft["randomForwardMovement"] = true;
+        draft["codeColor"] = new JsonObject { ["r"] = 0.0, ["g"] = 0.698, ["b"] = 0.0 };
+        draft["cursorColor"] = new JsonObject { ["r"] = 0.0, ["g"] = 1.0, ["b"] = 0.698 };
+        draft["pictureDelay"] = 60.0;
+        draft["pictureDuration"] = 30.0;
+        return draft;
     }
 
     private sealed record StarterPreset(string Id, string Name, string Command, int IntroducedVersion = 1);

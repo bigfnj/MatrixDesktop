@@ -22,6 +22,10 @@ internal static class CommandBuilderTests
         ("A PowerShell export references the script directory", PowerShellUsesScriptRoot),
         ("The preview query string skips defaults so effect palettes survive", PreviewQuerySkipsDefaults),
         ("The preview query string percent encodes its values", PreviewQueryEncodes),
+        ("UC3D scene defaults generate a compact command and round trip", Uc3dSceneDefaultsRoundTrip),
+        ("UC3D overrides equal to Matrix defaults survive commands and previews", Uc3dMatrixDefaultOverrides),
+        ("The untouched UC3D starter migrates to the current profile once", Uc3dStarterMigrates),
+        ("UC3D starter migration preserves edited renamed and deleted presets", Uc3dStarterEditsSurvive),
     ];
 
     private static readonly ConfiguratorMetadata Metadata = ArgumentCatalog.Create();
@@ -175,5 +179,88 @@ internal static class CommandBuilderTests
         var query = Builder.BuildWebQueryString(d);
         Check.DoesNotContain(query, "a b&c", "a raw space and ampersand would corrupt the preview URL");
         Check.Contains(query, "url=a%20b%26c", "the value must be percent encoded");
+    }
+
+    private static void Uc3dSceneDefaultsRoundTrip()
+    {
+        var draft = Builder.CreateSceneDefaultDraft("uc3d");
+        Check.Equal("MatrixDesktop.exe --scene uc3d", Cmd(draft), "the selected scene supplies its own defaults");
+        Check.Equal("?scene=uc3d", Builder.BuildWebQueryString(draft), "preview and launch must use the same defaults");
+        var imported = Importer.Import(Cmd(draft), Draft()).Draft;
+        foreach (var key in Metadata.SceneDefaults["uc3d"].Keys)
+            Check.True(JsonNode.DeepEquals(draft[key], imported[key]), $"UC3D default {key} must survive a command round trip");
+        Check.Close(5, (double)imported["density"]!, 1e-9, "500 native streams at 100 columns needs density 5");
+        Check.Close(1, (double)Draft()["density"]!, 1e-9, "the Matrix scene keeps its existing defaults");
+    }
+
+    private static void Uc3dMatrixDefaultOverrides()
+    {
+        var draft = Builder.CreateSceneDefaultDraft("uc3d");
+        draft["volumetric"] = false;
+        draft["sidewaysMovement"] = false;
+        draft["fallSpeed"] = 0.3;
+        draft["numColumns"] = 80.0;
+        var command = Cmd(draft);
+        Check.Contains(command, "--volumetric false", "an explicit 2D override must survive the UC3D 3D default");
+        Check.Contains(command, "--sidewaysMovement false", "an explicit sideways override must survive");
+        Check.Contains(Builder.BuildWebQueryString(draft), "volumetric=false", "preview must preserve the same override");
+        var imported = Importer.Import(command, Draft()).Draft;
+        foreach (var key in new[] { "volumetric", "sidewaysMovement", "fallSpeed", "numColumns" })
+            Check.True(JsonNode.DeepEquals(draft[key], imported[key]), $"UC3D override {key} must round trip");
+    }
+
+    private static UserPreset PreviousUc3dStarter()
+    {
+        var draft = Draft();
+        draft["scene"] = "uc3d";
+        draft["volumetric"] = true;
+        draft["randomForwardMovement"] = true;
+        draft["codeColor"] = new JsonObject { ["r"] = 0.0, ["g"] = 0.698, ["b"] = 0.0 };
+        draft["cursorColor"] = new JsonObject { ["r"] = 0.0, ["g"] = 1.0, ["b"] = 0.698 };
+        draft["pictureDelay"] = 60.0;
+        draft["pictureDuration"] = 30.0;
+        return new UserPreset { Id = "seed-uc3d-trilogy", Name = "UC3D Trilogy", Values = draft };
+    }
+
+    private static void Uc3dStarterMigrates()
+    {
+        var previous = PreviousUc3dStarter();
+        var state = new ConfiguratorState
+        {
+            PresetSeedVersion = 3,
+            UserPresets = [previous],
+            SelectedPresetId = previous.Id,
+            LastDraft = StorageService.CloneObject(previous.Values),
+        };
+        Check.True(PresetSeeder.Seed(state, Builder, Importer), "version 4 must run for the previous starter");
+        Check.True(JsonNode.DeepEquals(Builder.CreateSceneDefaultDraft("uc3d"), previous.Values), "the exact old starter must use the current profile");
+        Check.True(JsonNode.DeepEquals(previous.Values, state.LastDraft), "an untouched selected starter draft must migrate with its preset");
+        Check.Equal(1, state.UserPresets.Count, "migration updates the starter without duplicates");
+        Check.True(!PresetSeeder.Seed(state, Builder, Importer), "the migration must run only once");
+    }
+
+    private static void Uc3dStarterEditsSurvive()
+    {
+        foreach (var edit in new[] { "value", "name", "deleted", "unsaved draft" })
+        {
+            var previous = PreviousUc3dStarter();
+            if (edit == "value") previous.Values["numColumns"] = 123.0;
+            if (edit == "name") previous.Name = "My UC3D";
+            var savedValues = previous.Values.DeepClone();
+            var lastDraft = StorageService.CloneObject(previous.Values);
+            lastDraft["numColumns"] = 111.0;
+            var state = new ConfiguratorState
+            {
+                PresetSeedVersion = 3,
+                UserPresets = edit == "deleted" ? [] : [previous],
+                SelectedPresetId = previous.Id,
+                LastDraft = StorageService.CloneObject(lastDraft),
+            };
+            Check.True(PresetSeeder.Seed(state, Builder, Importer), "version 4 advances even when no preset can change");
+            if (edit == "deleted") Check.Equal(0, state.UserPresets.Count, "a deleted starter must remain deleted");
+            else if (edit != "unsaved draft") Check.True(JsonNode.DeepEquals(savedValues, previous.Values), "a user-owned starter must retain its values: " + edit);
+            Check.True(JsonNode.DeepEquals(lastDraft, state.LastDraft), "a custom unsaved draft must survive: " + edit);
+            Check.Equal(edit == "name" ? "My UC3D" : "UC3D Trilogy", previous.Name, "preset names must survive migration");
+        }
     }
 }

@@ -1,3 +1,5 @@
+import uc3dDefaults from "./defaults.js";
+
 // Independent recreation from the donor's documented behavior. Motion constants are
 // intentionally explicit: they are not claimed to be recovered original constants.
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -42,6 +44,7 @@ export const defaults = {
   pictureDepth: 0, pictureMonochrome: true, pictureCaptions: true, pictureScale: 1,
   pictureDelay: 20, pictureDuration: 8, pictureSource: "all", showClock: false,
   clock12Hour: false, clockSize: 1, sound: "off", soundVolume: 0.25,
+  ...uc3dDefaults,
 };
 
 export function createScene(options = {}, pictureCount = 0) {
@@ -156,7 +159,7 @@ export function createGrid(config, aspect, photo = null) {
   const dimension = Math.round(clamp(finite(config.numColumns, 80), 4, 256));
   const baseColumns = aspect >= 1 ? dimension : Math.max(4, Math.round(dimension * aspect));
   const rows = Math.max(40, aspect >= 1 ? Math.round(dimension / aspect) : dimension);
-  const columns = Math.max(4, Math.round(baseColumns * (config.volumetric ? clamp(finite(config.density, 1), 0.1, 4) : 1)));
+  const columns = Math.max(4, Math.round(baseColumns * (config.volumetric ? clamp(finite(config.density, 1), 0.1, 8) : 1)));
   const data = new Float32Array(columns * rows * 6 * 10);
   const corners = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
   const scale = clamp(finite(config.pictureScale, 1), 0.1, 4) * 0.85;

@@ -668,6 +668,13 @@ UC3D scene options
 - Key: scene
 - Default: matrix
   Rendering scene: matrix or uc3d. UC3D uses its own camera, image formation and glyph renderer.
+  Selecting uc3d applies its scene profile unless explicitly overridden:
+  volumetric=true, numColumns=100, density=5 (allowed range 0.01 to 8),
+  fallSpeed=0.045, forwardSpeed=-0.675, codeColor=0.501961,0,1,
+  cursorColor=1,0.501961,1, sidewaysMovement=true, randomForwardMovement=true,
+  pictureMonochrome=false, pictureDelay=60, pictureDuration=30.
+  This fixed profile matches the owner's installed screensaver settings captured
+  on 2026-10-23. Other Default entries describe the ordinary Matrix scene.
 
 - Key: shadedLines
 - Default: true

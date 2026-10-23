@@ -83,6 +83,7 @@ After publishing, exercise the native applications and their media bridge:
 
 ```pwsh
 python tests\native-uc3d-smoke.py
+python tests\native-uc3d-smoke.py --case defaults --renderer both
 python tests\native-uc3d-smoke.py --publish publish\win-x64-fd --donor-directory C:\Private\UC3D-media
 ```
 

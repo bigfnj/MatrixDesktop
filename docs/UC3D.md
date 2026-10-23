@@ -3,13 +3,28 @@
 Choose **UC3D** in the configurator's Theme section, or run:
 
 ```cmd
-MatrixDesktop.exe --scene uc3d --volumetric true
+MatrixDesktop.exe --scene uc3d
 ```
 
-The **UC3D Trilogy** starter preset selects 3D motion, donor code/highlight
-colors, random travel, a 60-second picture gap and a 30-second picture episode.
-Pictures need a local media folder. A new preset is added once for existing
-users without restoring deleted starters or replacing edited presets.
+The UC3D defaults match the owner's installed screensaver settings captured on
+2026-10-23: purple code (`#8000FF`), pink highlights (`#FF80FF`), black background,
+3D rotation, random forward travel and sideways motion. Pictures, clock, sound,
+mouse control and desktop background start off. Explicit arguments override the
+profile, including values that equal the ordinary Matrix defaults.
+
+| Installed setting | UC3D default |
+| --- | --- |
+| 500 lines, glyph size 12 | `numColumns=100`, `density=5`, giving 500 streams in landscape windows and native glyph half-size 0.12 |
+| Fall speed 6 | `fallSpeed=0.045` |
+| Forward speed 6 | `forwardSpeed=-0.675`; random travel is enabled, so this constant applies after random travel is disabled |
+| Picture delay 60, original episode timing | `pictureDelay=60`, `pictureDuration=30` |
+| Green-only pictures disabled | `pictureMonochrome=false` |
+
+New **UC3D Trilogy** starter presets and untouched copies of the old starter
+use this profile. Edited presets and deleted starters are preserved. Pictures
+need a local media folder. The profile is a fixed
+snapshot of these settings; startup does not read or change the screensaver's
+registry configuration.
 
 For personal pictures, for example:
 
@@ -114,7 +129,9 @@ Existing MatrixDesktop speed/size controls use this compatibility mapping:
 These mappings are implemented in the shared scene and both shaders. Picture assembly,
 the glyph layout and ambient synthesis are modern implementations; a byte-
 identical native rebuild and exact visual equivalence are not claimed. The
-native random-number sequence and fixed stream population are not reproduced.
+native random-number sequence is not reproduced. Stream count still scales with
+window aspect ratio and the columns/density controls. The bundled font remains
+the default; choose a local donor atlas for the original character set.
 
 Both WebGL and WebGPU have a UC3D implementation. Browser tests assert the actual
 backend, picture colors and relief, motion, captions and teardown. The ordinary

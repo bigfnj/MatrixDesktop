@@ -1,3 +1,5 @@
+import uc3dDefaults from "./uc3d/defaults.js";
+
 const fonts = {
 	coptic: {
 		// The script the Gnostic codices were written in
@@ -526,7 +528,7 @@ const paramMapping = {
 	effect: { key: "effect", parser: (s) => s },
 	camera: { key: "useCamera", parser: isTrue },
 	numColumns: { key: "numColumns", parser: parseClampedInt(1, 256) },
-	density: { key: "density", parser: parseClampedFloat(0.01, 4) },
+	density: { key: "density", parser: parseClampedFloat(0.01, 8) },
 	resolution: { key: "resolution", parser: parseClampedFloat(0.05, 2) },
 	animationSpeed: {
 		key: "animationSpeed",
@@ -618,7 +620,7 @@ export default (urlParams) => {
 	);
 
 	if (validParams.effect != null) {
-		if (validParams.cursorColor == null) {
+		if (validParams.cursorColor == null && validParams.scene !== "uc3d") {
 			validParams.cursorColor = hsl(0, 0, 1);
 		}
 
@@ -647,6 +649,7 @@ export default (urlParams) => {
 	const config = {
 		...defaults,
 		...version,
+		...(validParams.scene === "uc3d" ? uc3dDefaults : {}),
 		...font,
 		...validParams,
 		baseTextureURL,

@@ -9,10 +9,12 @@ Current version: **1.1.0**. Tagged releases are listed on the [releases page](ht
 ### UC3D scene
 
 Select **UC3D** in the configurator's Theme section, or use
-`MatrixDesktop.exe --scene uc3d --volumetric true`. The new scene offers mouse and
+`MatrixDesktop.exe --scene uc3d`. The new scene offers mouse and
 automatic camera motion, pictures formed from code with optional 3D relief,
 clock and caption overlays, a desktop snapshot, and optional sound. The
-**UC3D Trilogy** starter preset uses recovered donor colors and timing.
+**UC3D Trilogy** starter preset uses the UC3D defaults: purple code, pink highlights,
+slow falling glyphs, 3D rotation and random forward/sideways motion, matching the
+owner's installed screensaver settings captured on 2026-10-23.
 
 Personal pictures and privately imported donor media are local inputs. The
 package includes no donor binaries, pictures, music or recovered source.
@@ -313,7 +315,7 @@ are described in [UC3D options and local media](docs/UC3D.md) and the embedded a
 
 - `numColumns` (int): size of the glyph grid, clamped to 1–256.
 - `width` (int): alias of `numColumns`.
-- `density` (number): volumetric density multiplier, clamped to 0.01–4.
+- `density` (number): volumetric density multiplier, clamped to 0.01 to 8.
 - `resolution` (number): render resolution scale factor, clamped to 0.05–2.
 - `animationSpeed` (number): global animation multiplier.
 - `forwardSpeed` (number): forward motion speed in volumetric mode.

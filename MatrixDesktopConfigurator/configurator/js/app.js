@@ -136,6 +136,15 @@ const makeSwatchButton = (color, { disabled = false } = {}) => {
 };
 
 const allFields = () => state.metadata.groups.flatMap((group) => group.fields);
+const defaultValueFor = (field) => state.metadata.sceneDefaults?.[state.draft.scene]?.[field.id] ?? field.defaultValue;
+const editedSceneFields = new Set();
+const rememberDraftEdits = (explicitKeys = []) => {
+	editedSceneFields.clear();
+	const defaults = { ...state.defaultDraft, ...state.metadata.sceneDefaults?.[state.draft.scene] };
+	for (const key of Object.keys(state.draft))
+		if (key !== "scene" && JSON.stringify(state.draft[key]) !== JSON.stringify(defaults[key])) editedSceneFields.add(key);
+	for (const key of explicitKeys) if (key !== "scene") editedSceneFields.add(key);
+};
 const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "transPride"]);
 
 // Fields whose value changes which *other* fields are gated (see
@@ -145,6 +154,7 @@ const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "
 
 const normalizeDraft = (draft) => ({
 	...clone(state.defaultDraft),
+	...clone(state.metadata?.sceneDefaults?.[draft?.scene] || {}),
 	...(draft ? clone(draft) : {}),
 });
 
@@ -202,6 +212,15 @@ const updateCommand = async () => {
 const updateDraftValue = (field, value) => {
 	// A picker opened before a scene change can finish after its field is disabled.
 	if (getDisabledReason(field)) return;
+	if (field.id === "scene" && value !== state.draft.scene) {
+		const previous = { ...state.defaultDraft, ...state.metadata.sceneDefaults?.[state.draft.scene] };
+		const next = { ...state.defaultDraft, ...state.metadata.sceneDefaults?.[value] };
+		for (const key of Object.keys(next)) {
+			if (key !== "scene" && !editedSceneFields.has(key) && JSON.stringify(state.draft[key]) === JSON.stringify(previous[key]))
+				state.draft[key] = clone(next[key]);
+		}
+	}
+	if (field.id !== "scene") editedSceneFields.add(field.id);
 	state.draft[field.id] = value;
 	setDirty(true);
 	scheduleSaveDraft();
@@ -444,7 +463,7 @@ const renderSelectField = (field) => {
 	for (const option of field.options || []) {
 		select.add(new Option(option.label, option.value));
 	}
-	select.value = state.draft[field.id] ?? field.defaultValue ?? "";
+	select.value = state.draft[field.id] ?? defaultValueFor(field) ?? "";
 	select.disabled = Boolean(getDisabledReason(field));
 	select.addEventListener("change", () => {
 		updateDraftValue(field, select.value);
@@ -502,7 +521,7 @@ const renderNumberField = (field) => {
 	};
 
 	input.addEventListener("input", () => {
-		const value = input.value === "" ? null : toNumber(input.value, field.defaultValue ?? 0);
+		const value = input.value === "" ? null : toNumber(input.value, defaultValueFor(field) ?? 0);
 		updateDraftValue(field, value);
 		applyValidation();
 	});
@@ -516,7 +535,7 @@ const renderNumberField = (field) => {
 			return;
 		}
 		if (input.value === "") {
-			const fallback = field.defaultValue;
+			const fallback = defaultValueFor(field);
 			if (fallback == null) {
 				updateDraftValue(field, null);
 			} else {
@@ -524,7 +543,7 @@ const renderNumberField = (field) => {
 				updateDraftValue(field, toNumber(fallback, 0));
 			}
 		} else {
-			let num = toNumber(input.value, field.defaultValue ?? 0);
+			let num = toNumber(input.value, defaultValueFor(field) ?? 0);
 			if (field.min != null && num < field.min) num = field.min;
 			if (field.max != null && num > field.max) num = field.max;
 			if (String(num) !== input.value) {
@@ -892,6 +911,7 @@ const importCommand = async () => {
 		const result = await requestHost("importCommand", { command });
 		state.selectedPresetId = null;
 		state.draft = normalizeDraft(result.draft);
+		rememberDraftEdits(result.applied || []);
 		state.lastDraft = clone(state.draft);
 		state.presets = result.state?.userPresets || state.presets;
 		showImportPanel(false);
@@ -914,6 +934,7 @@ const randomizeDraft = async () => {
 			scope,
 		});
 		state.draft = normalizeDraft(result.draft);
+		rememberDraftEdits();
 		setDirty(true);
 		scheduleSaveDraft();
 		refreshAll();
@@ -944,6 +965,7 @@ const bindEvents = () => {
 		const preset = state.presets.find((item) => item.id === id);
 		state.selectedPresetId = id;
 		state.draft = normalizeDraft(preset?.values || state.lastDraft);
+		rememberDraftEdits();
 		setDirty(false);
 		scheduleSaveDraft();
 		refreshAll();
@@ -952,6 +974,7 @@ const bindEvents = () => {
 	el.newPresetButton.addEventListener("click", () => {
 		state.selectedPresetId = null;
 		state.draft = normalizeDraft(state.defaultDraft);
+		rememberDraftEdits();
 		setDirty(true);
 		scheduleSaveDraft();
 		refreshAll();
@@ -1071,6 +1094,7 @@ const init = async () => {
 		state.selectedPresetId = payload.state?.selectedPresetId || null;
 		state.lastDraft = normalizeDraft(payload.state?.lastDraft);
 		state.draft = normalizeDraft(state.lastDraft);
+		rememberDraftEdits();
 		state.activeGroupId = state.metadata.groups[0]?.id || null;
 		el.storageStatus.textContent = payload.storage?.portable ? "Portable preset storage" : "AppData preset storage";
 

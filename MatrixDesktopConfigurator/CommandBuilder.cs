@@ -28,6 +28,18 @@ internal sealed partial class CommandBuilder
         return draft;
     }
 
+    public JsonObject CreateSceneDefaultDraft(string scene)
+    {
+        var draft = CreateDefaultDraft();
+        draft["scene"] = scene;
+        if (_metadata.SceneDefaults.TryGetValue(scene, out var defaults))
+        {
+            foreach (var (key, value) in defaults)
+                draft[key] = JsonSerializer.SerializeToNode(value, _jsonOptions);
+        }
+        return draft;
+    }
+
     public string BuildCommand(JsonObject values, bool includeDefaults, bool forTest)
     {
         return string.Join(" ", BuildTokens(values, includeDefaults, forTest).Select(QuoteToken));
@@ -113,6 +125,7 @@ internal sealed partial class CommandBuilder
     private void AddWebTokens(List<string> tokens, JsonObject values, bool includeDefaults)
     {
         var effect = GetString(values, "effect", "palette");
+        var scene = GetString(values, "scene", "matrix");
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
             if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
@@ -126,7 +139,7 @@ internal sealed partial class CommandBuilder
                 continue;
             }
 
-            if (!includeDefaults && IsDefault(field, value))
+            if (!includeDefaults && IsDefault(field, value, scene))
             {
                 continue;
             }
@@ -162,13 +175,16 @@ internal sealed partial class CommandBuilder
     // once ArgumentCatalog.Create has run, so caching is safe by construction.
     private readonly Dictionary<string, string?> _defaultJsonByFieldId = [];
 
-    private bool IsDefault(ArgumentDefinition field, JsonNode value)
+    private bool IsDefault(ArgumentDefinition field, JsonNode value, string scene)
     {
-        if (!_defaultJsonByFieldId.TryGetValue(field.Id, out var defaultJson))
+        var cacheKey = scene + ":" + field.Id;
+        if (!_defaultJsonByFieldId.TryGetValue(cacheKey, out var defaultJson))
         {
-            var defaultNode = JsonSerializer.SerializeToNode(field.DefaultValue, _jsonOptions);
+            var defaultValue = _metadata.SceneDefaults.TryGetValue(scene, out var defaults) && defaults.TryGetValue(field.Id, out var sceneDefault)
+                ? sceneDefault : field.DefaultValue;
+            var defaultNode = JsonSerializer.SerializeToNode(defaultValue, _jsonOptions);
             defaultJson = defaultNode is null ? null : NormalizeJson(defaultNode);
-            _defaultJsonByFieldId[field.Id] = defaultJson;
+            _defaultJsonByFieldId[cacheKey] = defaultJson;
         }
 
         if (defaultJson is null)
@@ -411,6 +427,7 @@ internal sealed partial class CommandBuilder
     {
         var pairs = new List<string>();
         var effect = GetString(values, "effect", "palette");
+        var scene = GetString(values, "scene", "matrix");
 
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
@@ -422,7 +439,7 @@ internal sealed partial class CommandBuilder
             var value = values[field.Id];
             if (value is null) continue;
 
-            if (IsDefault(field, value)) continue;
+            if (IsDefault(field, value, scene)) continue;
 
             var serialized = SerializeWebValue(field, value);
             if (string.IsNullOrWhiteSpace(serialized)) continue;

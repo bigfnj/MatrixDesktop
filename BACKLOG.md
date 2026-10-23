@@ -27,7 +27,7 @@ gate is decoration.
 
 | Layer | Catches | Blind to |
 | --- | --- | --- |
-| `tests\MatrixDesktop.Tests` (98 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
+| `tests\MatrixDesktop.Tests` (103 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
 | `tests\web-smoke.py` (14 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 | `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
@@ -106,6 +106,8 @@ Every confirmed additional finding is recorded here and resolved in the follow-u
 | Null WebGPU context or failed unconfigure can skip device destruction | FIXED | Initialization rejects missing contexts explicitly and cleanup always destroys its owned device. Fault injection and a device-destruction mutation cover the failure path. |
 | Hosted Windows checkout fails the served-shader witness | FIXED | Fetch text retains CRLF while Python text reads normalize it. Witnesses now compare fetched bytes with file bytes; the failure reproduced on a clean Windows checkout and the corrected check retains exact content validation. Failed Python probes also print their logs in the gate. |
 | Slow CI screenshot processing races the slideshow caption lifetime | FIXED | Browser probes hold the displayed RAF timestamp while inspecting picture pixels and captions. They resume and prove frames advance before teardown assertions, preserving a live-loop failure witness. Production slideshow timing is unchanged. |
+| UC3D defaults differ from the owner's installed screensaver settings | FIXED | Scene profile captures purple/pink colors, native glyph/fall settings, 500 landscape streams and 3D/random/sideways motion. Command import/export and preview share scene defaults while preserving explicit overrides. An old-green color mutation fails the named bare-UC3D scenario. Exact untouched starter migration preserves edited/deleted presets. Published native defaults smoke verifies both backends and the configurator. |
+| Native preview checks can observe an empty URL or a stale saved scene | FIXED | URL waits tolerate the initial empty frame and require the fresh bare-profile query or exact assigned media-preview target. A deployed edit-tracking mutation reaches the expected explicit-override failure after preview navigation; the original assets are restored and checked again. |
 
 No additional confirmed dead code, inert function or call to a missing target remained in
 the audited paths. Shader/device behavior was also exercised on this workstation; physical
