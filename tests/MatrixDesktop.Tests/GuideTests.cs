@@ -88,6 +88,18 @@ internal static class GuideTests
             names.Add(m.Groups[1].Value);
         }
 
+        // ZMatrix parameters are generated from their shared validation spec.
+        // Read that bounded declaration only when the actual mapping includes it.
+        if (Regex.IsMatch(block, @"^\s*\.\.\.zmatrixParamMapping\s*,?\s*$", RegexOptions.Multiline))
+        {
+            var settings = Resource("zmatrix-settings.js.txt");
+            var specStart = settings.IndexOf("export const zmatrixSettingsSpec = Object.freeze({", StringComparison.Ordinal);
+            var specEnd = specStart < 0 ? -1 : settings.IndexOf("\n});", specStart, StringComparison.Ordinal);
+            Check.True(specStart >= 0 && specEnd > specStart, "ZMatrix settings spec must be a bounded object declaration");
+            foreach (Match match in Regex.Matches(settings[specStart..specEnd], @"\b(zm\w+)\s*:"))
+                names.Add(match.Groups[1].Value);
+        }
+
         Check.True(names.Count > 40,
             $"only parsed {names.Count} parameters out of config.js, so the parser no longer matches the " +
             "file and every assertion built on it would pass against almost nothing");

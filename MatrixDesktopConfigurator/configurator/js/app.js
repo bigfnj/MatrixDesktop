@@ -20,6 +20,7 @@ const state = {
 	// v1.0 additions
 	uiTheme: "dark",
 	previewTimer: 0,
+	previewRequestVersion: 0,
 	// Embedded live-preview pane (iframe of the matrix web app).
 	previewVisible: false,
 	previewAvailable: false,
@@ -45,6 +46,9 @@ const el = {
 	importButton: document.querySelector("#importButton"),
 	importPanel: document.querySelector("#importPanel"),
 	importInput: document.querySelector("#importInput"),
+	importFileButton: document.querySelector("#importFileButton"),
+	screensaverButton: document.querySelector("#screensaverButton"),
+	restoreScreensaverButton: document.querySelector("#restoreScreensaverButton"),
 	applyImportButton: document.querySelector("#applyImportButton"),
 	cancelImportButton: document.querySelector("#cancelImportButton"),
 	copyButton: document.querySelector("#copyButton"),
@@ -151,7 +155,7 @@ const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "tr
 // Fields whose value changes which *other* fields are gated (see
 // getDisabledReason). Editing one of these must re-render the whole group so
 // the dependent fields pick up their new enabled/disabled state.
-const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "uc3dControls", "volumetric", "forwardMovement", "randomForwardMovement", "showPictures", "showClock", "sound"]);
+const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "uc3dControls", "volumetric", "forwardMovement", "randomForwardMovement", "showPictures", "showClock", "sound", "zmBackgroundMode", "zmMonotonousCleanupEnabled", "zmRandomizedCleanupEnabled"]);
 
 const normalizeDraft = (draft) => {
 	const saved = draft ? clone(draft) : {};
@@ -208,6 +212,7 @@ const updateCommand = async () => {
 		});
 		el.commandOutput.value = result.command || "MatrixDesktop.exe";
 	} catch (error) {
+		el.commandOutput.value = "";
 		setStatus(error.message, "error");
 	}
 };
@@ -236,17 +241,20 @@ const updateDraftValue = (field, value) => {
 // roundtrips). Per the chosen design, each settled change reloads the preview
 // with the new query string (debounced), rather than patching it live.
 const schedulePreviewPush = () => {
-	if (!state.previewVisible || !state.previewAvailable) return;
+	const version = ++state.previewRequestVersion;
 	window.clearTimeout(state.previewTimer);
+	if (!state.previewVisible || !state.previewAvailable) return;
 	state.previewTimer = window.setTimeout(async () => {
 		try {
 			const result = await requestHost("buildWebQuery", { draft: state.draft });
+			if (version !== state.previewRequestVersion || !state.previewVisible) return;
 			const url = `${state.previewOrigin}index.html${result?.query || ""}`;
 			if (el.previewFrame && url !== state.previewLastUrl) {
 				state.previewLastUrl = url;
 				el.previewFrame.src = url;
 			}
 		} catch (error) {
+			if (version !== state.previewRequestVersion || !state.previewVisible) return;
 			setStatus(`Preview update failed: ${error.message}`, "error");
 		}
 	}, 250);
@@ -262,6 +270,9 @@ const setPreviewVisible = (visible) => {
 	if (state.previewVisible) {
 		state.previewLastUrl = ""; // force a refresh on next push
 		schedulePreviewPush();
+	} else {
+		++state.previewRequestVersion;
+		window.clearTimeout(state.previewTimer);
 	}
 };
 
@@ -363,6 +374,33 @@ const renderFields = () => {
 			grid.append(renderField(field));
 		}
 		section.append(grid);
+		if (group.id === "launch" && el.screensaverButton && el.restoreScreensaverButton) {
+			const actions = document.createElement("div"); actions.className = "screensaver-actions";
+			actions.append(el.screensaverButton, el.restoreScreensaverButton); section.append(actions);
+		}
+		if (group.id === "zmatrix" && state.draft.scene === "zmatrix" && state.draft.zmImportNotes?.length) {
+			const report = document.createElement("details");
+			report.className = "import-report";
+			const summary = document.createElement("summary");
+			summary.textContent = "Imported settings: " + state.draft.zmImportNotes.length + " migration notes";
+			const list = document.createElement("ul");
+			for (const note of state.draft.zmImportNotes) {
+				const item = document.createElement("li"); item.textContent = String(note); list.append(item);
+			}
+			report.append(summary, list);
+			if (state.draft.zmImportedSettings) {
+				const source = document.createElement("details");
+				const title = document.createElement("summary"); title.textContent = "Retained source values";
+				const values = document.createElement("dl");
+				for (const [key, value] of Object.entries(state.draft.zmImportedSettings)) {
+					const term = document.createElement("dt"); term.textContent = key;
+					const description = document.createElement("dd"); description.textContent = String(value);
+					values.append(term, description);
+				}
+				source.append(title, values); report.append(source);
+			}
+			section.append(report);
+		}
 		surface.append(section);
 	}
 
@@ -378,12 +416,13 @@ const renderFields = () => {
 
 const renderField = (field) => {
 	const renderers = { bool: renderBoolField, select: renderSelectField, number: renderNumberField,
-		color: renderColorField, palette: renderPaletteField, stripes: renderStripesField };
+		color: renderColorField, rgb8: renderRgb8Field, font: renderFontField, characters: renderCharacterField,
+		phrases: renderPhraseField, palette: renderPaletteField, stripes: renderStripesField };
 	const shell = (renderers[field.kind] || renderTextField)(field);
 	// Compound editors contain several native controls. Disable every descendant,
 	// including swatches and palette actions, rather than only styling the shell.
 	if (getDisabledReason(field)) {
-		for (const control of shell.querySelectorAll("input, select, button")) control.disabled = true;
+		for (const control of shell.querySelectorAll("input, select, button, textarea")) control.disabled = true;
 	}
 	return shell;
 };
@@ -394,6 +433,13 @@ const uc3dFields = new Set(["uc3dControls",...nativeUc3dFields,"codeColor","dono
 const legacyOnlyFields = new Set(["effect","url","camera","clickRipples","clickRippleShape","glintColor","palette","stripeColors","ditherMagnitude","slant","loops","skipIntro","testFix"]);
 
 const getDisabledReason = (field) => {
+    const zmatrix = state.draft.scene === "zmatrix";
+    if (field.id.startsWith("zm") && !zmatrix) return "Choose the ZMatrix scene in Theme to use this setting.";
+    if (zmatrix && field.scope === "web" && !field.id.startsWith("zm") && !["scene", "renderer", "resolution", "fps", "once", "suppressWarnings"].includes(field.id))
+        return "Used by Matrix or UC3D. ZMatrix has independent text, stream and color controls.";
+    if (zmatrix && field.id === "zmBackTrace" && !state.draft.zmMonotonousCleanupEnabled) return "Enable Monotonous cleanup to use its fixed glyph distance.";
+    if (zmatrix && ["zmLeading", "zmSpacePad"].includes(field.id) && !state.draft.zmRandomizedCleanupEnabled) return "Enable Randomized cleanup to use these glyph distances.";
+    if (zmatrix && field.id === "zmBlendMode" && state.draft.zmBackgroundMode !== "bitmap") return "Choose Desktop wallpaper background to use bitwise blending.";
     const uc3d = state.draft.scene === "uc3d";
     if (uc3dFields.has(field.id) && !uc3d) return "Choose the UC3D scene in Theme to use this setting.";
     const original = state.draft.uc3dControls !== "legacy";
@@ -414,6 +460,9 @@ const getDisabledReason = (field) => {
     if (uc3d && field.id === "soundVolume" && state.draft.sound === "off") return "Choose a sound mode first.";
     if (uc3d && field.id === "musicFile" && state.draft.sound !== "music") return "Choose Ambient music / local file first.";
 	const windowMode = state.draft.windowMode || "borderless";
+	if (field.id.startsWith("wallpaper") && windowMode !== "wallpaper") return "Choose Live desktop wallpaper in Window mode first.";
+	if (windowMode === "wallpaper" && ["topmost", "hideCursor", "exitOnAnyKey", "exitOnEsc", "globalKeyExit", "workingArea"].includes(field.id))
+		return "Wallpaper stays behind desktop icons and uses its tray menu for controls.";
 	const effect = state.draft.effect || "palette";
 	if (field.id === "monitor" && windowMode !== "single-monitor") {
 		return "Only used when Window mode is Single monitor.";
@@ -622,6 +671,157 @@ const renderTextField = (field) => {
         shell.append(browse);
     }
 	return shell;
+};
+
+const invalidBmpText = value => /[\x00-\x1f\x7f\ud800-\udfff]/.test(value);
+const renderCharacterField = (field) => {
+	const shell = createFieldShell(field, "wide-field");
+	const input = document.createElement("textarea");
+	input.rows = 2;
+	input.setAttribute("aria-label", field.label);
+	input.value = (state.draft[field.id] ?? field.defaultValue ?? []).join("");
+	const hint = document.createElement("div"); hint.className = "field-help";
+	const validate = () => {
+		const values = [...input.value];
+		const valid = values.length > 0 && values.length <= 512 && !invalidBmpText(input.value);
+		input.classList.toggle("invalid-input", !valid);
+		input.setCustomValidity(valid ? "" : "Use 1 to 512 BMP characters without control characters.");
+		hint.textContent = valid ? new Set(values).size + " distinct characters" : input.validationMessage;
+		return valid;
+	};
+	input.addEventListener("input", () => {
+		if (getDisabledReason(field)) return;
+		if (validate()) updateDraftValue(field, [...new Set([...input.value])]);
+	});
+	input.addEventListener("blur", () => { if (validate()) input.value = [...new Set([...input.value])].join(""); });
+	validate(); shell.append(input, hint); return shell;
+};
+
+const renderPhraseField = (field) => {
+	const shell = createFieldShell(field, "wide-field");
+	const editor = document.createElement("div"); editor.className = "phrase-editor";
+	let phrases = [...(state.draft[field.id] ?? field.defaultValue ?? [])];
+	const hint = document.createElement("div"); hint.className = "field-help";
+	const save = () => {
+		const valid = phrases.length <= 64 && phrases.every(value => value.length > 0 && value.length <= 256 && !invalidBmpText(value))
+			&& new Set(phrases.join("")).size <= 1024;
+		hint.textContent = valid ? phrases.length + " phrase entries" : "Use up to 64 nonempty phrases, 256 BMP characters each and 1024 distinct glyphs.";
+		hint.classList.toggle("validation-error", !valid);
+		if (valid) updateDraftValue(field, [...new Set(phrases)]);
+		return valid;
+	};
+	const draw = () => {
+		editor.replaceChildren();
+		phrases.forEach((phrase, index) => {
+			const row = document.createElement("div"); row.className = "phrase-row";
+			const input = document.createElement("input"); input.type = "text"; input.value = phrase; input.maxLength = 256;
+			input.setAttribute("aria-label", "Phrase " + (index + 1));
+			input.addEventListener("input", () => {
+				if (getDisabledReason(field)) return;
+				phrases[index] = input.value;
+				input.classList.toggle("invalid-input", !save());
+			});
+			const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
+			remove.addEventListener("click", () => { if (!getDisabledReason(field)) { phrases.splice(index, 1); save(); draw(); } });
+			row.append(input, remove); editor.append(row);
+		});
+		const add = document.createElement("button"); add.type = "button"; add.textContent = "Add phrase";
+		add.disabled = phrases.length >= 64;
+		add.addEventListener("click", () => { if (!getDisabledReason(field) && phrases.length < 64) { phrases.push("New phrase"); save(); draw(); } });
+		editor.append(add);
+		if (getDisabledReason(field)) for (const control of editor.querySelectorAll("input, button")) control.disabled = true;
+	};
+	hint.textContent = phrases.length + " phrase entries"; draw(); shell.append(editor, hint); return shell;
+};
+
+const renderFontField = (field) => {
+	const shell = createFieldShell(field, "wide-field");
+	const editor = document.createElement("details"); editor.className = "font-editor";
+	const summary = document.createElement("summary");
+	let font = clone(state.draft[field.id] ?? field.defaultValue);
+	const updateSummary = () => { summary.textContent = font.name + ", height " + font.height + (font.italic ? ", italic" : ""); };
+	updateSummary(); editor.append(summary);
+	const grid = document.createElement("div"); grid.className = "font-grid";
+	const ordered = [...(state.metadata.fontFields || [])].sort((a, b) => Number(b.id === "name") - Number(a.id === "name"));
+	for (const option of ordered) {
+		const label = document.createElement("label"); label.textContent = option.label;
+		const input = document.createElement("input"); input.dataset.fontField = option.id;
+		input.setAttribute("aria-label", field.label + ": " + option.label);
+		input.type = option.kind === "bool" ? "checkbox" : option.kind === "number" ? "number" : "text";
+		if (input.type === "checkbox") {
+			input.checked = Boolean(font[option.id]);
+			input.addEventListener("change", () => {
+				if (getDisabledReason(field)) return;
+				font[option.id] = input.checked; updateDraftValue(field, clone(font)); updateSummary();
+			});
+		} else {
+			input.value = font[option.id] ?? option.defaultValue ?? "";
+			if (input.type === "number") { input.min = String(option.min); input.max = String(option.max); input.step = "1"; }
+			else {
+				input.maxLength = 31;
+				const list = document.createElement("datalist"); list.id = field.id + "-families";
+				for (const name of state.fontNames || []) list.append(new Option(name, name));
+				input.setAttribute("list", list.id); label.append(list);
+			}
+			input.addEventListener("input", () => {
+				const valid = input.type === "number" ? input.value !== "" && Number.isFinite(Number(input.value))
+					&& Number(input.value) >= option.min && Number(input.value) <= option.max
+					: Boolean(input.value.trim()) && input.value.length <= 31 && !invalidBmpText(input.value);
+				input.classList.toggle("invalid-input", !valid);
+				input.setCustomValidity(valid ? "" : input.type === "number" ? "Allowed range: " + option.min + " to " + option.max : "Use a font family name of 1 to 31 characters.");
+			});
+			input.addEventListener("blur", () => {
+				if (getDisabledReason(field)) return;
+				let next;
+				if (input.type === "number") {
+					const numeric = input.value === "" ? Number(field.defaultValue[option.id]) : Number(input.value);
+					next = Math.max(option.min, Math.min(option.max, Number.isFinite(numeric) ? Math.trunc(numeric) : Number(field.defaultValue[option.id])));
+					if (option.id === "family") next &= 0xf0;
+				} else next = input.value.trim() && !invalidBmpText(input.value) ? input.value.trim().slice(0, 31) : field.defaultValue[option.id];
+				font[option.id] = next; input.value = String(next); input.classList.remove("invalid-input"); input.setCustomValidity("");
+				updateDraftValue(field, clone(font)); updateSummary();
+			});
+		}
+		label.append(input); grid.append(label);
+	}
+	editor.append(grid); shell.append(editor); return shell;
+};
+
+const renderRgb8Field = (field) => {
+	const shell = createFieldShell(field);
+	const editor = document.createElement("div"); editor.className = "color-editor";
+	const initial = state.draft[field.id] ?? field.defaultValue;
+	let color = { r: Number(initial.r), g: Number(initial.g), b: Number(initial.b) };
+	const normalized = () => ({ r: color.r / 255, g: color.g / 255, b: color.b / 255 });
+	const swatch = makeSwatchButton(normalized());
+	const numbers = document.createElement("div"); numbers.className = "rgb-grid";
+	const inputs = {};
+	const commit = next => {
+		if (getDisabledReason(field)) return;
+		color = Object.fromEntries(["r", "g", "b"].map(channel => [channel, Math.max(0, Math.min(255, Math.round(next[channel])))]));
+		for (const channel of ["r", "g", "b"]) inputs[channel].value = String(color[channel]);
+		swatch.style.background = colorToHex(normalized()); updateDraftValue(field, clone(color));
+	};
+	for (const channel of ["r", "g", "b"]) {
+		const input = document.createElement("input"); input.type = "number"; input.min = "0"; input.max = "255"; input.step = "1";
+		input.dataset.channel = channel; input.setAttribute("aria-label", field.label + " " + channel.toUpperCase()); input.value = String(color[channel]);
+		input.addEventListener("input", () => {
+			const n = Number(input.value);
+			const valid = input.value !== "" && Number.isFinite(n) && n >= 0 && n <= 255;
+			input.classList.toggle("invalid-input", !valid);
+			if (valid) commit({ ...color, [channel]: n });
+		});
+		input.addEventListener("blur", () => {
+			const n = input.value === "" ? Number(field.defaultValue[channel]) : Number(input.value);
+			commit({ ...color, [channel]: Number.isFinite(n) ? n : Number(field.defaultValue[channel]) });
+			input.classList.remove("invalid-input");
+		});
+		inputs[channel] = input; numbers.append(input);
+	}
+	swatch.addEventListener("click", () => {
+		if (!getDisabledReason(field)) openColorPicker(swatch, normalized(), next => commit({ r: next.r * 255, g: next.g * 255, b: next.b * 255 }));
+	});
+	editor.append(swatch, numbers); shell.append(editor); return shell;
 };
 
 const renderColorField = (field) => {
@@ -941,12 +1141,12 @@ const showImportPanel = (show) => {
 const importCommand = async () => {
 	const command = el.importInput.value.trim();
 	if (!command) {
-		setStatus("Paste a MatrixDesktop command or argument line first.", "error");
+		setStatus("Paste a MatrixDesktop command, arguments or ZMatrix .cfg first.", "error");
 		return;
 	}
 
 	try {
-		const result = await requestHost("importCommand", { command });
+		const result = await requestHost("importCommand", { command, draft: state.draft });
 		state.selectedPresetId = null;
 		state.draft = normalizeDraft(result.draft);
 		rememberDraftEdits(result.applied || []);
@@ -957,7 +1157,7 @@ const importCommand = async () => {
 		refreshAll();
 		const applied = result.applied?.length || 0;
 		const ignored = result.ignored?.length || 0;
-		const suffix = ignored ? ` Ignored ${ignored} unknown setting${ignored === 1 ? "" : "s"}.` : "";
+		const suffix = ignored ? " Retained " + ignored + " unknown, unused or invalid settings for review." : "";
 		setStatus(`Imported ${applied} setting${applied === 1 ? "" : "s"}.${suffix}`, ignored ? "normal" : "ok");
 	} catch (error) {
 		setStatus(error.message, "error");
@@ -1025,6 +1225,24 @@ const bindEvents = () => {
 	el.randomizeButton.addEventListener("click", randomizeDraft);
 	el.importButton.addEventListener("click", () => showImportPanel(el.importPanel.hidden));
 	el.applyImportButton.addEventListener("click", importCommand);
+	el.importFileButton?.addEventListener("click", async () => {
+		try {
+			const result = await requestHost("browseConfig");
+			if (result?.text != null) { el.importInput.value = result.text; showImportPanel(true); }
+		} catch (error) { setStatus(error.message, "error"); }
+	});
+	el.screensaverButton?.addEventListener("click", async () => {
+		try {
+			const result = await requestHost("useScreensaver", { draft: state.draft });
+			setStatus(result?.message || "Screensaver profile saved.", "ok");
+		} catch (error) { setStatus(error.message, "error"); }
+	});
+	el.restoreScreensaverButton?.addEventListener("click", async () => {
+		try {
+			const result = await requestHost("restoreScreensaver");
+			setStatus(result?.message || "Previous screensaver restored.", "ok");
+		} catch (error) { setStatus(error.message, "error"); }
+	});
 	el.cancelImportButton.addEventListener("click", () => showImportPanel(false));
 
 	el.copyButton.addEventListener("click", async () => {
@@ -1127,6 +1345,7 @@ const init = async () => {
 	try {
 		const payload = await requestHost("loadState");
 		state.metadata = payload.metadata;
+		state.fontNames = payload.fonts || [];
 		state.defaultDraft = payload.defaultDraft;
 		state.presets = payload.state?.userPresets || [];
 		state.selectedPresetId = payload.state?.selectedPresetId || null;

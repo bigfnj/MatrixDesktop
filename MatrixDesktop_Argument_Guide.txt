@@ -1,4 +1,4 @@
-﻿MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.1.0)
+﻿MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.2.0)
 =====================================================
 
 This file is embedded in both MatrixDesktop.exe and MatrixDesktopConfigurator.exe.
@@ -33,6 +33,13 @@ writable.
 ------------------------
 The wrapper accepts multiple input styles (you can mix them):
 
+Structured ZMatrix font/list arguments accept raw JSON or json64: followed by
+unpadded base64url UTF-8 JSON (at most 64 KB decoded). The configurator encodes
+these values in Copy commands so shell characters inside phrases stay literal.
+Direct Test Argument, live preview and Export .ps1 retain structured JSON.
+Windows command lines are limited to 32767 UTF-16 characters; an oversized
+generated command or direct launch reports that limit instead of truncating it.
+
 1. Raw query string (single argument)
    - MatrixDesktop.exe "?version=3d&effect=mirror"
    - MatrixDesktop.exe "version=3d&effect=mirror"   (also accepted)
@@ -62,6 +69,7 @@ Case sensitivity rules (IMPORTANT)
 ---------------------------------------------------
 Numbers
 - Parsed as JavaScript parseFloat()/parseInt() in the web app.
+- ZMatrix settings use finite whole-value parsing and reject trailing text such as 50%.
 - Decimals are supported: 0.5, 1.25, -0.1
 - Scientific notation usually works: 1e-2
 - Percent signs are NOT a “percentage” feature.
@@ -96,9 +104,10 @@ Comma-separated lists
   because the parser trims each field. Unquoted and spaced does not.
 
 Colors
-- Every color channel is a 0..1 float, not 0..255. So full red is 1,0,0 and NOT
+- Matrix and UC3D color channels are 0..1 floats. So full red is 1,0,0 and NOT
   255,0,0. See section 4.7 for the per-flag formats (RGB triples, HSL triples,
   palette stops, stripe sequences).
+- ZMatrix's zm*Color arguments use byte RGB triples, 0..255, matching its native controls.
 - A stripe sequence is one flat comma-separated list of triples with no
   grouping punctuation. Six colors is eighteen numbers:
   MatrixDesktop.exe --effect stripes --stripeColors 1,0,0,1,0.5,0,1,1,0,0,1,0,0,0,1,0.5,0,0.5
@@ -109,6 +118,32 @@ Colors
 These flags control the desktop shell.
 
 Windowing / monitor selection
+- --wallpaper
+  Default: OFF
+  Meaning: run behind desktop icons across the virtual desktop, with a tray menu.
+  Available with scene=matrix, scene=uc3d and scene=zmatrix. Does not replace the
+  saved Windows wallpaper. Escape and ordinary typing do not close wallpaper mode.
+  The last window-mode flag wins. Test Argument always uses a normal window.
+
+- --wallpaper-input / --no-wallpaper-input
+  Default: OFF
+  Meaning: forward desktop pointer movement/clicks to interactive visual effects.
+  Does not consume the desktop click or bring the wallpaper to the foreground.
+
+- --wallpaper-pause-fullscreen / --no-wallpaper-pause-fullscreen
+  Default: ON
+  Meaning: automatically pause when a foreground application covers a monitor.
+
+- --wallpaper-pause-battery / --no-wallpaper-pause-battery
+  Default: OFF
+  Meaning: pause while the workstation reports that it is running on battery.
+
+- --process-priority auto|idle|below-normal|normal|above-normal|high|realtime
+  Default: auto
+  Meaning: auto uses Idle for wallpaper and Normal for other modes. This controls
+  the host process, not a guarantee about WebView2 renderer or GPU scheduling.
+  Windows may reject an elevated priority; the tray/log reports when it could not be applied.
+
 - --borderless
   Aliases: --fullscreen, --span, --span-all, --spanall
   Default: ON
@@ -667,7 +702,8 @@ UC3D scene options
 
 - Key: scene
 - Default: matrix
-  Rendering scene: matrix or uc3d. UC3D uses its own camera, image formation and glyph renderer.
+  Rendering scene: matrix, uc3d or zmatrix. UC3D uses its own camera, image formation and glyph renderer.
+  ZMatrix uses persistent 2D pixels, independent stream timing and native Windows fonts.
   Selecting uc3d applies its scene profile unless explicitly overridden:
   uc3dControls=original, uc3dAmount=500, uc3dGlyphSize=12,
   uc3dFallSpeed=6, uc3dForwardSpeed=6, bloomStrength=0,
@@ -818,3 +854,148 @@ UC3D scene options
 - Key: donorGlyphs
 - Default: false
   UC3D: use the original local 79-character atlas from donorDirectory, when imported. Falls back visibly if unavailable.
+
+ZMatrix controls
+----------------
+These settings apply only to scene=zmatrix. Existing Matrix and UC3D values stay
+in saved presets but are omitted from ZMatrix launch commands. Shared renderer,
+resolution, fps, once and suppressWarnings still apply. Simulation refresh and
+presentation FPS are separate: raising FPS does not accelerate the streams.
+
+- Key: zmMaxStream
+- Default: 1000
+  Maximum active streams, 1 to 4096. At most one new stream starts per simulation tick.
+
+- Key: zmSpeedVariance
+- Default: 5
+  Random per-stream wait, 0 to 120 ticks. A stream assigned wait N moves every N+1 ticks.
+
+- Key: zmRefreshTime
+- Default: 50
+  Milliseconds per simulation tick, 10 to 1000. Default is 20 ticks per second.
+
+- Key: zmMonotonousCleanupEnabled
+- Default: false
+  Restore a cell a fixed distance behind each stream. Can run with randomized cleanup.
+
+- Key: zmBackTrace
+- Default: 40
+  Fixed cleanup distance, 0 to 4096 glyphs. Applies when fixed cleanup is enabled.
+
+- Key: zmRandomizedCleanupEnabled
+- Default: false
+  Restore a cell at a randomized distance behind each stream.
+
+- Key: zmLeading
+- Default: 10
+  Minimum randomized cleanup distance, 0 to 4096 glyphs.
+
+- Key: zmSpacePad
+- Default: 30
+  Extra randomized cleanup distance, 0 to 4096 glyphs. This is not horizontal spacing.
+
+- Key: zmSpecialStringProbability
+- Default: 0.1
+  Fraction of streams eligible to emit vertical phrases, 0 to 1. Eligible streams
+  attempt a phrase once per movement with probability 1 / visible row count.
+
+- Key: zmCharacters
+  JSON array of unique single BMP characters. Default is the original 40-character
+  set, "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd". At most 512 characters.
+  Use the configurator's character editor to avoid hand-escaping JSON.
+
+- Key: zmPhrases
+  JSON array of phrase strings. Default is ["The matrix has you"]. Empty array
+  disables phrases and remains empty after reload. At most 64 phrases, 256 BMP
+  characters each, and 1024 distinct special glyphs in total.
+
+- Key: zmBackgroundMode
+- Default: bitmap
+  bitmap uses the Windows wallpaper captured with PaintDesktop, without icons or
+  application windows. color uses zmBackgroundColor. Browser previews report a
+  fallback when native wallpaper capture is unavailable.
+
+- Key: zmBlendMode
+- Default: or
+  xor, and or or: bytewise RGB operations matching GDI raster operations. With
+  transparent bitmap background, AND/OR use the donor's direct-overlay behavior.
+  Color background ignores the blend selection. This is not Canvas2D compositing xor.
+
+- Key: zmOpaqueBackground
+- Default: false
+  Select opaque bitmap blending. In solid-color mode, clear each glyph cell to
+  zmBackgroundColor before drawing. The original background-alpha setting was a
+  threshold at 128; it was not continuous transparency.
+
+- Key: zmForegroundColor
+  Byte RGB, default 187,255,187. Bright ordinary glyphs.
+
+- Key: zmFadeColor
+  Byte RGB, default 0,128,0. Newly randomized dim glyphs replacing previous heads.
+
+- Key: zmBackgroundColor
+  Byte RGB, default 0,0,0. Solid background and opaque glyph-cell background.
+
+- Key: zmSpecialForegroundColor
+  Byte RGB, default 251,255,251. Bright phrase glyphs.
+
+- Key: zmSpecialFadeColor
+  Byte RGB, default 208,244,208. Dim phrase glyphs.
+
+- Key: zmRedGain
+- Default: 1
+  Red multiplier after speed-linked dimming, -4 to 4. Output clamps to byte RGB.
+
+- Key: zmGreenGain
+- Default: 1
+  Green multiplier after speed-linked dimming, -4 to 4.
+
+- Key: zmBlueGain
+- Default: 1
+  Blue multiplier after speed-linked dimming, -4 to 4.
+
+- Key: zmRedOffset
+- Default: 0
+  Red offset after gain, -255 to 255.
+
+- Key: zmGreenOffset
+- Default: 0
+  Green offset after gain, -255 to 255.
+
+- Key: zmBlueOffset
+- Default: 0
+  Blue offset after gain, -255 to 255.
+
+- Key: zmFont
+  JSON Windows LOGFONT descriptor for ordinary glyphs. Default face Matrix Code
+  Font, height -7, weight 400, charSet 1. The font is loaded privately by this app.
+
+- Key: zmSpecialFont
+  JSON Windows LOGFONT descriptor for phrase glyphs. Default face Terminal,
+  height -8, weight 400, charSet 1. Windows may substitute an unavailable face;
+  the resolved face and warnings are reported by the native renderer.
+
+Both font descriptors accept height, width, escapement, orientation, weight,
+italic, underline, strikeOut, charSet, outPrecision, clipPrecision, quality,
+pitch, family and name. Heights use 96-DPI logical units, signed -256 to 256;
+negative heights request character height. Width is 0 to 256, angles are tenths
+of a degree (-3600 to 3600), weight is 0 to 1000, byte fields are 0 to 255,
+pitch is 0 to 3, family is the high nibble 0 to 240, and face names are at most
+31 characters. The configurator provides named controls for every field.
+Native atlases retain RGB coverage and actual glyph ink bounds, including
+rotation. Browser font fallback is explicitly approximate. Resource bounds
+are four 2048-square atlas pages per font; excess glyph ink produces an error.
+
+Screensaver entrypoints
+-----------------------
+The published MatrixDesktop.scr sits beside MatrixDesktop.exe and its runtime
+files. Keep that directory together. Windows calls /s for fullscreen animation,
+/c (optionally /c:HWND) for the configurator, and /p HWND for a real child preview.
+Double-clicking the .scr without arguments also opens its configuration.
+The configurator's explicit Use for screensaver action saves the current draft
+to LocalAppData\MatrixDesktop\screensaver-profile.json and selects this .scr for
+the current user. Normal launch, live preview and Test Argument do not register it.
+The explicit Restore previous screensaver action restores the saved selection;
+it refuses to overwrite a later screensaver choice made outside this app.
+CLI equivalents: --register-screensaver and --restore-screensaver. Registration
+uses an existing saved profile, or the default Matrix scene when none was saved.

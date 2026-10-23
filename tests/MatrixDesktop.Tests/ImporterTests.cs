@@ -138,7 +138,7 @@ internal static class ImporterTests
     private static void NonfiniteNumbersIgnored()
     {
         // Killing mutation: restrict the finiteness guard to Slider fields again.
-        foreach (var scene in new[] { "matrix", "uc3d" })
+        foreach (var scene in new[] { "matrix", "uc3d", "zmatrix" })
         foreach (var field in Metadata.Groups.SelectMany(group => group.Fields).Where(field => field.Scope == "web" && field.Kind == "number" && !field.Slider))
         foreach (var invalid in new[] { "NaN", "Infinity", "-Infinity", "1e5000", "-1e5000" })
         {

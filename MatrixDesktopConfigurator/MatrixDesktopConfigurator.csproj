@@ -15,9 +15,9 @@
     <RootNamespace>MatrixDesktopConfigurator</RootNamespace>
     <!-- Local-build default only; release.yml overrides from the tag. Kept in step with
          MatrixDesktop.csproj, which the gate also holds the argument guide's header to. -->
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <ApplicationIcon>..\MatrixDesktop\Matrix.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
 
@@ -45,6 +45,11 @@
     <Compile Include="..\Shared\AppWindowIcon.cs" Link="Shared\AppWindowIcon.cs" />
     <Compile Include="..\Shared\MediaCatalog.cs" Link="Shared\MediaCatalog.cs" />
     <Compile Include="..\Shared\NativeMediaBridge.cs" Link="Shared\NativeMediaBridge.cs" />
+    <Compile Include="..\Shared\ScreensaverProfile.cs" Link="Shared\ScreensaverProfile.cs" />
+    <Compile Include="..\Shared\ScreensaverRegistration.cs" Link="Shared\ScreensaverRegistration.cs" />
+    <Compile Include="..\Shared\StructuredArgumentCodec.cs" Link="Shared\StructuredArgumentCodec.cs" />
+    <Compile Include="..\Shared\GdiGlyphAtlas.cs" Link="Shared\GdiGlyphAtlas.cs" />
+    <Compile Include="..\Shared\WallpaperBackground.cs" Link="Shared\WallpaperBackground.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -11,6 +11,8 @@ internal sealed partial class CommandBuilder
 {
     private readonly ConfiguratorMetadata _metadata;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions StructuredJsonOptions = new(JsonSerializerDefaults.Web)
+        { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     public CommandBuilder(ConfiguratorMetadata metadata)
     {
@@ -42,19 +44,33 @@ internal sealed partial class CommandBuilder
 
     public string BuildCommand(JsonObject values, bool includeDefaults, bool forTest)
     {
-        return string.Join(" ", BuildTokens(values, includeDefaults, forTest).Select(QuoteToken));
+        var command = string.Join(" ", BuildTokens(values, includeDefaults, forTest, encodeStructured: true).Select(QuoteToken));
+        if (command.Length >= 32_767) throw new InvalidOperationException("The copied command exceeds Windows' 32,767-character limit. Reduce the phrase list, or use Test Argument / Export .ps1 with direct structured arguments.");
+        return command;
     }
 
     public IReadOnlyList<string> BuildArguments(JsonObject values, bool includeDefaults, bool forTest)
     {
-        return BuildTokens(values, includeDefaults, forTest).Skip(1).ToArray();
+        var tokens = BuildTokens(values, includeDefaults, forTest);
+        if (tokens.Sum(token => QuoteToken(token).Length + 1) >= 32_767) throw new InvalidOperationException("The launch arguments exceed Windows' 32,767-character limit. Reduce the phrase list or character set.");
+        return tokens.Skip(1).ToArray();
     }
 
-    private List<string> BuildTokens(JsonObject values, bool includeDefaults, bool forTest)
+    public string BuildTestCommandDescription(JsonObject values)
+    {
+        _ = BuildArguments(values, includeDefaults: false, forTest: true);
+        try { return BuildCommand(values, includeDefaults: false, forTest: true); }
+        catch (InvalidOperationException)
+        {
+            return "MatrixDesktop.exe --windowed (direct structured launch; use Export .ps1 to reproduce this large configuration)";
+        }
+    }
+
+    private List<string> BuildTokens(JsonObject values, bool includeDefaults, bool forTest, bool encodeStructured = false)
     {
         var tokens = new List<string> { "MatrixDesktop.exe" };
         AddAppTokens(tokens, values, includeDefaults, forTest);
-        AddWebTokens(tokens, values, includeDefaults);
+        AddWebTokens(tokens, values, includeDefaults, encodeStructured);
         return tokens;
     }
 
@@ -76,6 +92,10 @@ internal sealed partial class CommandBuilder
         {
             tokens.Add("--windowed");
         }
+        else if (windowMode == "wallpaper")
+        {
+            tokens.Add("--wallpaper");
+        }
         else if (windowMode == "single-monitor")
         {
             tokens.Add("--single-monitor");
@@ -87,10 +107,12 @@ internal sealed partial class CommandBuilder
 
         foreach (var field in Fields.Where(static f => f.Scope == "app" && f.Kind == "bool"))
         {
-            if (field.Id == "workingArea" && (forTest || windowMode == "windowed"))
+            if (field.Id == "workingArea" && (forTest || windowMode is "windowed" or "wallpaper"))
             {
                 continue;
             }
+            if (field.Id.StartsWith("wallpaper", StringComparison.Ordinal) && (forTest || windowMode != "wallpaper")) continue;
+            if (windowMode == "wallpaper" && !forTest && field.Id is "topmost" or "hideCursor" or "exitOnAnyKey" or "exitOnEsc" or "globalKeyExit") continue;
 
             // A quick windowed test shouldn't cover other windows or hide the
             // cursor — those make the test window awkward to inspect and close.
@@ -120,15 +142,21 @@ internal sealed partial class CommandBuilder
                 tokens.Add(flag);
             }
         }
+        var priority = GetString(values, "processPriority", "auto");
+        if (!forTest && (includeDefaults || priority != "auto"))
+        {
+            tokens.Add("--process-priority");
+            tokens.Add(priority);
+        }
     }
 
-    private void AddWebTokens(List<string> tokens, JsonObject values, bool includeDefaults)
+    private void AddWebTokens(List<string> tokens, JsonObject values, bool includeDefaults, bool encodeStructured)
     {
         var effect = GetString(values, "effect", "palette");
         var scene = GetString(values, "scene", "matrix");
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
-            if (!Uc3dControlProfile.IsActive(field.Id, values)) continue;
+            if (!Uc3dControlProfile.IsActive(field.Id, values) || !ZMatrixControlProfile.IsActive(field.Id, values)) continue;
             if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
             {
                 continue;
@@ -147,6 +175,8 @@ internal sealed partial class CommandBuilder
             }
 
             var serialized = SerializeWebValue(field, value);
+            if (encodeStructured && field.Kind is "font" or "characters" or "phrases")
+                serialized = global::Shared.StructuredArgumentCodec.Encode(serialized);
             if (string.IsNullOrWhiteSpace(serialized))
             {
                 continue;
@@ -164,8 +194,10 @@ internal sealed partial class CommandBuilder
             "bool" => GetBoolValue(value) ? "true" : "false",
             "number" => GetNumberValue(value)?.ToString("0.###", CultureInfo.InvariantCulture) ?? string.Empty,
             "color" => SerializeColor(value),
+            "rgb8" => SerializeColor(value),
             "palette" => SerializePalette(value),
             "stripes" => SerializeStripes(value),
+            "font" or "characters" or "phrases" => value.ToJsonString(StructuredJsonOptions),
             _ => value.GetValueKind() == JsonValueKind.String ? value.GetValue<string>() : value.ToJsonString(_jsonOptions),
         };
     }
@@ -371,7 +403,18 @@ internal sealed partial class CommandBuilder
             return token;
         }
 
-        return "\"" + token.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+        // Windows command-line escaping: only backslashes before a quote or the
+        // closing delimiter are doubled. Ordinary path separators stay literal.
+        var result = new System.Text.StringBuilder("\"");
+        var backslashes = 0;
+        foreach (var character in token)
+        {
+            if (character == '\\') { backslashes++; continue; }
+            if (character == '"') result.Append('\\', backslashes * 2 + 1).Append('"');
+            else result.Append('\\', backslashes).Append(character);
+            backslashes = 0;
+        }
+        return result.Append('\\', backslashes * 2).Append('"').ToString();
     }
 
     // A copied command may be pasted into cmd.exe or PowerShell, where these
@@ -434,7 +477,7 @@ internal sealed partial class CommandBuilder
 
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
-            if (!Uc3dControlProfile.IsActive(field.Id, values)) continue;
+            if (!Uc3dControlProfile.IsActive(field.Id, values) || !ZMatrixControlProfile.IsActive(field.Id, values)) continue;
             if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
             {
                 continue;

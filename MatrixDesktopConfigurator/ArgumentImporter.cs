@@ -45,6 +45,8 @@ internal sealed class ArgumentImporter
         {
             throw new ArgumentException("Paste a MatrixDesktop command or argument line first.", nameof(commandLine));
         }
+        if (ZMatrixCfgImporter.IsConfiguration(commandLine))
+            return ZMatrixCfgImporter.Import(commandLine, defaultDraft, _metadata);
 
         var draft = StorageService.CloneObject(defaultDraft);
         var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -142,6 +144,30 @@ internal sealed class ArgumentImporter
             case "windowed":
                 draft["windowMode"] = "windowed";
                 applied.Add("windowMode");
+                return true;
+
+            case "wallpaper":
+                draft["windowMode"] = "wallpaper";
+                draft["monitor"] = null;
+                applied.Add("windowMode");
+                return true;
+
+            case "processpriority":
+                if (value is null || !new[] { "auto", "idle", "below-normal", "normal", "above-normal", "high", "realtime" }.Contains(value.ToLowerInvariant())) return false;
+                draft["processPriority"] = value.ToLowerInvariant();
+                applied.Add("processPriority");
+                return true;
+
+            case "wallpaperinput":
+            case "wallpaperpausefullscreen":
+            case "wallpaperpausebattery":
+            case "nowallpaperinput":
+            case "nowallpaperpausefullscreen":
+            case "nowallpaperpausebattery":
+                var positiveKey = key.StartsWith("no", StringComparison.Ordinal) ? key[2..] : key;
+                var id = positiveKey == "wallpaperinput" ? "wallpaperInput" : positiveKey == "wallpaperpausefullscreen" ? "wallpaperPauseFullscreen" : "wallpaperPauseBattery";
+                draft[id] = !key.StartsWith("no", StringComparison.Ordinal) && FlagNormalization.ParseBool(value, true);
+                applied.Add(id);
                 return true;
 
             case "borderless":
@@ -248,7 +274,7 @@ internal sealed class ArgumentImporter
         return false;
     }
 
-    private static JsonNode? ParseFieldValue(ArgumentDefinition field, string? value, bool isHsl)
+    internal static JsonNode? ParseFieldValue(ArgumentDefinition field, string? value, bool isHsl)
     {
         switch (field.Kind)
         {
@@ -267,7 +293,14 @@ internal sealed class ArgumentImporter
                 }
 
                 var option = field.Options.FirstOrDefault(o => string.Equals(o.Value, value, StringComparison.OrdinalIgnoreCase));
+                if (field.Id.StartsWith("zm", StringComparison.Ordinal) && option is null) return null;
                 return JsonValue.Create(option?.Value ?? value.Trim());
+
+            case "rgb8":
+            case "font":
+            case "characters":
+            case "phrases":
+                return ZMatrixControlProfile.ParseStructured(field, value);
 
             case "text":
                 return JsonValue.Create(value ?? string.Empty);
@@ -615,4 +648,5 @@ internal sealed class ImportResult
     public JsonObject Draft { get; init; } = [];
     public string[] Applied { get; init; } = [];
     public string[] Ignored { get; init; } = [];
+    public string[] Notes { get; init; } = [];
 }

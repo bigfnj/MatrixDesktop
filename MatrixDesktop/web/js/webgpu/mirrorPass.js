@@ -4,7 +4,7 @@ import { makeComputeTarget, makeUniformBuffer, loadShader, makeBindGroup, makePa
 
 const numTouches = 5;
 
-export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, timeBuffer, canvas }) => {
+export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, timeBuffer, canvas, elapsedSeconds = () => 0 }) => {
 	const owner = createResourceOwner();
 	const device = ownDevice(owner, nativeDevice);
 
@@ -15,7 +15,6 @@ export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, ti
 
 	let index = 0;
 	let touchesChanged = true;
-	let start = Date.now();
 
 	// MD-48 (upstream): see the regl mirrorPass. e.srcElement on a window-level listener
 	// divided by whatever element was clicked, so a click on the notice div produced
@@ -27,7 +26,7 @@ export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, ti
 		}
 		touches[index][0] = (e.clientX - rect.left) / rect.width;
 		touches[index][1] = 1 - (e.clientY - rect.top) / rect.height;
-		touches[index][2] = (Date.now() - start) / 1000;
+		touches[index][2] = elapsedSeconds();
 		index = (index + 1) % numTouches;
 		touchesChanged = true;
 	};

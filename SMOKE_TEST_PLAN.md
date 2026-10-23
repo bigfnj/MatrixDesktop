@@ -18,7 +18,7 @@ select that interpreter. Its browser smoke also needs Playwright Chromium.
 | Gate portable folder | `tests\run-gate.ps1`, producing `artifacts\gate\win-x64-fd\`. |
 | Tagged release | `.github/workflows/release.yml`, producing `MatrixDesktop-<tag>-win-x64-fd.zip` and a SHA256 file. |
 
-All supported folders contain both executables and their `web\` and
+All supported folders contain both executables, `MatrixDesktop.scr`, and their `web\` and
 `configurator\` assets. Test the extracted release zip before announcing a
 release. CI calls the tier 1 gate, which owns the Release build and publish;
 there is no separate CI publish sequence.
@@ -47,7 +47,10 @@ coverage as a pass. Exit 1 and 3 fail the workflow.
 
 Tier 1 builds with no warnings, runs native regressions and JavaScript lifecycle
 and UC3D scenarios, checks module syntax and referenced assets, and runs the
-configurator DOM/render smoke and UC3D WebGL browser smoke. It also exercises
+configurator DOM/render smoke, UC3D/ZMatrix WebGL browser smoke and original
+Matrix pause/resume. Native GDI font tests exercise actual raster metrics,
+rotation, decorations, substitution, DPI and owned-handle cleanup without a shell
+window. The tier also exercises
 the importer's synthetic fixtures, embedded help and icons, version parity,
 published embedded source-line symbols and payload rules. Separate `.pdb`
 and dependency documentation `.xml` files are excluded from the portable folder.
@@ -64,6 +67,62 @@ thresholds are a luminance standard deviation of at least 0.04 and a non-black
 fraction of at least 0.02; animation requires at least 0.005 changed pixels.
 These checks reject blank, uniform and frozen frames. Inspect screenshots too:
 pixel statistics cannot establish visual correctness.
+
+## ZMatrix, wallpaper and screensaver checks
+
+After each focused smoke passes, retain the existing Matrix/UC3D regressions:
+
+```pwsh
+node tests\zmatrix-tests.mjs
+node tests\host-playback-tests.mjs
+node tests\host-pointer-tests.mjs
+node tests\native-bootstrap-tests.mjs
+node tests\uc3d-audio-tests.mjs
+dotnet run --project tests\MatrixDesktop.Tests -c Release
+dotnet run --project tests\MatrixDesktop.Native.Tests -c Release
+python tests\zmatrix-browser.py --channel msedge
+python tests\matrix-playback-browser.py --channel msedge
+python tests\uc3d-audio-browser.py --channel msedge
+```
+
+The ZMatrix browser test checks served source bytes, actual selected backends,
+visible animation, pause/resume, resize and disposal. Original Matrix also starts
+paused before renderer import; a real WebGL uniform witness must begin at active
+shader tick zero so ping-pong initialization cannot be skipped. Browser fallback
+warnings are expected when no native GDI bridge is attached.
+
+Against a complete published folder:
+
+```pwsh
+python tests\wallpaper-smoke.py --app artifacts\gate\win-x64-fd\MatrixDesktop.exe --output artifacts\wallpaper-smoke
+python tests\native-zmatrix-configurator.py --publish artifacts\gate\win-x64-fd --renderer both
+python tests\screensaver-smoke.py --scr artifacts\gate\win-x64-fd\MatrixDesktop.scr
+```
+
+Wallpaper checks cover all three scenes and both graphics backends, the real
+WorkerW parent, native fonts and clean shutdown. Run these focus-sensitive
+checks sequentially with configurator/UI probes. A concurrently activated
+application can invalidate the unchanged-foreground witness.
+
+The screensaver probe supplies an owned synthetic profile and preview parent.
+It checks child bounds/resize/parent death, fullscreen coverage despite saved
+wallpaper/working-area flags, and input exit. It sends Escape only after proving
+the owned saver is foreground. It never registers a screensaver or loads the
+owner's saved media. Registration tests use disposable synthetic registry keys;
+they cover exact backup/restore, external choices, re-registration and rollback.
+
+Native wallpaper captures may contain the owner's wallpaper. Keep all artifacts
+private. Shell-recovery verification requires a separately coordinated Explorer
+restart; the ordinary gate does not restart Explorer or change Windows startup,
+wallpaper or screensaver preferences. Pause-reason and fullscreen policy cases
+include negative-coordinate monitors and independent lock/manual/battery states.
+
+For the coordinated shell check, start an owned wallpaper instance and record its
+PID. Pause it through the tray, restart Explorer, then verify that the same PID
+attaches to a WorkerW owned by the new Explorer process. Manual pause must survive;
+tray Resume must restore visible animation without runtime errors. Exit through
+the tray and verify clean shutdown. Also check fresh wallpaper startup after a
+shell restart, since it must create a missing WorkerW without changing icon styles.
 
 ## UC3D backend and native integration probes
 
@@ -156,7 +215,7 @@ affected by a change, using the published application.
 | Webcam | `--effect mirror --camera true` obtains permission, renders camera input and releases the camera after closing. This needs an actual camera. |
 | Looking Glass | The Matrix scene's Holoplay preset requires real device calibration and uses the WebGL quilt path. No-device and renderer-routing tests do not certify a physical display. UC3D has no quilt implementation. |
 | Click ripples | Enable `clickRipples` with palette/stripe effects and test the triangle, star and box shapes in both renderers. Without the option, ordinary rain should not gain click ripples. |
-| Presets and launch controls | A fresh store includes `UC3D Trilogy` and the older starters. Save, rename and delete a preset; reopen and verify persistence. Edited starters stay edited, and deleted starters stay deleted. `Test Argument` replaces its previous instance and `Stop Test` closes it. |
+| Presets and launch controls | A fresh store includes `UC3D Trilogy`, `ZMatrix Desktop` and the older starters. Save, rename and delete a preset; reopen and verify persistence. Edited starters stay edited, and deleted starters stay deleted. `Test Argument` replaces its previous instance and `Stop Test` closes it. |
 | Import and randomize | Import a full command and a raw query; verify values and output. Stripe colors are emitted only for stripe effects. Randomize respects its selected scope and leaves Launch settings unchanged. |
 | UC3D interaction and sound | Enable 3D mouse rotation; move, stop with right-click, reset with left-click and roll with the wheel. After 20 seconds idle, automatic motion resumes. Check personal picture aspect ratio, source selection, captions, clock, optional snapshot and audible sound. Preview sound requires an explicit button action. |
 | Lock and resume | Lock/unlock or sleep/wake while running. Check that the WebView suspends and the scene resumes without a blank render, stuck sound or duplicate callbacks. |

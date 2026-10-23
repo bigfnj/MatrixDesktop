@@ -2,14 +2,15 @@
 
 ## Picking this up cold
 
-State as of **v1.1.0**, 2026-10-23. UC3D integration and the current Open items are
-resolved below. Deferred product features remain a separate-session list by owner decision.
+State for **v1.2.0**, 2026-10-23. ZMatrix and wallpaper implementation passes the
+full published gate. The committed-source audit is next. The prior UC3D items remain resolved below. Marketplace,
+OBS/Spout/NDI and per-monitor configurations remain deferred by owner decision.
 
 **Verify before you trust anything.** One command, and it is the whole story:
 
 ```pwsh
-pwsh -File tests\run-gate.ps1              # 52 checks, needs a desktop session
-pwsh -File tests\run-gate.ps1 -Tier1Only   # 22 checks, what CI runs, no session needed
+pwsh -File tests\run-gate.ps1              # includes published Windows application checks
+pwsh -File tests\run-gate.ps1 -Tier1Only   # what CI runs, no interactive session needed
 ```
 
 Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` is not a pass.**
@@ -27,7 +28,7 @@ gate is decoration.
 
 | Layer | Catches | Blind to |
 | --- | --- | --- |
-| `tests\MatrixDesktop.Tests` (110 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
+| `tests\MatrixDesktop.Tests` (console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
 | `tests\web-smoke.py` (17 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies, paired sliders and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 | `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
@@ -60,9 +61,55 @@ two of them used to share the heading "Worth doing", which is how a v1.0.5 summa
 claim the backlog was empty when three items were still open. Anything struck through below
 has shipped.
 
-No active items remain. The owner requested a further UC3D calibration pass after
-the earlier compatibility implementation; every item from that pass is retained
-with its disposition below. Deferred features remain a separate-session list.
+Active verification: complete the committed-source audit after pushing main.
+The final Windows PowerShell 5.1 gate reports 67 PASS, 0 FAIL, 0 UNCHECKED,
+including 131 core cases and 20 native cases inside its aggregate checks.
+The screensaver preview and fullscreen input-exit probes pass when launched as the
+signed-in owner in the connected RDP session. The agent execution account could not
+deliver input there; that context is correctly reported as UNCHECKED rather than passed.
+Explorer recovery and native configurator refresh pass their application checks.
+Every prior UC3D calibration item is retained with its disposition below.
+
+### ZMatrix and wallpaper, v1.2.0
+
+The owner activated the previously deferred ZMatrix feature source on 2026-10-23.
+The implementation uses fresh source and retains the separately permitted font.
+
+| Item or finding | Disposition | Implementation and checkable evidence |
+| --- | --- | --- |
+| Continuous wallpaper for every scene | FIXED | WorkerW hosting is independent of scene. Actual Matrix/UC3D/ZMatrix probes render both backends without focus changes. New nested Progman/WorkerW discovery supports this workstation's shell layout. `wallpaper-smoke.py` checks the real parent, rendering and orderly shutdown. |
+| Functional ZMatrix streams, persistence, cleanup, phrases and blends | FIXED | Shared seeded simulation and bytewise persistent surface, real WebGL/WebGPU presentation. `zmatrix-tests.mjs` has literal raster and timing cases; thirteen private source mutations fail their named assertions. Actual browser animation/pause/resize/disposal checks pass both backends. |
+| Native Windows font descriptors and wallpaper | FIXED | GDI atlases retain real metrics, RGB coverage, rotated ink bounds and substitution warnings. PaintDesktop excludes app windows/icons. Eleven native GDI cases and nine rebuilt mutations cover font behavior and handle cleanup. Native scene probes consume both native fonts without warnings. |
+| Configurator settings and original CFG import | FIXED | All 27 controls, structured font/phrase/character editors, byte RGB, preserved inactive metadata and scene filtering. C# and seven DOM cases verify real importer/builder behavior. Twelve private mutations prove validation, migration, DPI conversion, export and request-order guards. Actual configurator checks pass both backends. |
+| Existing UC3D starters misclassified after adding fields | FIXED | Historical field sets are frozen and seed 6 adds only the new starter. Literal historical fixtures retain edited, renamed and deleted starters. |
+| Paused original REGL scene could skip initialization or read stale ping-pong state | FIXED | Active time and active shader tick replace elapsed wall time/raw RAF tick. Actual GPU uniform witness starts at tick 0 after an initial pause. An isolated served raw-tick mutation fails the initialization assertion. |
+| Independent pause reasons and any-monitor fullscreen detection | FIXED | Clearing one reason retains all other reasons. A fullscreen window on either monitor pauses the wallpaper. Three rebuilt policy mutants fail their intended tests. |
+| Copied JSON arguments break on shell characters | FIXED | Copied font/list values use bounded UTF-8 base64url JSON. Direct argv, live query and PowerShell export retain raw JSON. Importer, renderer and native font bridge accept both; command length errors are visible. |
+| Screensaver preview/fullscreen entrypoints | FIXED | A real `.scr` apphost supports `/p`, `/s`, `/c`. Owned preview probe checks parent, bounds, focus, resize and parent death; fullscreen exits on input. Saved wallpaper/working-area flags cannot reduce fullscreen coverage. |
+| Screensaver tests inherit personal profile/media | FIXED | Explicit synthetic argv profile via `MATRIXDESKTOP_SCREENSAVER_PROFILE`; no registration or personal profile changes in the probe. |
+| Screensaver restore could overwrite later choices or retain stale backup state | FIXED | Re-registering after an external choice rebases the backup; failed activation rolls back state. Four synthetic registry cases pass. Owner guard, stale backup and rollback mutations each fail one named test with rebuilt DLL timestamps and executed witnesses. |
+| Reused preview iframe retained expired native resource URLs after font edits | FIXED | A current-bootstrap endpoint and readiness promise reconcile document initialization with newer pushed generations. Extracted-initializer cases and source mutations cover generation/query ordering, origins and failed fetches. Actual normal/special font edits produce new GDI generations and visible output on both backends. |
+| A preview received native atlases prepared for another draft | FIXED | Bootstrap snapshots carry their exact query identity. Cached, pushed and fetched resources must match the document query; a mismatched current fetch rejects readiness visibly. Named extracted-initializer cases and four identity mutations prove each boundary. |
+| Application and configurator query builders use different leading-question-mark conventions | FIXED | Normalize the serialized resource identity to an empty string or one leading question mark. The bootstrap suite checks empty, prefixed, unprefixed and escaped values; native wallpaper startup verifies the application path, and native configurator checks verify the preview path. |
+| Late preview replies navigated over newer edits | FIXED | Preview request versions discard obsolete replies. The seven-case DOM suite includes a delayed old reply; removing the guard fails that case. |
+| A valid large direct Test launched before copied-command formatting threw | FIXED | Validate and prepare the command description before launch, with a direct-launch description when only the copied representation is too long. Rebuilt focused tests, its mutation and both native backends exercise large Unicode values. |
+| Native resource change during initial atlas decode was missed | FIXED | Subscribe before loading and await the latest generation before declaring the runtime ready. The 38-case ZMatrix suite exercises a delayed first decode and a newer update. Late subscription and skipped latest-generation wait each fail the named startup regression. |
+| Desktop pointer coordinates used physical pixels as CSS pixels | FIXED | Explicit viewport-to-canvas scaling, paired clicks and drag suppression. Three isolated input mutants cover DPI scaling, unpaired clicks and strict decimal parsing, with unchanged original source witnesses. |
+| Repeated refresh could retain old native resources | CLOSED-VERIFIED | Twelve sequential native generations retain only current font/wallpaper IDs at a constant catalog count; forced host GC/GdiFlush leaves GDI objects at 59 before and after. Playback remains manually paused while the browser briefly resumes decoding between generations. |
+| Fresh Explorer did not create WorkerW with the legacy request | FIXED | Request the modern 0x052C/0xD/1 creation only when no host exists, then use bounded legacy fallback. Native tests cover existing, modern, legacy and unavailable hosts. Both omitted-request mutations fail the named test; a real Explorer restart preserves the same product process and reconnects its wallpaper. |
+| Dead native controller was disposed again through the Form's child collection | FIXED | Detach the owned WebView before its guarded disposal and use the same cleanup for direct Form disposal. An injected dead controller proves one disposal attempt and unrelated errors still propagate. Leaving the child parented fails the named rebuilt regression. The real restart now preserves pause, resumes rendering and exits without a dialog. |
+| Valid large fonts and repertoires could perform billions of raster scans | FIXED | Reject native requests above 67,108,864 scanned raster pixels before glyph rendering. Boundary and actual GDI rejection cases are included in the native suite. Guard-removal mutation fails before the expensive fixture, with rebuilt assembly/hash witnesses. The resource bridge reports the limit explicitly. |
+| Startup shortcut scripting wrapper mishandled Unicode paths | FIXED | Use Windows' Unicode IShellLinkW/IPersistFile APIs. A real STA .lnk roundtrip verifies target, working directory, JSON/Unicode/empty/trailing-backslash argv and isolated disable cleanup. Four rebuilt mutations fail the named test. The native suite touches only synthetic shortcut paths, with no owner Startup changes. |
+| UC3D audio ignored host pause when WebView suspension was declined | FIXED | Audio observes host playback and document visibility, silences pending operations and blocks stale play/resume completions. Controlled HTMLAudio/Web Audio cases and source mutations cover initial pause, gestures, asynchronous completion and disposal. Volume-zero real-browser checks prove physical AudioContext suspension and resume; removing host-pause awareness fails that check. Fresh-profile native wallpaper starts the real context without a gesture or autoplay override. |
+| Screensaver smoke required guaranteed foreground ownership | FIXED | Observe best-effort focus for a bounded 3.5 seconds. Escape requires exact root HWND and both owner-PID checks. When focus is refused, only a different hit-tested point on the owned saver may receive one mouse move. Session/desktop availability is checked again immediately before input. Twenty-one portable cases and seventeen executed-source mutations cover timing, ownership, both input branches and unavailable desktops. A pass requires responsive UI, a delivered LastInputInfo event and actual exit 0. |
+| Screensaver profiles could retain non-topmost flags and lose startup focus retries | FIXED | Fullscreen overrides follow the saved profile, force complete virtual-screen bounds and topmost display, and retain bounded retries after navigation. Native policy cases and five rebuilt mutations verify the scope, ordering and retry policy. Preview retains its no-activation, non-topmost behavior. |
+| Foreground helper joined a foreign input queue | FIXED | Remove AttachThreadInput while retaining independent native activation attempts. Two compiled-callgraph/order cases and three rebuilt mutations prove the reachable native path. Current owned UI responsiveness is verified; the earlier timeout did not measure the old UI's responsiveness, so it does not prove an old hang. |
+| Screensaver input is not delivered from the agent execution account | CLOSED-VERIFIED | Accepted SendInput does not advance LastInputInfo from the agent account despite WTSActive and matching Default desktops. A private RunAS Helper/WTS launcher runs the exact same published probe as the signed-in owner in RDP session 1. Preview passes; fullscreen acquires focus and exits 0 after a real Escape event. The user need not disconnect RDP or log in locally. No session state or helper authorization policy was changed. |
+| README promised complete WebView2 suspension | FIXED | Qualify suspension as a request that WebView2 may decline. Scene clocks and UC3D audio still honor host pause; controlled audio cases and real browser suspension checks cover that fallback. |
+
+The native configurator font-edit refresh is closed by its deployed WebView2
+probes on both backends. Explorer recovery is closed by the second actual shell
+restart, which exercises the fixes for the missing host and disposed controller.
 
 | Calibration item | Disposition | Implementation and checkable evidence |
 | --- | --- | --- |
@@ -127,8 +174,9 @@ passed 52/0/0 with 110 C# cases.
 | New preset migration would resurrect deleted starters | FIXED | Seed version 3 introduces only the new UC3D preset to existing users. A reverted migration guard fails the named migration test. |
 | UC3D behavior differs from the original native renderer | ACCEPTED-RECORDED | `docs/UC3D.md` describes the original implementation and compatibility limits. Decompiled exports and donor media remain private; exact visual parity is not claimed. |
 
-ZMatrix, marketplace, OBS/Spout/NDI and per-monitor configurations remain deferred by the
-owner's explicit scope selection. They are not silently closed or part of this burn-down.
+At the UC3D burn-down, ZMatrix, marketplace, OBS/Spout/NDI and per-monitor
+configurations were deferred by the owner's scope selection. ZMatrix is now
+activated above. The other product features remain deferred.
 
 ### Post-push audit, 2026-10-23
 
@@ -158,29 +206,31 @@ cross-repo code-signing decision, not a MatrixDesktop task.
 ## Feature sources
 
 Features the owner wants offered as options here, taken from other Matrix screensavers. Added
-2026-10-22. None of these sources can be copied in as code, because this repo is MIT and public.
-Read each source for what it does, write that down, and build it fresh under `web/`.
+2026-10-22. Reviewed behavior is implemented as fresh source under `web/`, with
+third-party asset permissions and attribution recorded in `VENDORING.md`.
 
 ### ZMatrix, via bigfnj/zmatrix-modernized
 
-Deferred to a separate session at the owner's request (2026-10-23).
+Activated after the earlier UC3D scope deferral (2026-10-23). Implementation and
+verification dispositions are recorded in the v1.2.0 section above.
 
 [bigfnj/zmatrix-modernized](https://github.com/bigfnj/zmatrix-modernized) is the owner's Windows
 11 / VS 2026 x64 build of ZMatrix (copyright 2002 Z. Shaker), a C++ GDI renderer that draws on
-the desktop. **GPL v2** (`src/LICENSE.TXT`, `src/SourceCodeReadme.txt`), so its code cannot come
-into this repo. Candidate features, from its `README_Win11.md` and `src/default.cfg`:
+the desktop. The reviewed source carries **GPL v2 or later** (`src/LICENSE.TXT`,
+`src/SourceCodeReadme.txt`). This implementation uses newly written C#/JavaScript
+and the separately permitted font. The retained original feature request was:
 
 - Rain drawn on the desktop itself, behind the icons, by parenting to the `WorkerW` host across
-  the whole virtual screen. A live-wallpaper mode, where MatrixDesktop today is a fullscreen
-  window on top.
+  the whole virtual screen. This became the common wallpaper mode for every scene.
 - Blending with the existing wallpaper instead of covering it (`BGMode=bgmodeBitmap`,
   `BlendMode=blendmodeOR`), with the background captured via `PaintDesktop`.
 - "Special string" streams: a phrase list (default `The matrix has you`) that falls as its own
   stream at `SpecialStringStreamProbability=0.1`, with its own font and colours.
 - Per-stream speed variance (`SpeedVariance`), a separate fade colour, and a user-chosen font and
   character set.
-- Trail cleanup modes (`MonotonousCleanupEnabled`, `RandomizedCleanupEnabled`, `BackTrace`). What
-  they do has not been read yet; it lives in `src/zsMatrix/zsMatrix.cpp`.
+- Trail cleanup modes (`MonotonousCleanupEnabled`, `RandomizedCleanupEnabled`, `BackTrace`).
+  Source review confirmed fixed and randomized glyph-cell restoration distances;
+  both modes are implemented and tested.
 
 Its bundled "Matrix Code Font" by e-RBi is described as freeware, free to distribute, in
 `src/readme.txt`.

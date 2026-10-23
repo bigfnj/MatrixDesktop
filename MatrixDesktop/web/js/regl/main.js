@@ -9,6 +9,7 @@ import makeQuiltPass from "./quiltPass.js";
 import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
+import { createPlaybackClock } from "../hostPlayback.js";
 
 const effects = {
 	none: null,
@@ -35,10 +36,18 @@ const loadJS = (src) =>
 	});
 
 export default async (canvas, config) => {
+	if (config.scene === "zmatrix") {
+		return (await import("./zmatrixPass.js")).default(canvas, config);
+	}
 	if (config.scene === "uc3d") {
 		return (await import("./uc3dPass.js")).default(canvas, config);
 	}
 	await Promise.all([loadJS("lib/regl.min.js"), loadJS("lib/gl-matrix.min.js")]);
+	const clock = createPlaybackClock();
+	const diagnostics = { scene: "matrix", backend: "regl", activeRenderer: "regl", requestedRenderer: config.renderer,
+		initialized: false, ready: false, frames: 0, disposed: false, errors: [] };
+	window.matrixRuntimeDiagnostics = diagnostics; window.__matrixRuntime = diagnostics;
+	canvas.dataset.scene = "matrix"; canvas.dataset.renderer = "regl";
 
 	const resize = () => {
 		const devicePixelRatio = window.devicePixelRatio ?? 1;
@@ -72,6 +81,8 @@ export default async (canvas, config) => {
 			return;
 		}
 		cleanedUp = true;
+		diagnostics.ready = false; diagnostics.disposed = true;
+		clock.dispose();
 		window.removeEventListener("pagehide", cleanup);
 		tick?.cancel();
 		window.removeEventListener("resize", resize);
@@ -124,8 +135,10 @@ export default async (canvas, config) => {
 
 	// All this takes place in a full screen quad.
 	const fullScreenQuad = makeFullScreenQuad(regl);
+	let activeFrames = 0;
+	const withClock = regl({ context: { time: () => clock.seconds(), tick: () => activeFrames } });
 	const effectName = config.effect in effects ? config.effect : "palette";
-	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas };
+	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas, elapsedSeconds: () => clock.seconds() };
 	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };
 	const drawToScreen = regl({ uniforms: screenUniforms });
@@ -134,13 +147,16 @@ export default async (canvas, config) => {
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
 	let last = NaN;
+	diagnostics.initialized = true;
+	diagnostics.dispose = cleanup;
 
 	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
+		if (clock.paused) return;
 		if (config.once) {
 			tick.cancel();
 		}
 
-		const now = regl.now() * 1000;
+		const now = clock.seconds() * 1000;
 
 		if (isNaN(last)) {
 			last = now;
@@ -164,18 +180,22 @@ export default async (canvas, config) => {
 				step.setSize(viewportWidth, viewportHeight);
 			}
 		}
-		fullScreenQuad(() => {
+		withClock(() => fullScreenQuad(() => {
 			for (const step of pipeline) {
 				step.execute(shouldRender);
 			}
 			drawToScreen();
-		});
+		}));
+		activeFrames++;
+		diagnostics.frames = activeFrames; diagnostics.ready = true;
+		diagnostics.simulationTime = clock.seconds();
 		if (config.once) {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
 			if (config.useCamera) stopCamera();
 		}
 	});
 	} catch (error) {
+		diagnostics.errors.push(error.message);
 		cleanup();
 		throw error;
 	}

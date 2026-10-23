@@ -1,4 +1,5 @@
 import createCanvasSize from "../canvasSize.js";
+import { createPlaybackClock } from "../hostPlayback.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
 
@@ -34,10 +35,18 @@ const effects = {
 };
 
 export default async (canvas, config) => {
+	if (config.scene === "zmatrix") {
+		return (await import("./zmatrixPass.js")).default(canvas, config);
+	}
 	if (config.scene === "uc3d") {
 		return (await import("./uc3dPass.js")).default(canvas, config);
 	}
 	await loadJS("lib/gl-matrix.min.js");
+	const clock = createPlaybackClock();
+	const diagnostics = { scene: "matrix", backend: "webgpu", activeRenderer: "webgpu", requestedRenderer: config.renderer,
+		initialized: false, ready: false, frames: 0, disposed: false, errors: [] };
+	window.matrixRuntimeDiagnostics = diagnostics; window.__matrixRuntime = diagnostics;
+	canvas.dataset.scene = "matrix"; canvas.dataset.renderer = "webgpu";
 	let pipeline = null;
 	let cleanedUp = false;
 	let initialized = false;
@@ -78,6 +87,8 @@ export default async (canvas, config) => {
 			return;
 		}
 		cleanedUp = true;
+		diagnostics.ready = false; diagnostics.disposed = true;
+		clock.dispose();
 		window.removeEventListener("pagehide", cleanup);
 		cancelAnimationFrame(frameRequest);
 		sizeTracker?.cleanup();
@@ -145,7 +156,7 @@ export default async (canvas, config) => {
 	// and the shader clock cannot come from different origins. `start` is set on the first
 	// rAF frame, so before then this reads 0 rather than NaN.
 	let start = NaN;
-	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : (performance.now() - start) / 1000);
+	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : clock.seconds() - start / 1000);
 
 	const context = {
 		config,
@@ -175,6 +186,8 @@ export default async (canvas, config) => {
 
 	const renderLoop = (now) => {
 		if (cleanedUp) return;
+		now = clock.seconds(now) * 1000;
+		if (clock.paused) { frameRequest = requestAnimationFrame(renderLoop); return; }
 		if (isNaN(start)) {
 			start = now;
 		}
@@ -212,6 +225,7 @@ export default async (canvas, config) => {
 		// Eventually, when WebGPU allows it, we'll remove the endPass and just copy from our pipeline's output to the canvas texture.
 		// encoder.copyTextureToTexture({ texture: outputs?.primary }, { texture: canvasContext.getCurrentTexture() }, canvasSize);
 		device.queue.submit([encoder.finish()]);
+		diagnostics.frames = frames; diagnostics.ready = true; diagnostics.simulationTime = (now - start) / 1000;
 
 		if (!config.once) {
 			frameRequest = requestAnimationFrame(renderLoop);
@@ -222,6 +236,8 @@ export default async (canvas, config) => {
 	};
 
 	initialized = true;
+	diagnostics.initialized = true;
+	diagnostics.dispose = cleanup;
 	if (cleanedUp) {
 		pipeline?.cleanup?.();
 		sizeTracker?.cleanup();
@@ -230,6 +246,7 @@ export default async (canvas, config) => {
 	}
 	frameRequest = requestAnimationFrame(renderLoop);
 	} catch (error) {
+		diagnostics.errors.push(error.message);
 		const closing = cleanedUp;
 		initialized = true;
 		cleanup();

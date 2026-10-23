@@ -3,12 +3,11 @@ import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 
 const numClicks = 5;
 
-export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas }, inputs) => {
+export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas, elapsedSeconds = () => 0 }, inputs) => {
 	const owner = createResourceOwner();
 	const regl = ownRegl(owner, nativeRegl);
 	const clicks = Array(numClicks).fill([0, 0, -Infinity]).flat();
 	let aspectRatio = 1;
-	let start = Date.now();
 
 	let index = 0;
 	// MD-48 (upstream): this used e.srcElement, a non-standard alias for e.target, on a
@@ -23,7 +22,7 @@ export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas
 		}
 		clicks[index * 3 + 0] = (e.clientX - rect.left) / rect.width;
 		clicks[index * 3 + 1] = 1 - (e.clientY - rect.top) / rect.height;
-		clicks[index * 3 + 2] = (Date.now() - start) / 1000;
+		clicks[index * 3 + 2] = elapsedSeconds();
 		index = (index + 1) % numClicks;
 	};
 	window.addEventListener("click", clickHandler);
@@ -43,8 +42,6 @@ export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas
 		},
 		framebuffer: output,
 	});
-
-	start = Date.now();
 
 	return makePass(
 		{

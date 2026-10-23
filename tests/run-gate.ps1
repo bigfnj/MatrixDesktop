@@ -18,7 +18,7 @@
     broke it". Separating 2 from 0 matters more: you cannot get a green gate by having
     checks quietly not run.
 
-    Tier 1 is deterministic and runs anywhere including CI. Tier 2 and 3 launch the real
+    Tier 1 runs on Windows build hosts including CI. Tier 2 and 3 launch the real
     executables and need an attached interactive session, so CI passes -Tier1Only. That
     makes omission an explicit caller decision, never a runtime fallback this script picks.
 
@@ -46,7 +46,7 @@
         and cropped to the client rect. Skipping the crop moved the observed mean 0.09 -> 0.32.
 
 .PARAMETER Tier1Only
-    Run only the environment-independent checks. Used by CI, which has no attached session.
+    Run checks without launching the product UI. Used by CI, which has no attached session.
 
 .PARAMETER SkipBuild
     Reuse existing build output. Faster re-run when only scripts changed.
@@ -478,8 +478,23 @@ try {
         }
     }
 
-    # Web asset integrity. This is the only automated coverage the vendored web/ bundle has,
-    # and unlike the runtime tiers it needs no session, so it runs in CI too.
+    Test-Hdr 'tier 1: native GDI font rendering'
+    $nativeProject = Join-Path $RepoRoot 'tests\MatrixDesktop.Native.Tests\MatrixDesktop.Native.Tests.csproj'
+    $nativeFontLog = Join-Path $env:TEMP 'md-gate-native-fonts.log'
+    if (-not (Test-Path -LiteralPath $nativeProject -PathType Leaf)) {
+        Test-Fail 'native GDI font rendering' "missing: $nativeProject"
+    } else {
+        $nativeFontRun = Start-Process -FilePath (Get-Command dotnet).Source -ArgumentList ('run --project "' + $nativeProject + '" -c Release --no-launch-profile') `
+            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeFontLog -RedirectStandardError "$nativeFontLog.err"
+        $nativeFontOutput = Get-Content -LiteralPath $nativeFontLog, "$nativeFontLog.err" | Out-String
+        if ($nativeFontRun.ExitCode -ne 0 -or $nativeFontOutput -notmatch '(?m)^PASS Native GDI resolves bundled and special fonts with real metrics') {
+            Test-Fail 'native GDI font rendering' "exit $($nativeFontRun.ExitCode) or missing execution witness; see $nativeFontLog"
+            Write-Host $nativeFontOutput
+        } else { Test-Ok 'native GDI font rendering and handle cleanup' }
+    }
+
+    # Web asset integrity complements the behavior and browser checks below.
+    # Unlike the product runtime tiers it needs no session, so it runs in CI too.
     Test-Hdr 'tier 1: web bundle integrity'
     $webRoot = Join-Path $RepoRoot 'MatrixDesktop\web'
     $node = Get-Command node -ErrorAction SilentlyContinue
@@ -536,6 +551,26 @@ try {
             else { Test-Fail 'UC3D scene regressions' "see $uc3dLog" }
         }
     } else { Test-Unchecked 'UC3D scene regressions' 'node is not on PATH' }
+
+    foreach ($case in @(
+        @{ Name = 'ZMatrix simulation and raster regressions'; Script = 'tests\zmatrix-tests.mjs' },
+        @{ Name = 'host pause clock regressions'; Script = 'tests\host-playback-tests.mjs' }
+        @{ Name = 'host pointer regressions'; Script = 'tests\host-pointer-tests.mjs' }
+        @{ Name = 'UC3D host audio pause regressions'; Script = 'tests\uc3d-audio-tests.mjs' }
+        @{ Name = 'native bootstrap generation regressions'; Script = 'tests\native-bootstrap-tests.mjs' }
+    )) {
+        if (-not $node) { Test-Unchecked $case.Name 'node is not on PATH'; continue }
+        $path = Join-Path $RepoRoot $case.Script
+        $log = Join-Path $env:TEMP ('md-gate-' + ($case.Name -replace ' ', '-') + '.log')
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Test-Fail $case.Name "missing: $path"; continue }
+        $run = Start-Process -FilePath $node.Source -ArgumentList ('"' + $path + '"') -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+        if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
+        else {
+            Test-Fail $case.Name "exit $($run.ExitCode); see $log"
+            Get-Content -LiteralPath $log, "$log.err" | Select-Object -Last 30 | ForEach-Object { Write-Host $_ }
+        }
+    }
 
     # Every shader, asset and lib path referenced from JS or HTML must resolve. A renamed
     # or deleted asset is otherwise a runtime-only failure that no build catches.
@@ -602,7 +637,16 @@ try {
                     -RedirectStandardOutput $configLog -RedirectStandardError "$configLog.err"
                 if ($configRun.ExitCode -eq 0) { Test-Ok 'UC3D rebuilt slider metadata and web parsers agree' }
                 else { Test-Fail 'UC3D rebuilt slider metadata and web parsers agree' "see $configLog" }
-            } else { Test-Unchecked 'UC3D rebuilt slider metadata and web parsers agree' 'node is not on PATH' }
+                $zmatrixConfigTest = Join-Path $RepoRoot 'tests\zmatrix-config-tests.mjs'
+                $zmatrixConfigLog = Join-Path $env:TEMP 'md-gate-zmatrix-config.log'
+                $zmatrixConfigRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $zmatrixConfigTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
+                    -RedirectStandardOutput $zmatrixConfigLog -RedirectStandardError "$zmatrixConfigLog.err"
+                if ($zmatrixConfigRun.ExitCode -eq 0) { Test-Ok 'ZMatrix rebuilt metadata and structured web parsers agree' }
+                else { Test-Fail 'ZMatrix rebuilt metadata and structured web parsers agree' "see $zmatrixConfigLog" }
+            } else {
+                Test-Unchecked 'UC3D rebuilt slider metadata and web parsers agree' 'node is not on PATH'
+                Test-Unchecked 'ZMatrix rebuilt metadata and structured web parsers agree' 'node is not on PATH'
+            }
             $smokeLog = Join-Path $env:TEMP 'md-gate-web-smoke.log'
             $smokeRun = Start-Process -FilePath $py -ArgumentList ('"' + $smokeScript + '"') -Wait -PassThru -NoNewWindow `
                 -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"
@@ -640,14 +684,24 @@ try {
     if (-not $py) {
         Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
         Test-Unchecked 'native smoke process lifecycle' 'Python with Playwright is unavailable'
+        Test-Unchecked 'screensaver foreground wait and ownership' 'Python is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D original WebGL calibration' 'Python with Playwright is unavailable'
+        Test-Unchecked 'ZMatrix WebGL smoke' 'Python with Playwright is unavailable'
+        Test-Unchecked 'ZMatrix configurator controls and imports' 'Python with Playwright is unavailable'
+        Test-Unchecked 'original Matrix host playback' 'Python with Playwright is unavailable'
+        Test-Unchecked 'UC3D real browser audio pause' 'Python with Playwright is unavailable'
     } else {
         foreach ($case in @(
             @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
             @{ Name = 'native smoke process lifecycle'; Script = 'tests\test_native_smoke.py'; Arguments = '' },
+            @{ Name = 'screensaver foreground wait and ownership'; Script = 'tests\screensaver-focus.test.py'; Arguments = '' },
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
-            @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' }
+            @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' },
+            @{ Name = 'ZMatrix WebGL smoke'; Script = 'tests\zmatrix-browser.py'; Arguments = ' --renderer regl' },
+            @{ Name = 'ZMatrix configurator controls and imports'; Script = 'tests\zmatrix-configurator.py'; Arguments = '' },
+            @{ Name = 'UC3D real browser audio pause'; Script = 'tests\uc3d-audio-browser.py'; Arguments = '' },
+            @{ Name = 'original Matrix host playback'; Script = 'tests\matrix-playback-browser.py'; Arguments = ' --renderer regl' }
         )) {
             $path = Join-Path $RepoRoot $case.Script
             $log = Join-Path $env:TEMP ('md-gate-' + ($case.Name -replace ' ', '-') + '.log')
@@ -891,7 +945,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     if ($publishOk) {
         Test-Ok 'publish both executables'
         $required = @(
-            'MatrixDesktop.exe', 'MatrixDesktop.dll', 'MatrixDesktop.deps.json', 'MatrixDesktop.runtimeconfig.json',
+            'MatrixDesktop.exe', 'MatrixDesktop.scr', 'MatrixDesktop.dll', 'MatrixDesktop.deps.json', 'MatrixDesktop.runtimeconfig.json',
             'MatrixDesktopConfigurator.exe', 'MatrixDesktopConfigurator.dll',
             'MatrixDesktopConfigurator.deps.json', 'MatrixDesktopConfigurator.runtimeconfig.json',
             'web\index.html', 'configurator\index.html'
@@ -1225,6 +1279,30 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeLog -RedirectStandardError "$nativeLog.err"
             if ($nativeRun.ExitCode -eq 0) { Test-Ok 'published UC3D media and preview' }
             else { Test-Fail 'published UC3D media and preview' "exit $($nativeRun.ExitCode); see $nativeLog" }
+        }
+    }
+
+    if (-not $Tier1Only) {
+        Test-Hdr 'tier 3: wallpaper, ZMatrix configurator and screensaver'
+        foreach ($case in @(
+            @{ Name = 'published wallpaper and native ZMatrix'; Script = 'tests\wallpaper-smoke.py'; Arguments = ' --renderer regl --app "' + (Join-Path $GatePublishDir 'MatrixDesktop.exe') + '" --output "' + (Join-Path $ShotDir 'wallpaper') + '"' },
+            @{ Name = 'published screensaver entrypoints'; Script = 'tests\screensaver-smoke.py'; Arguments = ' --scr "' + (Join-Path $GatePublishDir 'MatrixDesktop.scr') + '"' },
+            @{ Name = 'published ZMatrix configurator'; Script = 'tests\native-zmatrix-configurator.py'; Arguments = ' --publish "' + $GatePublishDir + '" --renderer regl' }
+        )) {
+            if (-not [Environment]::UserInteractive -or -not $py) {
+                Test-Unchecked $case.Name 'requires an interactive session and Python with Playwright'
+                continue
+            }
+            $path = Join-Path $RepoRoot $case.Script
+            $log = Join-Path $ShotDir (($case.Name -replace ' ', '-') + '.log')
+            $run = Start-Process -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+            if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
+            elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
+            else {
+                Test-Fail $case.Name "exit $($run.ExitCode); see $log"
+                Get-Content -LiteralPath $log, "$log.err" | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
+            }
         }
     }
 

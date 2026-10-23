@@ -20,6 +20,11 @@ public sealed class MainForm : Form
     private readonly string _startupQueryString;
     private readonly EventHandler _displaySettingsChangedHandler;
     private readonly AppOptions _appOptions;
+    private readonly HostLaunchPlan _launchPlan;
+    private readonly bool _managedLifecycle;
+    internal bool IsWallpaper => _appOptions is not null && _appOptions.WindowMode == WindowMode.Wallpaper && _launchPlan is not null && !_launchPlan.IsScreensaver && !_launchPlan.IsPreview;
+    private System.Drawing.Rectangle CaptureBounds => IsWallpaper || _launchPlan.IsPreview ? SystemInformation.VirtualScreen : Bounds;
+    internal event EventHandler? RendererReady;
 
     // Best-effort foreground enforcement on startup.
     // Windows may refuse focus stealing in some cases, so we retry briefly.
@@ -35,24 +40,36 @@ public sealed class MainForm : Form
 
     private bool _isShuttingDown;
     private bool _webViewInitializationStarted;
+    private bool _cursorHidden;
     private Shared.AppWindowIcon? _windowIcon;
 
     private readonly Shared.NativeMediaBridge _mediaBridge = new(preview: false);
 
     private static string? _cachedUserDataFolder;
 
-    public MainForm(string[]? args)
+    public MainForm(string[]? args) : this(new HostLaunchPlan(args ?? []), managedLifecycle: false) { }
+
+    internal MainForm(HostLaunchPlan launchPlan, bool managedLifecycle = true)
     {
+        _launchPlan = launchPlan;
+        _managedLifecycle = managedLifecycle;
         Text = "Matrix Digital Rain";
         TryApplyWindowIcon();
 
-        _appOptions = AppCli.Parse(args, out var passthroughArgs);
+        var effectiveArgs = ScreensaverWindowPolicy.EffectiveArguments(launchPlan);
+        _appOptions = AppCli.Parse(effectiveArgs, out var passthroughArgs);
+        if (IsWallpaper || launchPlan.IsPreview)
+        {
+            TopLevel = false;
+            ShowInTaskbar = false;
+        }
 
         // Register a keyboard exit handler that ignores typical software-injected input.
         // (Filters LLKHF_INJECTED / LLKHF_LOWER_IL_INJECTED.)
         try
         {
-            _keyboardExit = new LowLevelKeyboardExit(this, _appOptions.ExitOnEsc, _appOptions.ExitOnAnyKey, _appOptions.GlobalKeyExit);
+            if (!IsWallpaper && !launchPlan.IsPreview)
+                _keyboardExit = new LowLevelKeyboardExit(this, _appOptions.ExitOnEsc, _appOptions.ExitOnAnyKey, _appOptions.GlobalKeyExit);
         }
         catch
         {
@@ -75,11 +92,52 @@ public sealed class MainForm : Form
 
         _startupQueryString = MatrixArgs.BuildQueryString(passthroughArgs);
         // Capture the requested desktop before this window is shown.
-        _mediaBridge.Prepare(_startupQueryString, Bounds);
+        _mediaBridge.Prepare(_startupQueryString, CaptureBounds);
 
         _webView = CreateWebView(GetAppDataUserDataFolder());
         Controls.Add(_webView);
         Shown += MainForm_Shown;
+    }
+
+    protected override bool ShowWithoutActivation => IsWallpaper || _launchPlan?.IsPreview == true || base.ShowWithoutActivation;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var parameters = base.CreateParams;
+            if (IsWallpaper || _launchPlan?.IsPreview == true) parameters.ExStyle |= 0x08000080;
+            return parameters;
+        }
+    }
+
+    internal async Task SetHostPausedAsync(bool paused, string reason)
+    {
+        if (_isShuttingDown || IsDisposed) return;
+        if (!paused) _webView.CoreWebView2?.Resume();
+        if (_webView.CoreWebView2 is not null)
+        {
+            var state = System.Text.Json.JsonSerializer.Serialize(new { paused, reason });
+            await _webView.CoreWebView2.ExecuteScriptAsync($"window.matrixHostPlaybackState={state};window.dispatchEvent(new CustomEvent('matrix-host-state',{{detail:window.matrixHostPlaybackState}}));");
+        }
+        if (paused) await TrySuspendWebViewAsync(reason);
+        else { _webView.Visible = true; _isSuspended = false; }
+    }
+
+    internal Task RefreshNativeResourcesAsync() => _isShuttingDown ? Task.CompletedTask
+        : _mediaBridge.RefreshAsync(_startupQueryString, CaptureBounds, DeviceDpi);
+
+    internal void PostHostPointer(DesktopPointerBridge.Pointer pointer)
+    {
+        if (_isShuttingDown || _webView.CoreWebView2 is null) return;
+        var local = PointToClient(pointer.ScreenPoint);
+        if (!ClientRectangle.Contains(local)) return;
+        _webView.CoreWebView2.PostWebMessageAsJson(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            type = "matrix-host-pointer", eventType = pointer.EventType, x = local.X, y = local.Y,
+            button = pointer.Button, deltaX = pointer.DeltaX, deltaY = pointer.DeltaY,
+            viewportWidth = ClientSize.Width, viewportHeight = ClientSize.Height,
+        }));
     }
 
     private void TryApplyWindowIcon()
@@ -130,7 +188,7 @@ public sealed class MainForm : Form
         try
         {
             // Only needed for fullscreen / borderless modes.
-            if (_appOptions.WindowMode != WindowMode.Windowed)
+            if (_appOptions.WindowMode != WindowMode.Windowed && !IsWallpaper && !_launchPlan.IsPreview)
             {
                 SystemEvents.DisplaySettingsChanged += _displaySettingsChangedHandler;
             }
@@ -154,7 +212,7 @@ public sealed class MainForm : Form
         // the flag stayed false, the catch swallowed it, and the successful subscription was
         // never removed. SystemEvents is static and holds a strong reference, so that rooted
         // the form for the life of the process and kept firing against a disposed WebView.
-        if (!_sessionSwitchAttached)
+        if (!_sessionSwitchAttached && !_managedLifecycle && !IsWallpaper && !_launchPlan.IsPreview)
         {
             try
             {
@@ -167,7 +225,7 @@ public sealed class MainForm : Form
             }
         }
 
-        if (!_powerModeAttached)
+        if (!_powerModeAttached && !_managedLifecycle && !IsWallpaper && !_launchPlan.IsPreview)
         {
             try
             {
@@ -331,7 +389,7 @@ public sealed class MainForm : Form
         }
 
         // Only detach DisplaySettingsChanged if we attached it (non-windowed modes)
-        if (_appOptions.WindowMode != WindowMode.Windowed)
+        if (_appOptions.WindowMode != WindowMode.Windowed && !IsWallpaper && !_launchPlan.IsPreview)
         {
             try
             {
@@ -378,9 +436,10 @@ public sealed class MainForm : Form
     {
         try
         {
-            if (_appOptions.HideCursor)
+            if (_cursorHidden)
             {
                 Cursor.Show();
+                _cursorHidden = false;
             }
         }
         catch
@@ -401,6 +460,17 @@ public sealed class MainForm : Form
         base.OnFormClosed(e);
     }
 
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _mediaBridge.Dispose();
+            TryCleanupWebView();
+            DisposeWindowIcons();
+        }
+        base.Dispose(disposing);
+    }
+
     private void DisposeWindowIcons()
     {
         try
@@ -419,6 +489,15 @@ public sealed class MainForm : Form
     {
         try
         {
+            if (IsWallpaper || _launchPlan.IsPreview)
+            {
+                TopMost = false;
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.Manual;
+                WindowState = FormWindowState.Normal;
+                if (initial) Bounds = SystemInformation.VirtualScreen;
+                return;
+            }
             TopMost = _appOptions.TopMost;
 
             if (_appOptions.WindowMode == WindowMode.Windowed)
@@ -520,6 +599,7 @@ public sealed class MainForm : Form
             if (_appOptions.HideCursor)
             {
                 Cursor.Hide();
+                _cursorHidden = true;
             }
             else
             {
@@ -568,7 +648,7 @@ public sealed class MainForm : Form
                         return;
                     }
 
-                    if (ForegroundWindow.IsThisProcessForeground())
+                    if (ScreensaverWindowPolicy.StopAfterOwnership(_launchPlan, ForegroundWindow.IsThisProcessForeground()))
                     {
                         StopForegroundEnforcer();
                         return;
@@ -652,12 +732,12 @@ public sealed class MainForm : Form
         try
         {
             TryApplyNativeWindowIcons();
-            TryApplyCursorVisibility();
+            if (!IsWallpaper && !_launchPlan.IsPreview) TryApplyCursorVisibility();
 
             // Some launch contexts (shells, scripts, startup tasks) don't reliably
             // activate the new window. Make a best-effort attempt to become the
             // foreground app.
-            TryBeginForegroundEnforce();
+            if (!IsWallpaper && !_launchPlan.IsPreview) TryBeginForegroundEnforce();
 
             await InitializeWebViewAsync();
         }
@@ -692,6 +772,7 @@ public sealed class MainForm : Form
         }
         catch (WebView2RuntimeNotFoundException)
         {
+            if (_isShuttingDown || IsDisposed) return;
             MessageBox.Show(
                 "Microsoft Edge WebView2 Runtime is not installed on this machine.\n\n" +
                 "Install the Evergreen WebView2 Runtime and re-run this app.",
@@ -702,10 +783,12 @@ public sealed class MainForm : Form
         }
         catch (COMException ex) when (ex.HResult == CatastrophicFailureHResult)
         {
+            if (_isShuttingDown || IsDisposed) return;
             await RetryWebViewInitializationAfterCatastrophicFailureAsync(ex);
         }
         catch (Exception ex)
         {
+            if (_isShuttingDown || IsDisposed) return;
             MessageBox.Show(ex.ToString(), "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Close();
         }
@@ -725,6 +808,7 @@ public sealed class MainForm : Form
 
         await Task.Yield();
         await _webView.EnsureCoreWebView2Async();
+        if (_isShuttingDown || IsDisposed) return;
 
         // Slightly reduce background features we don't need for an offline local app.
         // (This reduces "browser-y" behavior and a bit of overhead.)
@@ -782,11 +866,21 @@ public sealed class MainForm : Form
             webRoot,
             CoreWebView2HostResourceAccessKind.Allow);
 
+        _mediaBridge.SetAssetRoot(webRoot);
+        _mediaBridge.Prepare(_startupQueryString, CaptureBounds, DeviceDpi);
+
         var target = string.IsNullOrWhiteSpace(_startupQueryString)
             ? $"{HostOriginPrefix}index.html"
             : $"{HostOriginPrefix}index.html?{_startupQueryString}";
 
         await _mediaBridge.AttachAsync(_webView.CoreWebView2, HostOriginPrefix);
+        if (_isShuttingDown || IsDisposed) return;
+        _webView.CoreWebView2.NavigationCompleted += (_, e) =>
+        {
+            if (e.IsSuccess && !_isShuttingDown)
+                ScreensaverWindowPolicy.RendererReady(_launchPlan,
+                    () => RendererReady?.Invoke(this, EventArgs.Empty), TryBeginForegroundEnforce);
+        };
         _webView.CoreWebView2.Navigate(target);
     }
 
@@ -851,15 +945,11 @@ public sealed class MainForm : Form
             // Ignore.
         }
 
-        try
-        {
-            // Disposing WebView2 is the most reliable way to ensure the runtime releases file handles.
-            _webView.Dispose();
-        }
-        catch
-        {
-            // Ignore.
-        }
+        // A destroyed Explorer parent can invalidate the native controller.
+        // Detach before its guarded dispose so Form.Dispose cannot retry a failed
+        // WebView2 cleanup outside this boundary.
+        HostControlLifetime.DetachAndDispose(_webView, Controls,
+            error => Shared.Logger.Warn($"WebView cleanup after host destruction: {error.Message}"));
     }
 
     private void DetachWebViewHandlers(WebView2 webView)

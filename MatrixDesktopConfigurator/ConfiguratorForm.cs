@@ -253,6 +253,7 @@ public sealed class ConfiguratorForm : Form
         _previewWebRoot = WebAssets.FindWebRoot();
         if (_previewWebRoot is not null)
         {
+            _mediaBridge.SetAssetRoot(_previewWebRoot);
             _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 PreviewHostName,
                 _previewWebRoot,
@@ -299,6 +300,9 @@ public sealed class ConfiguratorForm : Form
             "buildCommand"     => BuildCommand(payload),
             "buildWebQuery"    => await BuildWebQueryAsync(payload),
             "importCommand"    => ImportCommand(payload),
+            "browseConfig"     => BrowseConfig(),
+            "useScreensaver"   => UseScreensaver(payload),
+            "restoreScreensaver" => RestoreScreensaver(),
             "randomizeDraft"   => RandomizeDraft(payload),
             "browseMedia"      => BrowseMedia(payload),
             "copyCommand"      => CopyCommand(payload),
@@ -388,6 +392,7 @@ public sealed class ConfiguratorForm : Form
         return new
         {
             metadata = _metadata,
+            fonts = InstalledFontNames(),
             defaultDraft = _commandBuilder.CreateDefaultDraft(),
             state = _state,
             storage = new
@@ -488,7 +493,9 @@ public sealed class ConfiguratorForm : Form
     private object ImportCommand(JsonElement payload)
     {
         var command = ReadOptionalString(payload, "command") ?? string.Empty;
-        var result = _argumentImporter.Import(command, _commandBuilder.CreateDefaultDraft());
+        var previous = ZMatrixCfgImporter.IsConfiguration(command) && payload.TryGetProperty("draft", out _)
+            ? ReadObject(payload, "draft") : _commandBuilder.CreateDefaultDraft();
+        var result = _argumentImporter.Import(command, previous);
 
         _state.SelectedPresetId = null;
         _state.LastDraft = StorageService.CloneObject(result.Draft);
@@ -499,8 +506,42 @@ public sealed class ConfiguratorForm : Form
             draft = result.Draft,
             applied = result.Applied,
             ignored = result.Ignored,
+            notes = result.Notes,
             state = _state,
         };
+    }
+
+    private object BrowseConfig()
+    {
+        using var dialog = new OpenFileDialog { Title = "Choose a ZMatrix configuration", Filter = "ZMatrix configuration|*.cfg|Text files|*.txt", CheckFileExists = true };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return new { text = (string?)null };
+        if (new FileInfo(dialog.FileName).Length > 1_048_576) throw new InvalidDataException("The configuration exceeds 1 MB.");
+        return new { text = File.ReadAllText(dialog.FileName) };
+    }
+
+    private object UseScreensaver(JsonElement payload)
+    {
+        var renderer = FindMatrixDesktopExe() ?? throw new FileNotFoundException("MatrixDesktop.exe was not found beside the configurator or in the local build output.");
+        var saver = Path.Combine(Path.GetDirectoryName(renderer)!, "MatrixDesktop.scr");
+        if (!File.Exists(saver)) throw new FileNotFoundException("Publish MatrixDesktop.scr beside MatrixDesktop.exe before selecting it as the screensaver.");
+        var draft = ReadObject(payload, "draft");
+        global::Shared.ScreensaverProfile.Save(_commandBuilder.BuildArguments(draft, includeDefaults: true, forTest: false).ToArray());
+        global::Shared.ScreensaverRegistration.Register(saver);
+        return new { saved = true, message = "Current visual settings saved and MatrixDesktop selected as the screensaver." };
+    }
+
+    private static object RestoreScreensaver()
+    {
+        global::Shared.ScreensaverRegistration.Restore();
+        return new { restored = true, message = "Previous screensaver restored." };
+    }
+
+    private static string[] InstalledFontNames()
+    {
+        using var installed = new System.Drawing.Text.InstalledFontCollection();
+        var families = installed.Families;
+        try { return families.Select(family => family.Name).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(); }
+        finally { foreach (var family in families) family.Dispose(); }
     }
 
     private object RandomizeDraft(JsonElement payload)
@@ -544,6 +585,8 @@ public sealed class ConfiguratorForm : Form
             throw new FileNotFoundException("MatrixDesktop.exe was not found beside the configurator or in the local build output.");
         }
 
+        var arguments = _commandBuilder.BuildArguments(draft, includeDefaults: false, forTest: true);
+        var description = _commandBuilder.BuildTestCommandDescription(draft);
         StopTestProcess();
 
         var info = new ProcessStartInfo(exe)
@@ -552,7 +595,7 @@ public sealed class ConfiguratorForm : Form
             WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory,
         };
 
-        foreach (var argument in _commandBuilder.BuildArguments(draft, includeDefaults: false, forTest: true))
+        foreach (var argument in arguments)
         {
             info.ArgumentList.Add(argument);
         }
@@ -566,7 +609,7 @@ public sealed class ConfiguratorForm : Form
         return new
         {
             processId = _testProcess.Id,
-            command = _commandBuilder.BuildCommand(draft, includeDefaults: false, forTest: true),
+            command = description,
         };
     }
 

@@ -65,11 +65,13 @@ def preserve_portable_presets(case):
                     path.write_bytes(contents)
     return protected
 
-def open_application(playwright, exe, args, case):
+def open_application(playwright, exe, args, case, env_overrides=None):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
     env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={port}"
     env["WEBVIEW2_USER_DATA_FOLDER"] = str(ARTIFACTS / f"profile-{case}-{time.time_ns()}")
     process = subprocess.Popen([str(exe), *args], env=env, creationflags=subprocess.CREATE_NO_WINDOW)

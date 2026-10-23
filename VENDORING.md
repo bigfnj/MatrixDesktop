@@ -14,7 +14,8 @@ an identified upstream fork point.
 
 Subsequent changes include payload trimming (`bd24373`), click ripples
 (`1d61ace`), renderer corrections, glyph intensity, and the UC3D scene and
-renderer lifecycle work in version 1.1.0. Use history rather than assuming this
+renderer lifecycle work in version 1.1.0, followed by ZMatrix and wallpaper support
+in version 1.2.0. Use history rather than assuming this
 list names every commit:
 
 ```pwsh
@@ -28,15 +29,15 @@ The latter includes new modules that a tracked-file diff cannot show yet.
 
 ## Local change inventory
 
-Paths below are relative to `MatrixDesktop/web/`. This is the version 1.1.0
+Paths below are relative to `MatrixDesktop/web/`. This is the version 1.2.0
 inventory; regenerate the diff before every upstream refresh.
 
 | Files | Local responsibility |
 | --- | --- |
 | `js/camera.js` | Camera setup and explicit track release. |
-| `js/config.js` | Desktop defaults, accepted parameters, exact boolean parsing and UC3D configuration. |
+| `js/config.js` | Desktop defaults, accepted parameters, exact boolean parsing and UC3D/ZMatrix configuration. |
 | `js/main.js` | Renderer selection, compatibility fallback and visible initialization failures. |
-| `js/regl/main.js`, `js/webgpu/main.js` | Desktop lifecycle, click ripples, camera ownership and the UC3D entry point. |
+| `js/regl/main.js`, `js/webgpu/main.js` | Desktop lifecycle, pause-aware time, click ripples, camera ownership and scene entry points. |
 | `js/regl/bloomPass.js`, `imagePass.js`, `mirrorPass.js`, `palettePass.js`, `rainPass.js`, `stripePass.js`, `utils.js` | Local renderer behavior and resource ownership. |
 | `js/regl/lkgHelper.js`, `js/regl/quiltPass.js` | Looking Glass calibration and quilt resource ownership. |
 | `js/webgpu/bloomPass.js`, `imagePass.js`, `mirrorPass.js`, `palettePass.js`, `rainPass.js`, `stripePass.js`, `utils.js` | Local renderer behavior, cached views and resource ownership. |
@@ -52,7 +53,10 @@ The following modules and shaders are local additions:
 | `js/canvasSize.js` | Cached canvas dimensions and resize observation. |
 | `js/rendererChoice.js` | Looking Glass routing through the WebGL quilt path. |
 | `js/resourceOwner.js` | Idempotent resource ownership. |
-| `js/uc3d/audio.js`, `media.js`, `overlays.js`, `runtime.js`, `scene.js` | Shared UC3D behavior, local-media consumption and lifecycle. |
+| `js/hostPlayback.js`, `js/hostPointer.js` | Native pause clocks and opt-in desktop pointer forwarding shared by the scenes. |
+| `js/zmatrix/settings.js`, `scene.js`, `surface.js`, `fonts.js`, `runtime.js`, `gpu.js` | Fresh ZMatrix feature implementation, persistent bytewise raster and native/browser resources. |
+| `js/regl/zmatrixPass.js`, `js/webgpu/zmatrixPass.js` | Actual ZMatrix WebGL/WebGPU presentation. |
+| `js/uc3d/audio.js`, `defaults.js`, `media.js`, `native.js`, `overlays.js`, `runtime.js`, `scene.js` | Shared UC3D behavior, local-media consumption and lifecycle. |
 | `js/regl/uc3dPass.js`, `js/webgpu/uc3dPass.js` | UC3D backend implementations. |
 | `shaders/glsl/uc3d.vert.glsl`, `uc3d.frag.glsl`, `uc3dComposite.frag.glsl` | UC3D WebGL glyph field and composite. |
 | `shaders/wgsl/uc3d.wgsl`, `uc3dComposite.wgsl` | UC3D WebGPU glyph field and composite. |
@@ -60,6 +64,24 @@ The following modules and shaders are local additions:
 UC3D is newly written source informed by analysis of the owner's local donor
 program. Donor binaries, recovered decompiler output and donor media are not
 part of this tree. See [UC3D reconstruction limits](docs/UC3D.md#reconstruction-and-verification).
+
+The ZMatrix functional model was reviewed at
+[`bigfnj/zmatrix-modernized@7eefa2919ef2ac976fd8a566176e20a6541f996d`](https://github.com/bigfnj/zmatrix-modernized/tree/7eefa2919ef2ac976fd8a566176e20a6541f996d).
+Its C++ code is not imported. The new C#/JavaScript implementation remains under
+this repository's MIT license. The separately distributed font is an exception
+to the upstream font omissions below:
+
+| Asset | Attribution and permission |
+| --- | --- |
+| `web/assets/zmatrix/matrix-code.ttf` | Matrix Code Font by e-RBi. The original notice calls it freeware and permits distribution. The notice ships as `matrix-code.LICENSE` beside the font. |
+
+```text
+matrix-code.ttf sha256 f0041b1e07195631038a6681f72116536518c2b0170554bdcc1c6c1ea9c405e6
+```
+
+The native app registers this font privately for atlas creation and removes that
+registration afterward. It does not install a system font. Browser fallback
+loads the same bundled asset through FontFace and reports its GDI approximation.
 
 ## Deliberate omissions
 

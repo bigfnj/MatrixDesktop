@@ -1,11 +1,46 @@
 # MatrixDesktop
 
-MatrixDesktop brings **Rezmason/matrix** digital rain and a reconstructed **UC3D**
-screensaver scene to Windows, with a companion configurator for presets and launch arguments.
+MatrixDesktop brings **Rezmason/matrix** digital rain, a reconstructed **UC3D**
+screensaver scene, and a **ZMatrix** scene to Windows. Every scene can run as live
+wallpaper behind desktop icons, in a window, fullscreen, or as a Windows screensaver.
+The companion configurator provides presets, scene controls and launch arguments.
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
-Current source version: **1.1.0**. Tagged releases are listed on the [releases page](https://github.com/bigfnj/MatrixDesktop/releases).
+Current source version: **1.2.0**. Tagged releases are listed on the [releases page](https://github.com/bigfnj/MatrixDesktop/releases).
+
+### Wallpaper and ZMatrix
+
+Choose **Wallpaper** in the configurator's window mode, or launch any scene with
+`--wallpaper`. The tray menu provides pause/resume, settings, exit and explicit
+per-user startup control. Wallpaper mode leaves typing and desktop icons usable;
+desktop pointer effects are optional. Fullscreen applications pause it by default,
+and battery pause is available separately.
+
+```cmd
+MatrixDesktop.exe --wallpaper --scene matrix
+MatrixDesktop.exe --wallpaper --scene uc3d
+MatrixDesktop.exe --wallpaper --scene zmatrix
+```
+
+The **ZMatrix Desktop** starter uses the original stream and font defaults.
+Its controls include per-stream speed variance, a separate simulation refresh
+interval, persistent dim trails, fixed and randomized cleanup, vertical phrase
+streams, independent normal/phrase fonts and colors, wallpaper blending, and RGB
+gain/offset. The configurator imports original ZMatrix `.cfg` files and reports
+fields whose donor behavior was inactive or whose values needed conversion.
+
+Windows supplies glyph atlases through GDI and captures wallpaper without icons
+or other application windows. WebGL and WebGPU present the same persistent raster;
+XOR, AND and OR use bytewise RGB operations. Browser-only previews explicitly
+report font or wallpaper approximations. This is a fresh implementation of the
+functional feature set, with the distributable Matrix Code Font credited separately.
+
+The complete publish folder also contains **MatrixDesktop.scr**. The configurator's
+explicit **Use for screensaver** action saves the draft and selects it for the
+current user. **Restore previous screensaver** restores the prior selection.
+Preview and Test Argument do not change Windows' screensaver choice.
+See [ZMatrix behavior and compatibility](docs/ZMATRIX.md) for settings and limits.
 
 ### UC3D scene
 
@@ -64,6 +99,9 @@ See [UC3D options and local media](docs/UC3D.md) and the
 
 ### Since 1.0.2
 
+- **1.2.0** adds wallpaper hosting for every scene, ZMatrix controls and `.cfg`
+  import, native font/wallpaper resources, tray playback and startup controls,
+  and Windows screensaver entrypoints. Existing presets keep their saved values.
 - **1.1.0** adds the optional UC3D scene in both rendering backends, local picture and
   audio inputs, an optional privately imported glyph atlas, and a starter preset.
   Original-unit sliders, native stream/movement behavior and picture formation are
@@ -113,8 +151,9 @@ These screenshots are rendered by the same bundled offline web app that MatrixDe
 - **Argument reference embedded.** `MatrixDesktop.exe --help-full` opens a scrollable
   reference dialog with the full argument guide. The configurator's `?` button shows
   the same content. No external file required.
-- **Sleep/lock aware.** When the workstation locks or the machine sleeps, the WebView
-  suspends (no GL / no audio / no timers). Resumes automatically on unlock / wake.
+- **Sleep/lock aware.** Locking or sleeping pauses scene playback and UC3D sound
+  while the wrapper requests WebView2 suspension. Playback resumes on unlock or
+  wake; WebView2 may decline suspension.
 - **Crash diagnostics.** Both EXEs install an unhandled-exception handler that writes
   a `.dmp` to `%LOCALAPPDATA%\MatrixDesktop\dumps\` and surfaces the path in the error
   dialog.
@@ -236,10 +275,10 @@ The importer accepts full `MatrixDesktop.exe ...` commands, raw argument lines, 
 
 The randomizer has three scopes: `Visual preset`, `Colors only`, and `Motion/Layout`. It keeps launch/window controls untouched, avoids camera/image/mirror/debug effects, caps generated `stripeColors` at 2–8 colors, and caps generated palettes at 3–6 stops.
 
-On first launch, the configurator seeds `UC3D Trilogy`, `rainbow-haze`, `paradise`, and
-`stripe effects`. These are regular user presets and can be edited, renamed, or deleted.
-Existing stores receive the UC3D preset once without restoring deleted older starters or
-overwriting edited presets.
+On first launch, the configurator seeds `UC3D Trilogy`, `ZMatrix Desktop`, `rainbow-haze`,
+`paradise`, and `stripe effects`. These are regular user presets and can be edited, renamed,
+or deleted. Existing stores receive each new starter once without restoring deleted older
+starters or overwriting edited presets.
 Only an exact untouched older UC3D starter is migrated to Original controls; customized
 older presets keep Legacy controls.
 
@@ -349,7 +388,7 @@ are described in [UC3D options and local media](docs/UC3D.md) and the embedded a
 
 #### Core selection
 
-- `scene` (string): `matrix` (default) or `uc3d`.
+- `scene` (string): `matrix` (default), `uc3d` or `zmatrix`.
 - `version` (string): Matrix variant preset.
   - Examples: `classic`, `3d`, `operator`, `megacity`, `nightmare`, `paradise`, `resurrections`, `trinity`, `morpheus`, `bugs`, `palimpsest`, `twilight`, `holoplay`, `neomatrixology`.
   - Aliases also exist in the codebase (e.g., `updated`, `throwback`, `1999`, `2003`, `2021`).
@@ -545,7 +584,8 @@ configurator with its whole command panel out of view. So these assertions are g
 bounding boxes inside the viewport, shell height equal to the viewport, the field list
 actually scrolling, the command panel staying under 30% of the window, the preview pane's
 aspect ratio, and WCAG contrast in both themes. It needs no GPU, no window station and no
-WebView2, which makes it the only configurator UI coverage that runs in CI.
+WebView2, so it runs in CI. The additional `tests/zmatrix-configurator.py` DOM
+suite covers ZMatrix editors, imports, dependencies and preview request ordering.
 
 It also asserts that a render flag actually *changes* the render, by measuring screenshot
 luminance at two values of `glyphIntensity`. That is the check whose absence let
@@ -602,13 +642,14 @@ which is what `ci.yml` does. Exit 1 and 3 fail the build.
 ## Attribution / License
 
 The `MatrixDesktop` wrapper code in this repository is licensed under the **MIT License**: see
-[`LICENSE`](LICENSE). That covers `MatrixDesktop/`, `MatrixDesktopConfigurator/`, `Shared/`, and
-`tests/`.
+[`LICENSE`](LICENSE). This covers the wrapper and new implementation source in
+`MatrixDesktop/`, `MatrixDesktopConfigurator/`, `Shared/`, and `tests/`.
 
 `MatrixDesktop/web/` is a vendored fork of **[Rezmason/matrix](https://github.com/Rezmason/matrix)**,
 which is also MIT licensed, copyright (c) 2018 Rezmason. Its license text is at
 `MatrixDesktop/web/LICENSE` and is reproduced at the bottom of the root `LICENSE`. Both licenses
-are MIT, so the combined work distributes under MIT with both copyright notices retained.
+are MIT and both copyright notices are retained. The separately bundled ZMatrix font is
+freeware under its own [distribution notice](MatrixDesktop/web/assets/zmatrix/matrix-code.LICENSE).
 
 The web tree includes local modifications and new modules. See [`VENDORING.md`](VENDORING.md)
 for the change inventory, the unrecorded upstream fork point, and refresh instructions.

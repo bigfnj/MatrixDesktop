@@ -242,7 +242,7 @@ internal static class CommandBuilderTests
         Check.True(PresetSeeder.Seed(state, Builder, Importer), "the current migration must run for the previous starter");
         Check.True(JsonNode.DeepEquals(Builder.CreateSceneDefaultDraft("uc3d"), previous.Values), "the exact old starter must use the current profile");
         Check.True(JsonNode.DeepEquals(previous.Values, state.LastDraft), "an untouched selected starter draft must migrate with its preset");
-        Check.Equal(1, state.UserPresets.Count, "migration updates the starter without duplicates");
+        Check.Equal(1, state.UserPresets.Count(preset => preset.Id == previous.Id), "migration updates the starter without duplicates");
         Check.True(!PresetSeeder.Seed(state, Builder, Importer), "the migration must run only once");
     }
 
@@ -267,7 +267,7 @@ internal static class CommandBuilderTests
                 LastDraft = StorageService.CloneObject(lastDraft),
             };
             Check.True(PresetSeeder.Seed(state, Builder, Importer), "the seed version advances even when no preset can change");
-            if (edit == "deleted") Check.Equal(0, state.UserPresets.Count, "a deleted starter must remain deleted");
+            if (edit == "deleted") Check.False(state.UserPresets.Any(preset => preset.Id == previous.Id), "a deleted starter must remain deleted");
             else if (edit != "unsaved draft") Check.True(JsonNode.DeepEquals(savedValues, previous.Values), "a user-owned starter must retain its values: " + edit);
             Check.True(JsonNode.DeepEquals(expectedDraft, state.LastDraft), "a custom unsaved draft must survive: " + edit);
             Check.Equal(edit == "name" ? "My UC3D" : "UC3D Trilogy", previous.Name, "preset names must survive migration");
@@ -276,6 +276,8 @@ internal static class CommandBuilderTests
 
     private static void RemoveOriginalControls(JsonObject draft)
     {
+        foreach (var key in draft.Select(pair => pair.Key).Where(key => key.StartsWith("zm", StringComparison.Ordinal))
+            .Concat(new[] { "processPriority", "wallpaperInput", "wallpaperPauseFullscreen", "wallpaperPauseBattery" }).ToArray()) draft.Remove(key);
         draft.Remove("uc3dControls");
         foreach (var key in Uc3dControlProfile.NativeKeys) draft.Remove(key);
     }
@@ -406,8 +408,8 @@ internal static class CommandBuilderTests
             else if (edit != "deleted")
                 Check.True(JsonNode.DeepEquals(saved, preset.Values), "custom starter must preserve its complete values");
             Check.True(JsonNode.DeepEquals(edit == "none" ? Builder.CreateSceneDefaultDraft("uc3d") : expectedDraft, state.LastDraft), "selected or custom draft must migrate deliberately: " + edit);
-            if (edit == "deleted") Check.Equal(0, state.UserPresets.Count, "a deleted starter must remain deleted");
-            Check.Equal(5, state.PresetSeedVersion, "seed version must advance once");
+            if (edit == "deleted") Check.False(state.UserPresets.Any(candidate => candidate.Id == "seed-uc3d-trilogy"), "a deleted starter must remain deleted");
+            Check.Equal(6, state.PresetSeedVersion, "seed version must advance once");
             Check.True(!PresetSeeder.Seed(state, Builder, Importer), "a second load must not migrate again");
         }
     }

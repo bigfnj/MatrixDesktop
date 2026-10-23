@@ -1,4 +1,5 @@
 import uc3dDefaults from "./uc3d/defaults.js";
+import { zmatrixDefaults, zmatrixParamMapping } from "./zmatrix/settings.js";
 
 const fonts = {
 	coptic: {
@@ -510,6 +511,7 @@ const parseSliderInt = (min, max) => (s) => {
 };
 
 const paramMapping = {
+	...zmatrixParamMapping,
 	uc3dControls: { key: "uc3dControls", parser: (s) => ["original", "legacy"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
 	uc3dAmount: { key: "uc3dAmount", parser: parseSliderInt(100, 1500) },
 	uc3dGlyphSize: { key: "uc3dGlyphSize", parser: parseSliderInt(10, 40) },
@@ -520,7 +522,7 @@ const paramMapping = {
 	uc3dClockSize: { key: "uc3dClockSize", parser: parseSliderInt(50, 170) },
 	donorGlyphs: { key: "donorGlyphs", parser: isTrue },
 	codeColor: { key: "codeColor", parser: parseColor(false) },
-	scene: { key: "scene", parser: (s) => ["matrix", "uc3d"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
+	scene: { key: "scene", parser: (s) => ["matrix", "uc3d", "zmatrix"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
 	shadedLines: { key: "shadedLines", parser: isTrue },
 	sidewaysMovement: { key: "sidewaysMovement", parser: isTrue },
 	mouseRotation: { key: "mouseRotation", parser: isTrue },
@@ -678,6 +680,7 @@ export default (urlParams) => {
 		...defaults,
 		...version,
 		...(validParams.scene === "uc3d" ? uc3dDefaults : {}),
+		...(validParams.scene === "zmatrix" ? zmatrixDefaults : {}),
 		...font,
 		...validParams,
 		baseTextureURL,

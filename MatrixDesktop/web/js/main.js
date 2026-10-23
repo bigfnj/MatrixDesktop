@@ -42,7 +42,7 @@ const loadRenderer = async (canvas, config, useWebGPU) => {
 			await webgpuModule.default(canvas, config);
 			return;
 		} catch (err) {
-			if (config.scene === "uc3d") {
+			if (["uc3d", "zmatrix"].includes(config.scene)) {
 				// Shader and device failures in this optional scene must remain visible;
 				// a working WebGL replacement would otherwise conceal a broken WebGPU pass.
 				throw err;
@@ -55,7 +55,23 @@ const loadRenderer = async (canvas, config, useWebGPU) => {
 	await reglModule.default(canvas, config);
 };
 
+const showError = (error) => {
+	stopCamera();
+	console.error("Failed to load renderer:", error);
+	const notice = document.createElement("div");
+	notice.className = "notice";
+	const message = document.createElement("p");
+	message.textContent = `Error loading renderer: ${error?.message ?? String(error)}`;
+	notice.appendChild(message);
+	document.body.appendChild(notice);
+};
+
 document.body.onload = async () => {
+	// WebView2 can retain an older document-created script in a reused iframe.
+	// The native bridge fetches the current generation before any renderer uses
+	// atlas or wallpaper IDs. A failed handshake must remain visible.
+	try { await window.matrixHostBootstrapReady; }
+	catch (error) { showError(error); return; }
 	const urlParams = new URLSearchParams(window.location.search);
 	const config = makeConfig(Object.fromEntries(urlParams.entries()));
 	// Config check FIRST. && evaluates left to right, so asking supportsWebGPU() first
@@ -90,24 +106,14 @@ document.body.onload = async () => {
 				canvas.style.display = "unset";
 				document.body.removeChild(notice);
 			} catch (err) {
-				stopCamera();
-				console.error("Failed to load renderer:", err);
-				const errorDiv = document.createElement("div");
-				errorDiv.className = "notice";
-				errorDiv.innerHTML = `<p>Error loading renderer: ${err.message}</p>`;
-				document.body.appendChild(errorDiv);
+				showError(err);
 			}
 		});
 	} else {
 		try {
 			await loadRenderer(canvas, config, useWebGPU);
 		} catch (err) {
-			stopCamera();
-			console.error("Failed to load renderer:", err);
-			const errorDiv = document.createElement("div");
-			errorDiv.className = "notice";
-			errorDiv.innerHTML = `<p>Error loading renderer: ${err.message}</p>`;
-			document.body.appendChild(errorDiv);
+			showError(err);
 		}
 	}
 };

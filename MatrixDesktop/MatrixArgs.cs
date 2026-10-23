@@ -32,6 +32,9 @@ internal static class MatrixArgs
         "clock12Hour",
         "desktopBackground",
         "donorGlyphs",
+        "zmMonotonousCleanupEnabled",
+        "zmRandomizedCleanupEnabled",
+        "zmOpaqueBackground",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     public static bool IsHelpRequested(string[]? args)

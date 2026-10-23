@@ -171,8 +171,7 @@ internal static class MediaCatalogTests
         var builder = new MatrixDesktopConfigurator.CommandBuilder(MatrixDesktopConfigurator.ArgumentCatalog.Create());
         var importer = new MatrixDesktopConfigurator.ArgumentImporter(MatrixDesktopConfigurator.ArgumentCatalog.Create());
         Check.True(MatrixDesktopConfigurator.PresetSeeder.Seed(state, builder, importer), "new seed version must apply");
-        Check.Equal(1, state.UserPresets.Count, "deleted old starters must not return");
-        Check.Equal("seed-uc3d-trilogy", state.UserPresets[0].Id, "existing users must receive the new UC3D starter");
+        Check.SetEqual(new[] { "seed-uc3d-trilogy", "seed-zmatrix-desktop" }, state.UserPresets.Select(preset => preset.Id), "only starters introduced after version2 must appear; deleted original starters must not return");
         state.UserPresets.Clear();
         Check.True(!MatrixDesktopConfigurator.PresetSeeder.Seed(state, builder, importer), "seed version must advance");
         Check.Equal(0, state.UserPresets.Count, "a deleted UC3D starter must remain deleted");

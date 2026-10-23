@@ -6,11 +6,22 @@ namespace MatrixDesktopConfigurator;
 
 internal static class PresetSeeder
 {
-    private const int CurrentSeedVersion = 5;
+    private const int CurrentSeedVersion = 6;
+    // Full draft keys that existed before ZMatrix. Historical comparisons must
+    // never acquire fields introduced by a later catalogue or host feature.
+    private static readonly HashSet<string> HistoricalFields = new(
+        ("windowMode monitor workingArea topmost hideCursor exitOnAnyKey exitOnEsc globalKeyExit disableDevTools " +
+         "scene version font renderer effect url camera clickRipples clickRippleShape backgroundColor cursorColor glintColor palette stripeColors " +
+         "cursorIntensity glyphIntensity animationSpeed fallSpeed cycleSpeed forwardSpeed raindropLength slant volumetric isometric " +
+         "numColumns density resolution fps bloomSize bloomStrength ditherMagnitude codeColor donorGlyphs shadedLines sidewaysMovement " +
+         "mouseRotation codeRotation forwardMovement randomForwardMovement showPictures pictureMonochrome pictureCaptions showClock clock12Hour " +
+         "desktopBackground pictureDepth pictureScale pictureDelay pictureDuration clockSize soundVolume pictureSource pictureDirectory donorDirectory " +
+         "sound musicFile glyphFlip glyphRotation loops once skipIntro suppressWarnings testFix").Split(' '), StringComparer.Ordinal);
 
     private static readonly StarterPreset[] StarterPresets =
     [
         new("seed-uc3d-trilogy", "UC3D Trilogy", "--scene uc3d", 3),
+        new("seed-zmatrix-desktop", "ZMatrix Desktop", "--wallpaper --scene zmatrix", 6),
         new(
             "seed-rainbow-haze",
             "rainbow-haze",
@@ -103,6 +114,9 @@ internal static class PresetSeeder
 
     private static void RemoveOriginalControls(JsonObject draft)
     {
+        // These did not exist in either historical full draft. Do not let future
+        // catalogue additions silently disable the exact v3/v4 migration.
+        foreach (var key in draft.Select(pair => pair.Key).Where(key => !HistoricalFields.Contains(key)).ToArray()) draft.Remove(key);
         draft.Remove("uc3dControls");
         foreach (var key in Uc3dControlProfile.NativeKeys) draft.Remove(key);
     }

@@ -50,7 +50,12 @@ internal static class Program
             return;
         }
 
-        Application.Run(new MainForm(args));
+        if (ScreensaverProtocol.TryHandle(args, out var launchPlan))
+        {
+            if (launchPlan is not null) Application.Run(new MatrixApplicationContext(launchPlan));
+            return;
+        }
+        Application.Run(new MatrixApplicationContext(new HostLaunchPlan(args)));
     }
 
     private static bool IsFullHelpRequested(string[] args)

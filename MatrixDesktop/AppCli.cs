@@ -5,6 +5,7 @@ namespace MatrixDesktop;
 
 internal enum WindowMode
 {
+    Wallpaper,
     /// <summary>
     /// Borderless window spanning the full virtual desktop (all monitors).
     /// </summary>
@@ -32,6 +33,10 @@ internal sealed class AppOptions
     public bool GlobalKeyExit { get; init; } = false;
     public bool HideCursor { get; init; } = false;
     public bool DisableDevTools { get; init; } = false;
+    public string ProcessPriority { get; init; } = "auto";
+    public bool WallpaperInput { get; init; }
+    public bool WallpaperPauseFullscreen { get; init; } = true;
+    public bool WallpaperPauseBattery { get; init; }
 
     public static AppOptions Default { get; } = new();
 }
@@ -65,6 +70,10 @@ internal static class AppCli
         var globalKeyExit = false;
         var hideCursor = false;
         var disableDevTools = false;
+        var processPriority = "auto";
+        var wallpaperInput = false;
+        var wallpaperPauseFullscreen = true;
+        var wallpaperPauseBattery = false;
 
         var passthrough = new List<string>(args.Length);
 
@@ -107,6 +116,37 @@ internal static class AppCli
             var k = Shared.FlagNormalization.NormalizeKey(key);
             switch (k)
             {
+                case "wallpaper":
+                    mode = WindowMode.Wallpaper;
+                    monitorIndex = null;
+                    WarnIfValueIgnored(k, value, consumedValue);
+                    break;
+                case "process-priority":
+                    var priority = value?.Trim().ToLowerInvariant();
+                    if (priority is "auto" or "idle" or "below-normal" or "normal" or "above-normal" or "high" or "realtime") processPriority = priority;
+                    else Shared.Logger.Warn("Invalid process priority; retaining the previous selection.");
+                    break;
+                case "wallpaper-input":
+                    wallpaperInput = OnValue(value);
+                    break;
+                case "no-wallpaper-input":
+                    wallpaperInput = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
+                    break;
+                case "wallpaper-pause-fullscreen":
+                    wallpaperPauseFullscreen = OnValue(value);
+                    break;
+                case "no-wallpaper-pause-fullscreen":
+                    wallpaperPauseFullscreen = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
+                    break;
+                case "wallpaper-pause-battery":
+                    wallpaperPauseBattery = OnValue(value);
+                    break;
+                case "no-wallpaper-pause-battery":
+                    wallpaperPauseBattery = false;
+                    WarnIfValueIgnored(k, value, consumedValue);
+                    break;
                 case "windowed":
                     mode = WindowMode.Windowed;
                     WarnIfValueIgnored(k, value, consumedValue);
@@ -249,6 +289,10 @@ internal static class AppCli
             GlobalKeyExit = globalKeyExit,
             HideCursor = hideCursor,
             DisableDevTools = disableDevTools,
+            ProcessPriority = processPriority,
+            WallpaperInput = wallpaperInput,
+            WallpaperPauseFullscreen = wallpaperPauseFullscreen,
+            WallpaperPauseBattery = wallpaperPauseBattery,
         };
     }
 

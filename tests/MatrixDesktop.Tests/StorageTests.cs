@@ -212,7 +212,8 @@ internal static class StorageTests
                 if (!fromBackup) Check.Equal(json, File.ReadAllText(storage.StoragePath), "normalization must not rewrite the live file while loading");
                 storage.Save(loaded);
                 var roundTrip = storage.Load();
-                Check.Equal(2, roundTrip.UserPresets.Count, "repaired state must remain usable after saving");
+                Check.Equal(loaded.UserPresets.Count, roundTrip.UserPresets.Count, "repaired state and newly introduced starters must remain usable after saving");
+                Check.True(roundTrip.UserPresets.Any(preset => preset.Id == "kept-id"), "the original real preset must remain present after seeding");
                 Check.True(JsonNode.DeepEquals(loaded.UserPresets[0].Values, roundTrip.UserPresets[0].Values), "saving must preserve the real preset's custom data");
             }
             finally

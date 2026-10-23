@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import { createPointerForwarder } from "../MatrixDesktop/web/js/hostPointer.js";
+const events = [];
+class Event { constructor(type, fields) { this.type = type; Object.assign(this, fields); } }
+const canvas = { getBoundingClientRect: () => ({ left: 10, top: 20, width: 800, height: 450 }), dispatchEvent: event => events.push(event) };
+const forward = createPointerForwarder(canvas, { PointerEvent: Event, MouseEvent: Event, WheelEvent: Event });
+const pointer = (eventType, more = {}) => ({ eventType, x: 800, y: 450, viewportWidth: 1600, viewportHeight: 900, button: 0, ...more });
+assert.equal(forward(pointer("move")), true);
+assert.equal(events[0].type, "pointermove");
+assert.deepEqual([events[0].clientX, events[0].clientY], [410, 245], "host pixels must scale to CSS coordinates at non-default DPI");
+forward(pointer("down")); forward(pointer("up"));
+assert.equal(events.filter(event => event.type === "click").length, 1, "paired left clicks must reach ripple handlers");
+forward(pointer("down")); forward(pointer("move", { x: 1000 })); forward(pointer("up", { x: 1000 }));
+assert.equal(events.filter(event => event.type === "click").length, 1, "dragging must not turn into a click");
+forward(pointer("up"));
+assert.equal(events.filter(event => event.type === "click").length, 1, "an unpaired mouse-up must not invent a click");
+forward(pointer("wheel", { deltaX: 0, deltaY: -120 }));
+assert.equal(events.at(-1).type, "wheel"); assert.equal(events.at(-1).deltaY, -120);
+forward(pointer("down", { button: 2 }));
+assert.equal(events.at(-1).buttons, 2);
+forward(null);
+assert.equal(events.at(-1).type, "pointerleave");
+forward(pointer("up", { button: 2 }));
+const count = events.length;
+for (const invalid of [pointer("keyboard"), pointer("move", { x: NaN }), pointer("move", { viewportWidth: 0 }), pointer("move", { y: -1 })]) assert.equal(forward(invalid), false);
+assert.equal(events.length, count, "invalid coordinates/events must not reach visual handlers");
+console.log("PASS host pointer: DPI scaling, event routing, click pairing, drag suppression, wheel, leave and invalid input");

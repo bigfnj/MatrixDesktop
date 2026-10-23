@@ -44,6 +44,7 @@ internal static class ArgumentCatalog
                     Select("windowMode", "Window mode", "app", "borderless",
                         "Borderless all monitors already spans every display. Single monitor targets one display.",
                         ("borderless", "Borderless all monitors"),
+                        ("wallpaper", "Live desktop wallpaper"),
                         ("windowed", "Windowed"),
                         ("single-monitor", "Single monitor")),
                     Number("monitor", "Monitor index", "app", null, 0, 16, 1,
@@ -55,6 +56,13 @@ internal static class ArgumentCatalog
                     Toggle("exitOnEsc", "Exit on ESC", "app", true, "--exit-on-esc", "--no-esc-exit"),
                     Toggle("globalKeyExit", "Global key exit", "app", false, "--global-key-exit", "--foreground-key-exit"),
                     Toggle("disableDevTools", "Disable DevTools", "app", false, "--no-devtools", "--devtools"),
+                    Select("processPriority", "Process priority", "app", "auto",
+                        "Automatic uses idle priority for wallpaper; normal for other window modes.",
+                        ("auto", "Automatic"), ("idle", "Idle"), ("below-normal", "Below normal"),
+                        ("normal", "Normal"), ("above-normal", "Above normal"), ("high", "High"), ("realtime", "Realtime")),
+                    Toggle("wallpaperInput", "Wallpaper mouse interaction", "app", false, "--wallpaper-input", "--no-wallpaper-input"),
+                    Toggle("wallpaperPauseFullscreen", "Pause wallpaper for fullscreen apps", "app", true, "--wallpaper-pause-fullscreen", "--no-wallpaper-pause-fullscreen"),
+                    Toggle("wallpaperPauseBattery", "Pause wallpaper on battery", "app", false, "--wallpaper-pause-battery", "--no-wallpaper-pause-battery"),
                 ],
             },
             new ArgumentGroup
@@ -63,7 +71,7 @@ internal static class ArgumentCatalog
                 Title = "Theme",
                 Fields =
                 [
-                    Select("scene", "Scene", "web", "matrix", ("matrix", "Matrix"), ("uc3d", "UC3D")),
+                    Select("scene", "Scene", "web", "matrix", ("matrix", "Matrix"), ("uc3d", "UC3D"), ("zmatrix", "ZMatrix")),
                     Select("version", "Version", "web", "classic",
                         ("classic", "Classic"),
                         ("3d", "3D"),
@@ -229,6 +237,7 @@ internal static class ArgumentCatalog
                     Text("musicFile", "Local music file (optional)", "web", ""),
                 ],
             },
+            .. ZMatrixControlProfile.CreateGroups(),
             new ArgumentGroup
             {
                 Id = "advanced",
@@ -364,6 +373,7 @@ internal sealed class ConfiguratorMetadata
 {
     public List<ArgumentGroup> Groups { get; init; } = [];
     public Dictionary<string, Dictionary<string, object?>> SceneDefaults { get; init; } = [];
+    public List<ArgumentDefinition> FontFields { get; init; } = ZMatrixControlProfile.FontEditorFields();
 }
 
 internal sealed class ArgumentGroup

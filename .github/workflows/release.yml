@@ -123,6 +123,7 @@ jobs:
           # and the configurator has no UI at all without configurator\index.html.
           $requiredFiles = @(
             "MatrixDesktop.exe",
+            "MatrixDesktop.scr",
             "MatrixDesktop.dll",
             "MatrixDesktop.deps.json",
             "MatrixDesktop.runtimeconfig.json",

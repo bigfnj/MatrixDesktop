@@ -707,6 +707,22 @@ h1 {
 
 .modal-header h2 { margin: 0; font-size: 16px; font-weight: 600; }
 
+.wide-field { grid-column: 1 / -1; }
+.screensaver-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.font-editor, .import-report { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.font-editor > summary, .import-report > summary { cursor: pointer; }
+.font-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 12px; }
+.font-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.font-grid input[type="checkbox"] { align-self: flex-start; }
+.phrase-editor { display: grid; gap: 8px; }
+.phrase-row { display: flex; gap: 8px; }
+.phrase-row input { min-width: 0; flex: 1; }
+.invalid-input { border-color: var(--danger) !important; }
+.validation-error { color: var(--danger); }
+.import-report { margin-top: 12px; overflow-wrap: anywhere; }
+.import-report dl { display: grid; grid-template-columns: minmax(120px, 1fr) 2fr; gap: 5px 12px; }
+.import-report dt, .import-report dd { margin: 0; }
+
 .modal-header button {
 	min-height: 28px;
 	min-width: 28px;

@@ -11,7 +11,7 @@ namespace MatrixDesktop;
 /// actively interacting with another process). This helper uses a few common, low-risk tactics:
 /// - WinForms Activate/BringToFront
 /// - temporary TopMost bump (restored immediately to the desired state)
-/// - SetForegroundWindow with a brief AttachThreadInput to the current foreground thread
+/// - ordinary SetForegroundWindow, without joining another process's input queue
 ///
 /// This is not a 100% guarantee (by design, Windows can still refuse), but it greatly improves
 /// reliability for typical launcher flows.
@@ -114,33 +114,10 @@ internal static class ForegroundWindow
 
     private static void ForceForegroundWindow(IntPtr hwnd)
     {
-        var foreground = GetForegroundWindow();
-        var currentThread = GetCurrentThreadId();
-
-        if (foreground != IntPtr.Zero)
-        {
-            var foregroundThread = GetWindowThreadProcessId(foreground, out _);
-
-            // Temporarily attach our input processing to the thread that owns the current
-            // foreground window. This increases the chance SetForegroundWindow succeeds.
-            if (foregroundThread != 0 && foregroundThread != currentThread)
-            {
-                AttachThreadInput(foregroundThread, currentThread, true);
-                try
-                {
-                    SetForegroundWindow(hwnd);
-                    BringWindowToTop(hwnd);
-                    SetActiveWindow(hwnd);
-                }
-                finally
-                {
-                    AttachThreadInput(foregroundThread, currentThread, false);
-                }
-
-                return;
-            }
-        }
-
+        // Attaching a foreign input queue makes activation synchronous with that
+        // thread. A stalled foreground queue can then freeze our UI and prevent
+        // screensaver input-exit timers from running. Respect Windows' focus
+        // policy and keep this request independent of foreign message pumps.
         SetForegroundWindow(hwnd);
         BringWindowToTop(hwnd);
         SetActiveWindow(hwnd);
@@ -162,13 +139,6 @@ internal static class ForegroundWindow
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
-
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

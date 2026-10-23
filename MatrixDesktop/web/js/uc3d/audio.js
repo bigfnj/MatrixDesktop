@@ -1,23 +1,42 @@
+import { subscribeHostPlayback } from "../hostPlayback.js";
+
 // Original synthesized sounds. No music or sound effects from the donor are bundled.
-export function createAudio(config, bootstrap, canvas) {
-  let context = null, element = null, disposed = false, started = false, button = null;
+export function createAudio(config, bootstrap, canvas, { subscribe = subscribeHostPlayback } = {}) {
+  let context = null, element = null, disposed = false, button = null, master = null, hostPaused = false, operation = 0;
+  let requested = !bootstrap.preview, unsubscribe = () => {};
   const nodes = [];
   const volume = Math.max(0, Math.min(1, Number(config.soundVolume) || 0));
-  const state = { mode: config.sound ?? "off", status: "off" };
-  const start = async () => {
+  const state = { mode: config.sound ?? "off", status: "off",
+    get contextState() { return context?.state ?? "none"; }, get elementPaused() { return element?.paused ?? true; } };
+  const blocked = () => hostPaused || document.hidden;
+  const silence = () => {
+    if (master) master.gain.value = 0;
+    if (element) { element.muted = true; element.pause(); }
+    if (context && context.state !== "closed") context.suspend().catch(() => {});
+  };
+  const synchronize = () => {
     if (disposed || state.mode === "off") return;
+    if (button) button.disabled = blocked();
+    if (blocked()) { operation++; silence(); if (requested) state.status = "paused"; }
+    else if (requested) start();
+  };
+  const start = async () => {
+    if (disposed || state.mode === "off" || blocked()) return;
+    requested = true;
+    const token = ++operation;
     try {
       const localUrl = state.mode === "music" ? bootstrap.audioUrl : bootstrap.effectsUrl;
       if (localUrl) {
         if (!element) { element = new Audio(localUrl); element.loop = true; element.volume = volume; }
         else if (state.status === "failed") element.load();
+        element.muted = false;
         await element.play();
       } else {
         if (!context) {
           const AudioContext = window.AudioContext || window.webkitAudioContext;
           if (!AudioContext) throw new Error("Web Audio is unavailable");
           context = new AudioContext();
-          const master = context.createGain(); master.gain.value = volume * (state.mode === "effects" ? 0.3 : 0.12); master.connect(context.destination); nodes.push(master);
+          master = context.createGain(); master.gain.value = 0; master.connect(context.destination); nodes.push(master);
           if (state.mode === "effects") {
             const buffer = context.createBuffer(1, context.sampleRate * 3, context.sampleRate);
             const data = buffer.getChannelData(0);
@@ -33,13 +52,15 @@ export function createAudio(config, bootstrap, canvas) {
             }
           }
         }
+        master.gain.value = volume * (state.mode === "effects" ? 0.3 : 0.12);
         await context.resume();
         if (context.state !== "running") throw new Error("Sound needs a user gesture");
       }
-      if (disposed) { element?.pause(); if (context && context.state !== "closed") context.close(); return; }
-      started = true; state.status = "playing"; button?.remove(); button = null;
+      if (disposed || blocked()) { silence(); return; }
+      if (token !== operation) return;
+      state.status = "playing"; button?.remove(); button = null;
     } catch (error) {
-      if (disposed) return;
+      if (disposed || token !== operation || blocked()) return;
       const gestureRequired = error.name === "NotAllowedError" || (context && context.state === "suspended" && error.message === "Sound needs a user gesture");
       state.status = gestureRequired ? "waiting-for-gesture" : "failed";
       if (!button) {
@@ -51,10 +72,7 @@ export function createAudio(config, bootstrap, canvas) {
       console.info(`UC3D sound: ${error.message}`);
     }
   };
-  const visibility = () => {
-    if (document.hidden) { context?.suspend(); element?.pause(); }
-    else if (started) start();
-  };
+  const visibility = synchronize;
   if (state.mode !== "off") document.addEventListener("visibilitychange", visibility);
   if (state.mode !== "off") {
     if (bootstrap.preview) {
@@ -62,15 +80,19 @@ export function createAudio(config, bootstrap, canvas) {
       button = document.createElement("button"); button.textContent = "Test sound";
       Object.assign(button.style, { position: "fixed", right: "12px", bottom: "12px", zIndex: "3" });
       button.addEventListener("click", start); document.body.append(button);
-    } else start();
+    }
+    unsubscribe = subscribe(value => { hostPaused = value; synchronize(); });
   }
   return {
     state,
     dispose() {
-      disposed = true; state.status = "disposed"; document.removeEventListener("visibilitychange", visibility);
+      if (disposed) return;
+      disposed = true; operation++; requested = false; state.status = "disposed"; unsubscribe(); document.removeEventListener("visibilitychange", visibility);
+      silence();
       button?.remove(); if (element) { element.pause(); element.removeAttribute("src"); element.load(); }
       for (const node of nodes) { try { node.stop?.(); node.disconnect(); } catch {} }
-      context?.close();
+      nodes.length = 0;
+      if (context && context.state !== "closed") context.close().catch(() => {});
     },
   };
 }

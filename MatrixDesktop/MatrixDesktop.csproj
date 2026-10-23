@@ -21,9 +21,9 @@
          is why the shipped 1.0.3 and 1.0.4 binaries stamped correctly while this said 1.0.2.
          Keep it current anyway: it is what a developer's own build reports, and
          tests\run-gate.ps1 holds the argument guide's header to this value. -->
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <!-- Icon for the compiled EXE -->
     <ApplicationIcon>Matrix.ico</ApplicationIcon>
 
@@ -68,6 +68,11 @@
     <Compile Include="..\Shared\AppWindowIcon.cs" Link="Shared\AppWindowIcon.cs" />
     <Compile Include="..\Shared\MediaCatalog.cs" Link="Shared\MediaCatalog.cs" />
     <Compile Include="..\Shared\NativeMediaBridge.cs" Link="Shared\NativeMediaBridge.cs" />
+    <Compile Include="..\Shared\GdiGlyphAtlas.cs" Link="Shared\GdiGlyphAtlas.cs" />
+    <Compile Include="..\Shared\WallpaperBackground.cs" Link="Shared\WallpaperBackground.cs" />
+    <Compile Include="..\Shared\StructuredArgumentCodec.cs" Link="Shared\StructuredArgumentCodec.cs" />
+    <Compile Include="..\Shared\ScreensaverProfile.cs" Link="Shared\ScreensaverProfile.cs" />
+    <Compile Include="..\Shared\ScreensaverRegistration.cs" Link="Shared\ScreensaverRegistration.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -133,6 +138,12 @@
     <ItemGroup>
       <Reference Remove="@(Reference)" Condition="'%(Reference.FileName)' == 'Microsoft.Web.WebView2.Wpf'" />
     </ItemGroup>
+  </Target>
+  <Target Name="CopyScreensaverAppHost" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT' and Exists('$(TargetDir)$(AssemblyName).exe')">
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).exe" DestinationFiles="$(TargetDir)$(AssemblyName).scr" />
+  </Target>
+  <Target Name="PublishScreensaverAppHost" AfterTargets="Publish" Condition="Exists('$(PublishDir)$(AssemblyName).exe')">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).exe" DestinationFiles="$(PublishDir)$(AssemblyName).scr" />
   </Target>
 </Project>
 

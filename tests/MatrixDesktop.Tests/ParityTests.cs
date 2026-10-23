@@ -30,6 +30,8 @@ internal static class ParityTests
         // forwarded nothing" heuristic in AliasParity cannot express it. Covered instead by
         // AppCliTests' monitor-parsing cases.
         "monitor",
+        // Value-taking priority is exercised by ZMatrixTests.WallpaperCommands.
+        "process-priority",
     ];
 
     // Canonical alias list, mirroring AppCli.Parse's switch labels. AliasListIsNotStale
@@ -38,6 +40,9 @@ internal static class ParityTests
     private static readonly string[] WrapperAliases =
     [
         "windowed",
+        "wallpaper", "wallpaper-input", "no-wallpaper-input",
+        "wallpaper-pause-fullscreen", "no-wallpaper-pause-fullscreen",
+        "wallpaper-pause-battery", "no-wallpaper-pause-battery",
         "borderless", "fullscreen", "span", "span-all", "spanall",
         "single-monitor", "singlemonitor",
         "working-area", "workingarea",

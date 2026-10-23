@@ -38,6 +38,7 @@
   <ItemGroup>
     <!-- Wrapper CLI parsing. -->
     <Compile Include="..\..\MatrixDesktop\AppCli.cs" Link="Production\AppCli.cs" />
+    <Compile Include="..\..\MatrixDesktop\PlaybackPolicy.cs" Link="Production\PlaybackPolicy.cs" />
 
     <!--
       The SAME file again, this time as bytes, so ParityTests can read the switch labels
@@ -59,6 +60,11 @@
     -->
     <EmbeddedResource Include="..\..\MatrixDesktop_Argument_Guide.txt" LogicalName="Guide.txt" />
     <EmbeddedResource Include="..\..\MatrixDesktop\web\js\config.js" LogicalName="config.js.txt" />
+    <EmbeddedResource Include="..\..\MatrixDesktop\web\js\zmatrix\settings.js" LogicalName="zmatrix-settings.js.txt" />
+    <Compile Include="..\..\Shared\ScreensaverProfile.cs" Link="Production\ScreensaverProfile.cs" />
+    <Compile Include="..\..\Shared\ScreensaverRegistration.cs" Link="Production\ScreensaverRegistration.cs" />
+    <Compile Include="..\..\Shared\StructuredArgumentCodec.cs" Link="Production\StructuredArgumentCodec.cs" />
+    <EmbeddedResource Include="fixtures\historical-default-draft-v5.json" LogicalName="HistoricalDraftV5.json" />
     <Compile Include="..\..\MatrixDesktop\MatrixArgs.cs" Link="Production\MatrixArgs.cs" />
 
     <!-- Shared normalisation primitives. -->
@@ -70,6 +76,8 @@
     <!-- Configurator argument metadata, import and command generation. -->
     <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentCatalog.cs" Link="Production\ArgumentCatalog.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\Uc3dControlProfile.cs" Link="Production\Uc3dControlProfile.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\ZMatrixControlProfile.cs" Link="Production\ZMatrixControlProfile.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\ZMatrixCfgImporter.cs" Link="Production\ZMatrixCfgImporter.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentImporter.cs" Link="Production\ArgumentImporter.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\CommandBuilder.cs" Link="Production\CommandBuilder.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\ColorConverter.cs" Link="Production\ColorConverter.cs" />

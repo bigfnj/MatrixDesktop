@@ -70,6 +70,13 @@ internal sealed class DraftRandomizer
     public JsonObject Randomize(JsonObject values, string? scope)
     {
         var draft = StorageService.CloneObject(values);
+        if (ZMatrixControlProfile.IsZMatrix(draft))
+        {
+            var selectedScope = (scope ?? "visual").Trim().ToLowerInvariant();
+            if (selectedScope != "motion") RandomizeZMatrixColors(draft);
+            if (selectedScope != "colors") RandomizeZMatrixMotion(draft);
+            return draft;
+        }
         switch ((scope ?? "visual").Trim().ToLowerInvariant())
         {
             case "colors":
@@ -86,6 +93,34 @@ internal sealed class DraftRandomizer
         }
 
         return draft;
+    }
+
+    private void RandomizeZMatrixColors(JsonObject draft)
+    {
+        var hue = NextDouble();
+        JsonObject ByteColor(double lightness)
+        {
+            var rgb = ColorConverter.HslToRgb(hue, Range(.65, 1), lightness);
+            return ZMatrixControlProfile.RgbNode(rgb[0] * 255, rgb[1] * 255, rgb[2] * 255);
+        }
+        draft["zmForegroundColor"] = ByteColor(Range(.65, .85));
+        draft["zmFadeColor"] = ByteColor(Range(.2, .4));
+        draft["zmSpecialForegroundColor"] = ByteColor(Range(.8, .95));
+        draft["zmSpecialFadeColor"] = ByteColor(Range(.45, .65));
+        // A wallpaper or user phrase list is content, so randomization keeps it.
+    }
+
+    private void RandomizeZMatrixMotion(JsonObject draft)
+    {
+        draft["zmMaxStream"] = (double)NextInt(100, 2001);
+        draft["zmSpeedVariance"] = (double)NextInt(0, 21);
+        draft["zmRefreshTime"] = (double)Pick(new[] { 25, 33, 40, 50, 66, 100 });
+        draft["zmMonotonousCleanupEnabled"] = Chance(.5);
+        draft["zmRandomizedCleanupEnabled"] = Chance(.5);
+        draft["zmBackTrace"] = (double)NextInt(10, 81);
+        draft["zmLeading"] = (double)NextInt(0, 31);
+        draft["zmSpacePad"] = (double)NextInt(10, 81);
+        draft["zmSpecialStringProbability"] = Round(Range(.02, .3));
     }
 
     private void RandomizeVisualPreset(JsonObject draft)

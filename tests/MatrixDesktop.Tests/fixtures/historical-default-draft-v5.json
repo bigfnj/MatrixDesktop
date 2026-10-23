@@ -1,0 +1,144 @@
+{
+    "windowMode":  "borderless",
+    "monitor":  null,
+    "workingArea":  false,
+    "topmost":  false,
+    "hideCursor":  false,
+    "exitOnAnyKey":  true,
+    "exitOnEsc":  true,
+    "globalKeyExit":  false,
+    "disableDevTools":  false,
+    "scene":  "matrix",
+    "version":  "classic",
+    "font":  "matrixcode",
+    "renderer":  "regl",
+    "effect":  "palette",
+    "url":  "",
+    "camera":  false,
+    "clickRipples":  false,
+    "clickRippleShape":  "circle",
+    "backgroundColor":  {
+                            "r":  0,
+                            "g":  0,
+                            "b":  0
+                        },
+    "cursorColor":  {
+                        "r":  0.756,
+                        "g":  1,
+                        "b":  0.46
+                    },
+    "glintColor":  {
+                       "r":  1,
+                       "g":  1,
+                       "b":  1
+                   },
+    "palette":  [
+                    {
+                        "r":  0,
+                        "g":  0,
+                        "b":  0,
+                        "at":  0
+                    },
+                    {
+                        "r":  0.092,
+                        "g":  0.38,
+                        "b":  0.02,
+                        "at":  0.2
+                    },
+                    {
+                        "r":  0.538,
+                        "g":  0.97,
+                        "b":  0.43,
+                        "at":  0.7
+                    },
+                    {
+                        "r":  0.692,
+                        "g":  0.98,
+                        "b":  0.62,
+                        "at":  0.8
+                    }
+                ],
+    "stripeColors":  [
+                         {
+                             "r":  0.5,
+                             "g":  0,
+                             "b":  0.5
+                         },
+                         {
+                             "r":  0,
+                             "g":  0,
+                             "b":  1
+                         },
+                         {
+                             "r":  0,
+                             "g":  1,
+                             "b":  0
+                         },
+                         {
+                             "r":  1,
+                             "g":  0,
+                             "b":  0
+                         }
+                     ],
+    "cursorIntensity":  2,
+    "glyphIntensity":  1,
+    "animationSpeed":  1,
+    "fallSpeed":  0.3,
+    "cycleSpeed":  0.03,
+    "forwardSpeed":  0.25,
+    "raindropLength":  0.75,
+    "slant":  0,
+    "volumetric":  false,
+    "isometric":  false,
+    "numColumns":  80,
+    "density":  1,
+    "resolution":  0.75,
+    "fps":  60,
+    "bloomSize":  0.4,
+    "bloomStrength":  0.7,
+    "ditherMagnitude":  0.05,
+    "uc3dControls":  "original",
+    "uc3dAmount":  500,
+    "uc3dGlyphSize":  12,
+    "uc3dFallSpeed":  6,
+    "uc3dForwardSpeed":  6,
+    "uc3dPictureScale":  100,
+    "uc3dPictureDelay":  60,
+    "uc3dClockSize":  90,
+    "codeColor":  {
+                      "r":  0,
+                      "g":  0.698,
+                      "b":  0
+                  },
+    "donorGlyphs":  false,
+    "shadedLines":  true,
+    "sidewaysMovement":  false,
+    "mouseRotation":  false,
+    "codeRotation":  true,
+    "forwardMovement":  true,
+    "randomForwardMovement":  false,
+    "showPictures":  false,
+    "pictureMonochrome":  true,
+    "pictureCaptions":  true,
+    "showClock":  false,
+    "clock12Hour":  false,
+    "desktopBackground":  false,
+    "pictureDepth":  0,
+    "pictureScale":  1,
+    "pictureDelay":  20,
+    "pictureDuration":  8,
+    "clockSize":  1,
+    "soundVolume":  0.25,
+    "pictureSource":  "all",
+    "pictureDirectory":  "",
+    "donorDirectory":  "",
+    "sound":  "off",
+    "musicFile":  "",
+    "glyphFlip":  false,
+    "glyphRotation":  0,
+    "loops":  false,
+    "once":  false,
+    "skipIntro":  true,
+    "suppressWarnings":  false,
+    "testFix":  ""
+}

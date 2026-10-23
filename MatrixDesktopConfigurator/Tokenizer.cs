@@ -16,8 +16,24 @@ internal static class Tokenizer
         var inQuotes = false;
         var tokenStarted = false;
 
-        foreach (var c in commandLine)
+        for (var index = 0; index < commandLine.Length; index++)
         {
+            var c = commandLine[index];
+            if (c == '\\')
+            {
+                var count = 1;
+                while (index + 1 < commandLine.Length && commandLine[index + 1] == '\\') { count++; index++; }
+                if (index + 1 < commandLine.Length && commandLine[index + 1] == '"')
+                {
+                    current.Append('\\', count / 2);
+                    index++;
+                    if (count % 2 == 1) current.Append('"');
+                    else inQuotes = !inQuotes;
+                }
+                else current.Append('\\', count);
+                tokenStarted = true;
+                continue;
+            }
             if (c == '"')
             {
                 inQuotes = !inQuotes;
