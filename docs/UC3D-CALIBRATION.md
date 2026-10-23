@@ -133,8 +133,17 @@ Zero native alpha in either GPU shader fails the named rendered-frame check.
 Local completion results: full gate 52 passed, zero failed and zero unverified,
 under Windows PowerShell 5.1 and PowerShell 7.6.5. The final compatibility-table
 correction was included in the PowerShell 7 run. Supporting suites passed 108 C#
-cases, 37 scene scenarios, seven configuration/catalog cases and 17 UI checks.
+cases before the post-push audit, 37 scene scenarios, seven configuration/catalog
+cases and 17 UI checks. The post-push resilience fixes add two C# regressions,
+bringing the C# suite to 110 cases.
 All 44 GPU calibration cases and eight short motion recordings passed. Both
 published backends passed defaults, original/legacy media delivery and picture
 formation; their real mouse controls and four single-frame cases also passed.
 No new tools were installed; the existing scripts-utilities toolbox was sufficient.
+
+The follow-up audit gate also passed 52/0/0 with 110 C# cases. The published
+configurator recovered synthetic null preset records/values and ignored nonfinite
+numeric imports while preserving valid data. The portable preset and backup
+files were restored byte for byte. Empty-stream, page-error and runtime-error
+injections fail their intended verification checks; the strengthened checks
+also pass on real GPU renders, WebGPU picture formation and donor preview/audio.

@@ -27,7 +27,7 @@ gate is decoration.
 
 | Layer | Catches | Blind to |
 | --- | --- | --- |
-| `tests\MatrixDesktop.Tests` (108 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
+| `tests\MatrixDesktop.Tests` (110 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
 | `tests\web-smoke.py` (17 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies, paired sliders and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 | `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
@@ -82,10 +82,22 @@ The concrete implementation and comparison plan is in [UC3D calibration](docs/UC
 | Once and FPS-zero mode captured empty startup | FIXED | Original single-frame modes render at ten seconds of selected animation speed. Named test kills time-zero mutation; four published-app cases show visible code with exactly one frame. |
 | Picture formation colored old rain and used fitted scale/fixed timing | FIXED | Tagged-only image sampling, inverse native size, sinusoidal grid and wait-for-clear countdown; original personal decode limit 300 pixels. Native tests kill missing tag, reversed scale, static pan, early image switch and wrong decode cap. Both published backends render granted red/green pictures. |
 | Grayscale atlas mask appeared to be applied twice | CLOSED-VERIFIED | Native loader preserves grayscale RGB and sets alpha to max RGB, then uses source-alpha blending. Double intensity is intentional for the original bitmap atlas. |
+| Calibration speed assertions accepted an empty stream witness | FIXED | Actual browser reports must contain a nonempty stream sample before speed-range assertions. A private real-browser empty-sample injection fails exactly `missing actual stream samples: amount-500/regl`; source hashes remain unchanged by the negative control. |
+| Published native smoke printed JavaScript errors without failing | FIXED | Runtime and both configurator paths collect page errors and require a present, empty runtime error array. Controlled runtime/configurator page errors and a runtime error entry each fail their named assertion; absent diagnostics fail and clean arrays pass. Failure cleanup and preset-preservation regressions also pass. |
 
 Existing Frida, Ghidra, UPX, FFmpeg and the toolbox Python were sufficient. No new
 tool installation or scripts-utilities catalog addition was needed. Original
 assets and analysis/capture data remain private; no donor payload was added here.
+
+| Post-push application audit finding | Disposition | Evidence |
+| --- | --- | --- |
+| Nonfinite generic numeric imports broke draft JSON serialization | FIXED | `ArgumentImporter` rejects all nonfinite numbers while retaining valid options. The named importer regression serializes and stores the resulting draft; removing the guard fails exactly that rebuilt test. |
+| Null preset list records or value containers crashed startup | FIXED | `StorageService` removes null slots and repairs only absent values, preserving valid data and backup bytes. Synthetic live/backup/load/seed/save tests kill missing-filter and missing-repair mutations independently. |
+
+Both application fixes were verified in the published configurator with a
+synthetic portable store and an actual command import. Valid values survived;
+the preset and backup files were restored byte for byte. The follow-up full gate
+passed 52/0/0 with 110 C# cases.
 
 | Former Open item | Disposition | Implementation and checkable evidence |
 | --- | --- | --- |

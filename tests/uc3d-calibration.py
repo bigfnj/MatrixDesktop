@@ -122,6 +122,7 @@ def main():
                     assert report["targetStreams"] == report["activeStreams"] == params["uc3dAmount"], report
                     assert abs(report["glyphHalfSize"] - params["uc3dGlyphSize"]*.01) < 1e-9, report
                     assert report["glyphInstances"] <= params["uc3dAmount"]*39, report
+                    assert isinstance(report.get("streams"), list) and report["streams"], f"missing actual stream samples: {name}/{backend}"
                     assert all(2 <= s["fallSpeed"] <= 2+(params["uc3dFallSpeed"]+29)*.1 for s in report["streams"]), report
                     if backend == "webgpu" and not page.evaluate("!!navigator.gpu"):
                         raise AssertionError("WebGPU unavailable")

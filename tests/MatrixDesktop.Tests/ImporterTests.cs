@@ -17,6 +17,7 @@ internal static class ImporterTests
         ("Window mode and monitor index are imported together", MonitorImported),
         ("Numeric values are clamped to the field range", NumericClamped),
         ("A non numeric value for a numeric field is ignored", NonNumericIgnored),
+        ("Nonfinite generic numbers are ignored before drafts reach JSON storage", NonfiniteNumbersIgnored),
         ("An unrecognised key is reported as ignored", UnknownKeyReported),
         ("An RGB colour triplet is imported", RgbColorImported),
         ("An HSL colour triplet is converted to RGB", HslColorConverted),
@@ -132,6 +133,23 @@ internal static class ImporterTests
         var r = Import("--numColumns lots");
         Check.True(r.Ignored.Contains("numColumns", StringComparer.OrdinalIgnoreCase),
             "an unparseable number must be reported rather than silently defaulted");
+    }
+
+    private static void NonfiniteNumbersIgnored()
+    {
+        // Killing mutation: restrict the finiteness guard to Slider fields again.
+        foreach (var scene in new[] { "matrix", "uc3d" })
+        foreach (var field in Metadata.Groups.SelectMany(group => group.Fields).Where(field => field.Scope == "web" && field.Kind == "number" && !field.Slider))
+        foreach (var invalid in new[] { "NaN", "Infinity", "-Infinity", "1e5000", "-1e5000" })
+        {
+            var result = Import($"--scene {scene} --{field.ArgName} {invalid} --showClock true");
+            Check.True(result.Ignored.Contains(field.ArgName, StringComparer.OrdinalIgnoreCase), field.Id + " must report " + invalid + " as ignored");
+            Check.False(result.Applied.Contains(field.Id, StringComparer.OrdinalIgnoreCase), "an invalid value must not claim it was applied");
+            Check.True(double.IsFinite(Num(result.Draft, field.Id)), field.Id + " must retain a finite default");
+            Check.True((bool)result.Draft["showClock"]!, "other valid imported settings must survive");
+            _ = result.Draft.ToJsonString();
+            _ = Builder.BuildCommand(result.Draft, includeDefaults: false, forTest: false);
+        }
     }
 
     private static void UnknownKeyReported()

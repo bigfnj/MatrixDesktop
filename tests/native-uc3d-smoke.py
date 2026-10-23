@@ -169,6 +169,12 @@ def assert_default_snapshot(report, preview=False, volumetric=True):
     assert not bootstrap["images"] and not any(bootstrap.get(name) for name in (
         "desktopUrl", "audioUrl", "effectsUrl", "glyphUrl")), "default UC3D launch granted optional local media"
 
+def assert_no_runtime_errors(page_errors, runtime_errors, case):
+    """A printed browser error must also fail the published-application check."""
+    assert isinstance(runtime_errors, list), f"{case}: missing runtime error witness"
+    assert not page_errors, f"{case}: page errors: {page_errors}"
+    assert not runtime_errors, f"{case}: runtime errors: {runtime_errors}"
+
 def default_case(playwright, exe, renderer):
     """A bare UC3D launch must render the saved donor profile, without media grants."""
     case = "defaults-" + renderer
@@ -217,6 +223,8 @@ def default_configurator_case(playwright, exe):
     process, browser = open_application(playwright, exe, [], "defaults-configurator")
     try:
         page = page_at(browser, "https://configurator.local/")
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
         page.wait_for_function("document.querySelectorAll('.field').length > 40")
         page.locator("#newPresetButton").click()
 
@@ -279,6 +287,7 @@ def default_configurator_case(playwright, exe):
         assert not field("Volumetric / 3D").locator("input").is_checked(), "scene round trip replaced the explicit flat override"
         page.screenshot(path=str(ARTIFACTS / "defaults-configurator.png"))
         (ARTIFACTS / "defaults-configurator.json").write_text(json.dumps({"default": report, "explicitFlatOverride": override, "sceneRoundTrip": round_trip}, indent=2), encoding="utf-8")
+        assert_no_runtime_errors(errors, round_trip["runtime"]["errors"], "defaults-configurator")
         print("PASS published configurator UC3D defaults: real scene switch, valid profile controls, scene reset value, explicit flat override survives preview and scene round trip", flush=True)
         close_window(process)
     finally:
@@ -305,7 +314,8 @@ def runtime_case(playwright, exe, renderer, donor, original=False):
     process, browser = open_application(playwright, exe, args, case)
     try:
         page = page_at(browser, "https://appassets.local/")
-        page.on("pageerror", lambda error: print(f"PAGE ERROR {case}: {error}", flush=True))
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
         try:
             page.wait_for_function("window.__matrixRuntime?.ready === true", timeout=25000)
         except Exception:
@@ -340,6 +350,7 @@ def runtime_case(playwright, exe, renderer, donor, original=False):
             assert red > 20 and green > 20, f"original code picture lacks the granted red/green fixture: red={red}, green={green}"
         report = page.evaluate("({runtime:window.__matrixRuntime,clock:document.querySelector('[data-uc3d-clock]')?.textContent})")
         (ARTIFACTS / f"{case}.json").write_text(json.dumps({"media": response, "diagnostics": report}, indent=2), encoding="utf-8")
+        assert_no_runtime_errors(errors, report["runtime"]["errors"], case)
         print(f"PASS published WebView2 {renderer} {'original' if original else 'legacy'} controls: exact backend, local images, grant boundaries, original media and render readiness")
         close_window(process)
     finally:
@@ -351,6 +362,8 @@ def configurator_case(playwright, exe, donor):
     process, browser = open_application(playwright, exe, [], "configurator")
     try:
         page = page_at(browser, "https://configurator.local/")
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
         page.wait_for_function("document.querySelectorAll('.field').length > 40")
         page.wait_for_timeout(1200)  # Let the initial debounced preview finish first.
         # Call the same public host request/reply route the page uses, then navigate the
@@ -384,6 +397,7 @@ def configurator_case(playwright, exe, donor):
             frame.get_by_role("button",name="Test sound",exact=True).click()
             frame.wait_for_function("window.__matrixRuntime.audio.status === 'playing'",timeout=10000)
         page.screenshot(path=str(ARTIFACTS / "configurator.png"))
+        assert_no_runtime_errors(errors, frame.evaluate("window.__matrixRuntime.errors"), "configurator")
         print("PASS published configurator: controls loaded, native preview bootstrap, muted UC3D frame rendered")
         close_window(process)
     finally:

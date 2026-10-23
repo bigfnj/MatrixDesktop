@@ -27,6 +27,13 @@ internal sealed class StorageService
         (StoragePath, UsesPortablePath) = ResolveStoragePath();
     }
 
+    // Synthetic storage tests use an owned path without probing a user's store.
+    internal StorageService(string storagePath)
+    {
+        StoragePath = Path.GetFullPath(storagePath);
+        UsesPortablePath = false;
+    }
+
     public ConfiguratorState Load()
     {
         try
@@ -157,6 +164,10 @@ internal sealed class StorageService
         state.PresetSeedVersion = Math.Max(0, state.PresetSeedVersion);
         state.LastDraft ??= [];
         state.UserPresets ??= [];
+        // Valid JSON can still contain null records or a null values object.
+        // Preserve every real preset and repair only its missing container.
+        state.UserPresets.RemoveAll(preset => preset is null);
+        foreach (var preset in state.UserPresets) preset.Values ??= [];
         return state;
     }
 

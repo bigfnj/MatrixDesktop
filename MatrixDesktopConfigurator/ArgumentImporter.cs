@@ -256,7 +256,7 @@ internal sealed class ArgumentImporter
                 return JsonValue.Create(FlagNormalization.ParseBool(value, true));
 
             case "number":
-                return TryParseDouble(value, out var number) && (!field.Slider || double.IsFinite(number))
+                return TryParseDouble(value, out var number) && double.IsFinite(number)
                     ? JsonValue.Create(Clamp(field.Slider ? Math.Truncate(number) : number, field.Min, field.Max))
                     : null;
 
