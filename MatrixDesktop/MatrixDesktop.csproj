@@ -21,9 +21,9 @@
          is why the shipped 1.0.3 and 1.0.4 binaries stamped correctly while this said 1.0.2.
          Keep it current anyway: it is what a developer's own build reports, and
          tests\run-gate.ps1 holds the argument guide's header to this value. -->
-    <Version>1.0.5</Version>
-    <AssemblyVersion>1.0.5.0</AssemblyVersion>
-    <FileVersion>1.0.5.0</FileVersion>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <!-- Icon for the compiled EXE -->
     <ApplicationIcon>Matrix.ico</ApplicationIcon>
 
@@ -46,15 +46,12 @@
 
       AllowedReferenceRelatedFileExtensions=none drops the .pdb/.xml that would
       otherwise ride along with each referenced assembly (that is where the
-      WebView2 doc XML comes from). DebugType/DebugSymbols drop this project's
-      own symbols.
-
-      Scoped to Release so a Debug build keeps full symbols for local
-      debugging. Tradeoff: a Release crash dump written by
-      Shared/CrashDumpWriter.cs will have no line numbers.
+      WebView2 doc XML comes from). Embedded Release symbols retain source
+      lines in logged exception stacks without shipping a separate PDB.
+      Debug builds retain their normal local debugging configuration.
     -->
-    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
-    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
+    <DebugType Condition="'$(Configuration)' == 'Release'">embedded</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">true</DebugSymbols>
     <AllowedReferenceRelatedFileExtensions Condition="'$(Configuration)' == 'Release'">none</AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
 
@@ -69,6 +66,8 @@
     <Compile Include="..\Shared\FlagNormalization.cs" Link="Shared\FlagNormalization.cs" />
     <Compile Include="..\Shared\CrashDumpWriter.cs" Link="Shared\CrashDumpWriter.cs" />
     <Compile Include="..\Shared\AppWindowIcon.cs" Link="Shared\AppWindowIcon.cs" />
+    <Compile Include="..\Shared\MediaCatalog.cs" Link="Shared\MediaCatalog.cs" />
+    <Compile Include="..\Shared\NativeMediaBridge.cs" Link="Shared\NativeMediaBridge.cs" />
   </ItemGroup>
 
   <ItemGroup>

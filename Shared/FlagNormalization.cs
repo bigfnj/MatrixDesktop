@@ -9,7 +9,7 @@ namespace MatrixDesktop.Shared;
 // alias or canonical key spelling is a one-line change instead of two.
 internal static class FlagNormalization
 {
-    // Liberal boolean parser matching how the rest of the codebase treats flags.
+    // Exact documented boolean spellings; unrecognised text is false.
     // Returns defaultWhenMissing for null/empty so callers can model "bare flag
     // present without a value" as true.
     public static bool ParseBool(string? value, bool defaultWhenMissing)
@@ -23,7 +23,7 @@ internal static class FlagNormalization
         {
             "1" or "true" or "y" or "yes" or "on" => true,
             "0" or "false" or "n" or "no" or "off" => false,
-            var v => v.Contains("true", StringComparison.OrdinalIgnoreCase),
+            _ => false,
         };
     }
 

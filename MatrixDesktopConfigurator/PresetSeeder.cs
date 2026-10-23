@@ -5,10 +5,11 @@ namespace MatrixDesktopConfigurator;
 
 internal static class PresetSeeder
 {
-    private const int CurrentSeedVersion = 2;
+    private const int CurrentSeedVersion = 3;
 
     private static readonly StarterPreset[] StarterPresets =
     [
+        new("seed-uc3d-trilogy", "UC3D Trilogy", "--scene uc3d --volumetric true --randomForwardMovement true --codeColor 0,0.698,0 --cursorColor 0,1,0.698 --pictureDelay 60 --pictureDuration 30", 3),
         new(
             "seed-rainbow-haze",
             "rainbow-haze",
@@ -45,7 +46,7 @@ internal static class PresetSeeder
                 continue;
             }
 
-            if (!isFirstSeed)
+            if (!isFirstSeed && preset.IntroducedVersion <= state.PresetSeedVersion)
             {
                 continue;
             }
@@ -64,5 +65,5 @@ internal static class PresetSeeder
         return true;
     }
 
-    private sealed record StarterPreset(string Id, string Name, string Command);
+    private sealed record StarterPreset(string Id, string Name, string Command, int IntroducedVersion = 1);
 }

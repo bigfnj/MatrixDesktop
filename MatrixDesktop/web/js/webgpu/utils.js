@@ -112,8 +112,15 @@ const makePass = (name, loaded, build, run, cleanup) => ({
 });
 
 const makePipeline = async (context, steps) => {
-	steps = steps.filter((f) => f != null).map((f) => f(context));
-	await Promise.all(steps.map((step) => step.loaded));
+	const factories = steps.filter((f) => f != null);
+	steps = [];
+	try {
+		for (const factory of factories) steps.push(factory(context));
+		await Promise.all(steps.map((step) => step.loaded));
+	} catch (error) {
+		steps.forEach((step) => step.cleanup?.());
+		throw error;
+	}
 	return {
 		steps,
 		build: (canvasSize) => steps.reduce((outputs, step) => step.build(canvasSize, outputs), null),

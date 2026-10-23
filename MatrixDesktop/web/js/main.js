@@ -1,4 +1,5 @@
 import makeConfig from "./config.js";
+import { wantsWebGPU } from "./rendererChoice.js";
 import { stopCamera } from "./camera.js";
 
 const canvas = document.createElement("canvas");
@@ -41,6 +42,11 @@ const loadRenderer = async (canvas, config, useWebGPU) => {
 			await webgpuModule.default(canvas, config);
 			return;
 		} catch (err) {
+			if (config.scene === "uc3d") {
+				// Shader and device failures in this optional scene must remain visible;
+				// a working WebGL replacement would otherwise conceal a broken WebGPU pass.
+				throw err;
+			}
 			console.warn("WebGPU renderer failed, falling back to regl:", err);
 			stopCamera();
 		}
@@ -56,7 +62,10 @@ document.body.onload = async () => {
 	// meant awaiting navigator.gpu.requestAdapter() on every launch even though the default
 	// renderer is "regl", which initialises the D3D12 adapter enumeration and can spin up the
 	// GPU process for nothing.
-	const useWebGPU = config.renderer?.toLowerCase() === "webgpu" && (await supportsWebGPU());
+	const useWebGPU = wantsWebGPU(config) && (await supportsWebGPU());
+	if (config.useHoloplay && config.renderer?.toLowerCase() === "webgpu") {
+		console.info("Looking Glass uses the WebGL renderer for its multiview quilt output.");
+	}
 
 	// suppressWarnings FIRST, same reason. isRunningSwiftShader() creates a second canvas
 	// and a whole throwaway WebGL context just to read a renderer string, and never releases

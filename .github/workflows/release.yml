@@ -67,8 +67,8 @@ jobs:
             -p:PublishSingleFile=false `
             -p:PublishReadyToRun=true `
             -p:AllowedReferenceRelatedFileExtensions=none `
-            -p:DebugType=none `
-            -p:DebugSymbols=false `
+            -p:DebugType=embedded `
+            -p:DebugSymbols=true `
             -p:PublishDir=bin\Publish\win-x64-fd\ `
             -p:Version=${{ steps.version.outputs.version }} `
             -p:AssemblyVersion=${{ steps.version.outputs.assembly }} `
@@ -84,8 +84,8 @@ jobs:
             -p:PublishSingleFile=false `
             -p:PublishReadyToRun=true `
             -p:AllowedReferenceRelatedFileExtensions=none `
-            -p:DebugType=none `
-            -p:DebugSymbols=false `
+            -p:DebugType=embedded `
+            -p:DebugSymbols=true `
             -p:PublishDir=bin\Publish\win-x64-fd\ `
             -p:Version=${{ steps.version.outputs.version }} `
             -p:AssemblyVersion=${{ steps.version.outputs.assembly }} `

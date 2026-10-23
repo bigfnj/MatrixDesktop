@@ -1,3 +1,4 @@
+import createResourceOwner, { ownDevice } from "../resourceOwner.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeRenderTarget, loadTexture, loadShader, makeUniformBuffer, makeBindGroup, makePass } from "./utils.js";
 import createClickRipples from "../clickRipples.js";
@@ -29,7 +30,10 @@ const makeConfigBuffer = (device, configUniforms, config, density, gridSize, gly
 	return makeUniformBuffer(device, configUniforms, configData);
 };
 
-export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
+export default ({ config, device: nativeDevice, timeBuffer, canvas, elapsedSeconds }) => {
+	const owner = createResourceOwner();
+	const device = ownDevice(owner, nativeDevice);
+
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
 	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
 
@@ -214,11 +218,11 @@ export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
 		clickRipples.markClean();
 
 		// Update
-		output?.destroy();
+		owner.release(output);
 		output = makeRenderTarget(device, size, renderFormat);
 		outputView = output.createView();
 
-		highPassOutput?.destroy();
+		owner.release(highPassOutput);
 		highPassOutput = makeRenderTarget(device, size, renderFormat);
 		highPassOutputView = highPassOutput.createView();
 
@@ -267,5 +271,5 @@ export default ({ config, device, timeBuffer, canvas, elapsedSeconds }) => {
 		}
 	};
 
-	return makePass("Rain", loaded, build, run, clickRipples.cleanup);
+	return makePass("Rain", loaded, build, run, () => { clickRipples.cleanup(); owner.cleanup(); });
 };

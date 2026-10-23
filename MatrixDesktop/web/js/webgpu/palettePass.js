@@ -1,3 +1,4 @@
+import createResourceOwner, { ownDevice } from "../resourceOwner.js";
 import colorToRGB from "../colorToRGB.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { loadShader, makeUniformBuffer, makeBindGroup, makeComputeTarget, makePass } from "./utils.js";
@@ -67,7 +68,10 @@ const makePalette = (device, paletteUniforms, entries) => {
 // won't persist across subsequent frames. This is a safe trick
 // in screen space.
 
-export default ({ config, device, timeBuffer }) => {
+export default ({ config, device: nativeDevice, timeBuffer }) => {
+	const owner = createResourceOwner();
+	const device = ownDevice(owner, nativeDevice);
+
 	const linearSampler = device.createSampler({
 		magFilter: "linear",
 		minFilter: "linear",
@@ -110,7 +114,7 @@ export default ({ config, device, timeBuffer }) => {
 	})();
 
 	const build = (size, inputs) => {
-		output?.destroy();
+		owner.release(output);
 		output = makeComputeTarget(device, size);
 		screenSize = size;
 		computeBindGroup = makeBindGroup(device, computePipeline, 0, [
@@ -137,5 +141,5 @@ export default ({ config, device, timeBuffer }) => {
 		computePass.end();
 	};
 
-	return makePass("Palette", loaded, build, run);
+	return makePass("Palette", loaded, build, run, owner.cleanup);
 };

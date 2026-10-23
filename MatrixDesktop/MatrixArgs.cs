@@ -19,6 +19,19 @@ internal static class MatrixArgs
         "suppressWarnings",
         "once",
         "isometric",
+        "shadedLines",
+        "sidewaysMovement",
+        "mouseRotation",
+        "codeRotation",
+        "forwardMovement",
+        "randomForwardMovement",
+        "showPictures",
+        "pictureMonochrome",
+        "pictureCaptions",
+        "showClock",
+        "clock12Hour",
+        "desktopBackground",
+        "donorGlyphs",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     public static bool IsHelpRequested(string[]? args)
@@ -246,41 +259,7 @@ internal static class MatrixArgs
     }
 
     private static string NormalizeBoolValue(string value)
-    {
-        var v = (value ?? string.Empty).Trim();
-        if (v.Length == 0) return "true";
-
-        // Maps common CLI boolean spellings onto the exact strings the web layer accepts.
-        //
-        // The comment that used to sit here claimed "the upstream parser treats values
-        // containing 'true' as true". That is wrong, and it matters because it describes the
-        // wrong side of the boundary. web/js/config.js:402 is
-        //     const isTrue = (s) => s.toLowerCase() === "true";
-        // which is STRICT equality. The substring behaviour belongs to
-        // Shared/FlagNormalization.ParseBool, which serves wrapper flags only.
-        //
-        // So the two boolean parsers in this codebase genuinely differ: a wrapper flag
-        // treats any value containing "true" as true, while a web flag requires exactly
-        // "true". That is why this method normalises the recognised spellings here rather
-        // than passing them through and hoping. Anything unrecognised is forwarded verbatim
-        // and the web layer will read it as false.
-        // NormalizeRawQuery calls this too, so the raw-query path gets the same treatment.
-        switch (v.ToLowerInvariant())
-        {
-            case "1":
-            case "y":
-            case "yes":
-            case "on":
-                return "true";
-            case "0":
-            case "n":
-            case "no":
-            case "off":
-                return "false";
-            default:
-                return v;
-        }
-    }
+        => Shared.FlagNormalization.ParseBool(value, defaultWhenMissing: true) ? "true" : "false";
 
     private static bool LooksLikeKeyToken(string token)
     {

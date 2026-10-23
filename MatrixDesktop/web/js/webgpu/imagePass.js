@@ -1,3 +1,4 @@
+import createResourceOwner, { ownDevice } from "../resourceOwner.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeComputeTarget, makeUniformBuffer, loadTexture, loadShader, makeBindGroup, makePass } from "./utils.js";
 
@@ -5,7 +6,10 @@ import { makeComputeTarget, makeUniformBuffer, loadTexture, loadShader, makeBind
 
 const defaultBGURL = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Flammarion_Colored.jpg/917px-Flammarion_Colored.jpg";
 
-export default ({ config, device }) => {
+export default ({ config, device: nativeDevice }) => {
+	const owner = createResourceOwner();
+	const device = ownDevice(owner, nativeDevice);
+
 	const bgURL = "bgURL" in config ? config.bgURL : defaultBGURL;
 	const assets = [loadTexture(device, bgURL), loadShader(device, "shaders/wgsl/imagePass.wgsl")];
 
@@ -39,7 +43,7 @@ export default ({ config, device }) => {
 	})();
 
 	const build = (size, inputs) => {
-		output?.destroy();
+		owner.release(output);
 		output = makeComputeTarget(device, size);
 		screenSize = size;
 		computeBindGroup = makeBindGroup(device, computePipeline, 0, [
@@ -65,5 +69,5 @@ export default ({ config, device }) => {
 		computePass.end();
 	};
 
-	return makePass("Image", loaded, build, run);
+	return makePass("Image", loaded, build, run, owner.cleanup);
 };

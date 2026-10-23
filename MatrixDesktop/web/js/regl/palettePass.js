@@ -1,3 +1,4 @@
+import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 import colorToRGB from "../colorToRGB.js";
 import { loadText, make1DTexture, makePassFBO, makePass } from "./utils.js";
 
@@ -54,7 +55,9 @@ const makePalette = (regl, entries) => {
 // won't persist across subsequent frames. This is a safe trick
 // in screen space.
 
-export default ({ regl, config }, inputs) => {
+export default ({ regl: nativeRegl, config }, inputs) => {
+	const owner = createResourceOwner();
+	const regl = ownRegl(owner, nativeRegl);
 	const output = makePassFBO(regl, config.useHalfFloat);
 	const paletteTex = makePalette(regl, config.palette);
 	const { backgroundColor, cursorColor, glintColor, cursorIntensity, glintIntensity, glyphIntensity, ditherMagnitude } = config;
@@ -89,6 +92,7 @@ export default ({ regl, config }, inputs) => {
 			if (shouldRender) {
 				render({ frag: palettePassFrag.text() });
 			}
-		}
+		},
+		owner.cleanup
 	);
 };

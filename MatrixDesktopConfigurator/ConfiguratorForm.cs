@@ -46,6 +46,7 @@ public sealed class ConfiguratorForm : Form
 
     // Resolved matrix web/ root for the embedded preview (null if not found).
     private string? _previewWebRoot;
+    private readonly MatrixDesktop.Shared.NativeMediaBridge _mediaBridge = new(preview: true);
 
     public ConfiguratorForm()
     {
@@ -117,6 +118,7 @@ public sealed class ConfiguratorForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         _isShuttingDown = true;
+        _mediaBridge.Dispose();
         StopTestProcess();
 
         try
@@ -216,7 +218,12 @@ public sealed class ConfiguratorForm : Form
 
         TryTightenWebViewSettings();
 
-        _webView.CoreWebView2.WebMessageReceived += async (_, args) => await HandleWebMessageAsync(args.WebMessageAsJson);
+        _webView.CoreWebView2.WebMessageReceived += async (_, args) =>
+        {
+            if (Uri.TryCreate(args.Source, UriKind.Absolute, out var source)
+                && source.GetLeftPart(UriPartial.Authority).Equals(HostOrigin.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                await HandleWebMessageAsync(args.WebMessageAsJson);
+        };
         _webView.CoreWebView2.NavigationStarting += (_, args) =>
         {
             var uri = args.Uri ?? string.Empty;
@@ -252,6 +259,7 @@ public sealed class ConfiguratorForm : Form
                 CoreWebView2HostResourceAccessKind.Allow);
         }
 
+        await _mediaBridge.AttachAsync(_webView.CoreWebView2, PreviewOrigin);
         _webView.CoreWebView2.Navigate($"{HostOrigin}index.html");
     }
 
@@ -289,9 +297,10 @@ public sealed class ConfiguratorForm : Form
             "savePreset"       => SavePreset(payload),
             "deletePreset"     => DeletePreset(payload),
             "buildCommand"     => BuildCommand(payload),
-            "buildWebQuery"    => BuildWebQuery(payload),
+            "buildWebQuery"    => await BuildWebQueryAsync(payload),
             "importCommand"    => ImportCommand(payload),
             "randomizeDraft"   => RandomizeDraft(payload),
+            "browseMedia"      => BrowseMedia(payload),
             "copyCommand"      => CopyCommand(payload),
             "testCommand"      => TestCommand(payload),
             "stopTest"         => StopTest(),
@@ -327,6 +336,25 @@ public sealed class ConfiguratorForm : Form
         // clipboard is unavailable.
         var copied = TrySetClipboardText(script, "the exported PowerShell script");
         return new { script, copied };
+    }
+
+    private object BrowseMedia(JsonElement payload)
+    {
+        var field = ReadOptionalString(payload, "field");
+        if (field == "musicFile")
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Title = "Choose local music",
+                Filter = "Audio files|*.mp3;*.wav;*.ogg;*.m4a",
+                CheckFileExists = true,
+            };
+            return new { path = dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null };
+        }
+        if (field is not ("pictureDirectory" or "donorDirectory"))
+            throw new InvalidOperationException("Unknown media picker.");
+        using var folder = new FolderBrowserDialog { Description = "Choose a picture folder", UseDescriptionForTitle = true };
+        return new { path = folder.ShowDialog(this) == DialogResult.OK ? folder.SelectedPath : null };
     }
 
     private object LoadHelp()
@@ -449,10 +477,12 @@ public sealed class ConfiguratorForm : Form
     }
 
     // Web-only query string ("?key=val&…") for the embedded preview iframe.
-    private object BuildWebQuery(JsonElement payload)
+    private async Task<object> BuildWebQueryAsync(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
-        return new { query = _commandBuilder.BuildWebQueryString(draft) };
+        var query = _commandBuilder.BuildWebQueryString(draft);
+        await _mediaBridge.UpdateAsync(query, SystemInformation.VirtualScreen);
+        return new { query };
     }
 
     private object ImportCommand(JsonElement payload)

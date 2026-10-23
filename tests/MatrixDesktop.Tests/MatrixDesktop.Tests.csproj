@@ -64,6 +64,8 @@
     <!-- Shared normalisation primitives. -->
     <Compile Include="..\..\Shared\FlagNormalization.cs" Link="Production\FlagNormalization.cs" />
     <Compile Include="..\..\Shared\Logger.cs" Link="Production\Logger.cs" />
+    <Compile Include="..\..\Shared\MediaCatalog.cs" Link="Production\MediaCatalog.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\PresetSeeder.cs" Link="Production\PresetSeeder.cs" />
 
     <!-- Configurator argument metadata, import and command generation. -->
     <Compile Include="..\..\MatrixDesktopConfigurator\ArgumentCatalog.cs" Link="Production\ArgumentCatalog.cs" />

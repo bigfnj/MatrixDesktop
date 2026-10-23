@@ -1,8 +1,11 @@
+import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 ﻿import { loadText, makePassFBO, makePass } from "./utils.js";
 
 const numClicks = 5;
 
-export default ({ regl, config, cameraTex, cameraAspectRatio, canvas }, inputs) => {
+export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas }, inputs) => {
+	const owner = createResourceOwner();
+	const regl = ownRegl(owner, nativeRegl);
 	const clicks = Array(numClicks).fill([0, 0, -Infinity]).flat();
 	let aspectRatio = 1;
 	let start = Date.now();
@@ -57,6 +60,6 @@ export default ({ regl, config, cameraTex, cameraAspectRatio, canvas }, inputs) 
 					render({ frag: mirrorPassFrag.text() });
 				}
 			},
-			() => window.removeEventListener("click", clickHandler)
+			() => { window.removeEventListener("click", clickHandler); owner.cleanup(); }
 		);
 	};

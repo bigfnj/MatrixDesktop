@@ -37,6 +37,8 @@ public sealed class MainForm : Form
     private bool _webViewInitializationStarted;
     private Shared.AppWindowIcon? _windowIcon;
 
+    private readonly Shared.NativeMediaBridge _mediaBridge = new(preview: false);
+
     private static string? _cachedUserDataFolder;
 
     public MainForm(string[]? args)
@@ -72,6 +74,8 @@ public sealed class MainForm : Form
         BackColor = System.Drawing.Color.Black;
 
         _startupQueryString = MatrixArgs.BuildQueryString(passthroughArgs);
+        // Capture the requested desktop before this window is shown.
+        _mediaBridge.Prepare(_startupQueryString, Bounds);
 
         _webView = CreateWebView(GetAppDataUserDataFolder());
         Controls.Add(_webView);
@@ -365,6 +369,7 @@ public sealed class MainForm : Form
         StopForegroundEnforcer();
 
         // Best-effort cleanup *before* handles start tearing down.
+        _mediaBridge.Dispose();
         TryCleanupWebView();
         base.OnFormClosing(e);
     }
@@ -781,6 +786,7 @@ public sealed class MainForm : Form
             ? $"{HostOriginPrefix}index.html"
             : $"{HostOriginPrefix}index.html?{_startupQueryString}";
 
+        await _mediaBridge.AttachAsync(_webView.CoreWebView2, HostOriginPrefix);
         _webView.CoreWebView2.Navigate(target);
     }
 

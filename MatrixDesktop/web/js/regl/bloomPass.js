@@ -1,3 +1,4 @@
+import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 ﻿import { loadText, makePassFBO, makePass } from "./utils.js";
 
 // The bloom pass is basically an added high-pass blur.
@@ -15,7 +16,9 @@ const makePyramid = (regl, height, halfFloat) =>
 const resizePyramid = (pyramid, vw, vh, scale) =>
 	pyramid.forEach((fbo, index) => fbo.resize(Math.max(1, Math.floor((vw * scale) / 2 ** index)), Math.max(1, Math.floor((vh * scale) / 2 ** index))));
 
-export default ({ regl, config }, inputs) => {
+export default ({ regl: nativeRegl, config }, inputs) => {
+	const owner = createResourceOwner();
+	const regl = ownRegl(owner, nativeRegl);
 	const { bloomStrength, bloomSize, highPassThreshold } = config;
 	const enabled = bloomSize > 0 && bloomStrength > 0;
 
@@ -23,8 +26,8 @@ export default ({ regl, config }, inputs) => {
 	if (!enabled) {
 		return makePass({
 			primary: inputs.primary,
-			bloom: makePassFBO(regl),
-		});
+			bloom: makePassFBO(regl, config.useHalfFloat),
+		}, null, null, null, owner.cleanup);
 	}
 
 	// Build three pyramids of FBOs, one for each step in the process
@@ -128,6 +131,7 @@ export default ({ regl, config }, inputs) => {
 			}
 
 			combine({ frag: combineFrag.text() });
-		}
+		},
+		owner.cleanup
 	);
 };

@@ -141,7 +141,7 @@ const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "tr
 // Fields whose value changes which *other* fields are gated (see
 // getDisabledReason). Editing one of these must re-render the whole group so
 // the dependent fields pick up their new enabled/disabled state.
-const gatingFields = new Set(["windowMode", "effect", "clickRipples"]);
+const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "volumetric", "forwardMovement", "showPictures", "showClock", "sound"]);
 
 const normalizeDraft = (draft) => ({
 	...clone(state.defaultDraft),
@@ -371,7 +371,22 @@ const renderField = (field) => {
 	}
 };
 
+const uc3dFields = new Set(["codeColor","donorGlyphs","shadedLines","sidewaysMovement","mouseRotation","codeRotation","forwardMovement","randomForwardMovement","showPictures","pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","pictureDuration","pictureSource","showClock","clock12Hour","clockSize","sound","soundVolume","pictureDirectory","donorDirectory","desktopBackground","musicFile"]);
+const legacyOnlyFields = new Set(["effect","url","camera","clickRipples","clickRippleShape","glintColor","palette","stripeColors","ditherMagnitude","loops","skipIntro","testFix"]);
+
 const getDisabledReason = (field) => {
+    const uc3d = state.draft.scene === "uc3d";
+    if (uc3dFields.has(field.id) && !uc3d) return "Choose the UC3D scene in Theme to use this setting.";
+    if (uc3d && legacyOnlyFields.has(field.id)) return "Used by the Matrix scene. UC3D has its own code colors and picture controls.";
+    if (uc3d && ["mouseRotation","codeRotation","forwardMovement","randomForwardMovement","pictureDepth"].includes(field.id) && !state.draft.volumetric)
+        return "Enable Volumetric / 3D to use this setting.";
+    if (uc3d && field.id === "shadedLines" && state.draft.volumetric) return "Used by 2D code.";
+    if (uc3d && field.id === "randomForwardMovement" && !state.draft.forwardMovement) return "Enable forward/back movement first.";
+    if (uc3d && ["pictureDepth","pictureMonochrome","pictureCaptions","pictureScale","pictureDelay","pictureDuration","pictureSource","pictureDirectory"].includes(field.id) && !state.draft.showPictures)
+        return "Enable Form pictures from code first.";
+    if (uc3d && ["clock12Hour","clockSize"].includes(field.id) && !state.draft.showClock) return "Enable Show clock first.";
+    if (uc3d && field.id === "soundVolume" && state.draft.sound === "off") return "Choose a sound mode first.";
+    if (uc3d && field.id === "musicFile" && state.draft.sound !== "music") return "Choose Ambient music / local file first.";
 	const windowMode = state.draft.windowMode || "borderless";
 	const effect = state.draft.effect || "palette";
 	if (field.id === "monitor" && windowMode !== "single-monitor") {
@@ -538,6 +553,22 @@ const renderTextField = (field) => {
 	input.value = state.draft[field.id] ?? "";
 	input.addEventListener("input", () => updateDraftValue(field, input.value));
 	shell.append(input);
+    if (["pictureDirectory", "donorDirectory", "musicFile"].includes(field.id)) {
+        const browse = document.createElement("button");
+        browse.type = "button";
+        browse.textContent = "Browse...";
+        browse.disabled = input.disabled;
+        browse.addEventListener("click", async () => {
+            try {
+                const result = await requestHost("browseMedia", { field: field.id });
+                if (result?.path) {
+                    input.value = result.path;
+                    updateDraftValue(field, result.path);
+                }
+            } catch (error) { setStatus(error.message, "error"); }
+        });
+        shell.append(browse);
+    }
 	return shell;
 };
 

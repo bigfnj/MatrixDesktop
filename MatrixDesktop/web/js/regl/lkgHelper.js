@@ -1,54 +1,29 @@
-﻿const recordedDevice = {
-	buttons: [0, 0, 0, 0],
-	calibration: {
-		DPI: { value: 324 },
-		center: { value: 0.15018756687641144 },
-		configVersion: "3.0",
-		flipImageX: { value: 0 },
-		flipImageY: { value: 0 },
-		flipSubp: { value: 0 },
-		fringe: { value: 0 },
-		invView: { value: 1 },
-		pitch: { value: 52.58013153076172 },
-		screenH: { value: 2048 },
-		screenW: { value: 1536 },
-		slope: { value: -7.145165920257568 },
-		verticalAngle: { value: 0 },
-		viewCone: { value: 40 },
-	},
-	defaultQuilt: {
-		quiltAspect: 0.75,
-		quiltX: 3840,
-		quiltY: 3840,
-		tileX: 8,
-		tileY: 6,
-	},
-	hardwareVersion: "portrait",
-	hwid: "LKG-P11063",
-	index: 0,
-	joystickIndex: -1,
-	state: "ok",
-	unityIndex: 1,
-	windowCoords: [1440, 900],
-};
-
 const interpretDevice = (device) => {
-	if (device == null) {
+	const calibration = device?.calibration;
+	const quilt = device?.defaultQuilt;
+	const valid = calibration != null && quilt != null
+		&& ["DPI", "screenW", "screenH", "pitch", "slope", "center", "invView", "viewCone"]
+			.every((key) => Number.isFinite(calibration[key]?.value))
+		&& calibration.DPI.value > 0 && calibration.screenW.value > 0 && calibration.screenH.value > 0
+		&& calibration.slope.value !== 0
+		&& ["tileX", "tileY", "quiltX", "quiltY", "quiltAspect"].every((key) => Number.isFinite(quilt[key]) && quilt[key] > 0)
+		&& Number.isInteger(quilt.tileX) && Number.isInteger(quilt.tileY);
+	if (!valid) {
 		return { enabled: false, tileX: 1, tileY: 1 };
 	}
 
 	const fov = 15;
 
-	const calibration = Object.fromEntries(
+	const values = Object.fromEntries(
 		Object.entries(device.calibration)
 			.map(([key, value]) => [key, value.value])
 			.filter(([key, value]) => value != null)
 	);
 
-	const screenInches = calibration.screenW / calibration.DPI;
-	const pitch = calibration.pitch * screenInches * Math.cos(Math.atan(1.0 / calibration.slope));
-	const tilt = (calibration.screenH / (calibration.screenW * calibration.slope)) * -(calibration.flipImageX * 2 - 1);
-	const subp = 1 / (calibration.screenW * 3);
+	const screenInches = values.screenW / values.DPI;
+	const pitch = values.pitch * screenInches * Math.cos(Math.atan(1.0 / values.slope));
+	const tilt = (values.screenH / (values.screenW * values.slope)) * -((values.flipImageX ?? 0) * 2 - 1);
+	const subp = 1 / (values.screenW * 3);
 
 	const defaultQuilt = device.defaultQuilt;
 
@@ -59,7 +34,7 @@ const interpretDevice = (device) => {
 
 	return {
 		...defaultQuilt,
-		...calibration,
+		...values,
 		pitch,
 		tilt,
 		subp,
@@ -70,42 +45,31 @@ const interpretDevice = (device) => {
 	};
 };
 
-export default async (useHoloplay = false, useRecordedDevice = false) => {
-	if (!useHoloplay) {
+export default async (useHoloplay = false, { loadCore = () => import("../../lib/holoplaycore.module.js"), timeoutMs = 3000 } = {}) => {
+	if (!useHoloplay) return interpretDevice(null);
+	let client;
+	try {
+		const HoloPlayCore = await loadCore();
+		const device = await new Promise((resolve) => {
+			let settled = false;
+			const settle = (value) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve(value);
+			};
+			const timer = setTimeout(() => settle(null), timeoutMs);
+			try {
+				client = new HoloPlayCore.Client((data) => settle(data.devices?.[0]), () => settle(null));
+			} catch { settle(null); }
+		});
+		const result = interpretDevice(device);
+		if (!result.enabled) console.warn("No calibrated Looking Glass device is available; rendering normal Matrix rain.");
+		return result;
+	} catch (error) {
+		console.warn("Looking Glass discovery failed; rendering normal Matrix rain.", error);
 		return interpretDevice(null);
+	} finally {
+		try { client?.disconnect(); } catch { /* Discovery is already complete. */ }
 	}
-	const HoloPlayCore = await import("../../lib/holoplaycore.module.js");
-
-	// MD-46 (upstream): this promise had no timeout, and because its error callback also
-	// resolved rather than rejecting, a HoloPlay client that never invoked either callback
-	// left the caller awaiting forever. regl/main.js awaits this before building the
-	// pipeline, so the symptom was a permanently black window with no diagnostic.
-	const device = await new Promise((resolve) => {
-		let settled = false;
-		const settle = (value) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			resolve(value);
-		};
-
-		const timer = setTimeout(() => {
-			console.warn("HoloPlay service did not respond within 3s; continuing without a Looking Glass device.");
-			settle(null);
-		}, 3000);
-
-		try {
-			new HoloPlayCore.Client(
-				(data) => settle(data.devices?.[0]),
-				() => settle(null)
-			);
-		} catch (error) {
-			console.warn("HoloPlay client could not be created:", error);
-			settle(null);
-		}
-	});
-	if (device == null && useRecordedDevice) {
-		return interpretDevice(recordedDevice);
-	}
-	return interpretDevice(device);
 };

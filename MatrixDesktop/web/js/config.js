@@ -68,6 +68,34 @@ const hsl = (...values) => ({ space: "hsl", values });
 const rgb = (...values) => ({ space: "rgb", values });
 
 const defaults = {
+	// UC3D is opt-in; the original scene remains the default.
+	scene: "matrix",
+	donorGlyphs: false,
+	codeColor: rgb(0, 0.698, 0),
+	shadedLines: true,
+	sidewaysMovement: false,
+	mouseRotation: false,
+	codeRotation: true,
+	forwardMovement: true,
+	randomForwardMovement: false,
+	showPictures: false,
+	pictureDepth: 0,
+	pictureMonochrome: true,
+	pictureCaptions: true,
+	pictureScale: 1,
+	pictureDelay: 20,
+	pictureDuration: 8,
+	pictureSource: "all",
+	showClock: false,
+	clock12Hour: false,
+	clockSize: 1,
+	sound: "off",
+	soundVolume: 0.25,
+	pictureDirectory: "",
+	donorDirectory: "",
+	desktopBackground: false,
+	musicFile: "",
+
 	font: "matrixcode",
 	effect: "palette", // The name of the effect to apply at the end of the process— mainly handles coloration
 	baseTexture: null, // The name of the texture to apply to the base layer of the glyphs
@@ -404,7 +432,7 @@ versions["2021"] = versions.resurrections;
 
 const range = (f, min = -Infinity, max = Infinity) => Math.max(min, Math.min(max, f));
 const nullNaN = (f) => (Number.isFinite(f) ? f : null);
-const isTrue = (s) => s.toLowerCase() === "true";
+const isTrue = (s) => ["", "1", "true", "y", "yes", "on"].includes(s.trim().toLowerCase());
 
 const parseFiniteList = (s) => {
 	const values = s.split(",").map((v) => parseFloat(v.trim()));
@@ -466,6 +494,32 @@ const parsePalette = (isHSL) => (s) => {
 };
 
 const paramMapping = {
+	donorGlyphs: { key: "donorGlyphs", parser: isTrue },
+	codeColor: { key: "codeColor", parser: parseColor(false) },
+	scene: { key: "scene", parser: (s) => ["matrix", "uc3d"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
+	shadedLines: { key: "shadedLines", parser: isTrue },
+	sidewaysMovement: { key: "sidewaysMovement", parser: isTrue },
+	mouseRotation: { key: "mouseRotation", parser: isTrue },
+	codeRotation: { key: "codeRotation", parser: isTrue },
+	forwardMovement: { key: "forwardMovement", parser: isTrue },
+	randomForwardMovement: { key: "randomForwardMovement", parser: isTrue },
+	showPictures: { key: "showPictures", parser: isTrue },
+	pictureDepth: { key: "pictureDepth", parser: parseClampedFloat(0, 2) },
+	pictureMonochrome: { key: "pictureMonochrome", parser: isTrue },
+	pictureCaptions: { key: "pictureCaptions", parser: isTrue },
+	pictureScale: { key: "pictureScale", parser: parseClampedFloat(0.1, 3) },
+	pictureDelay: { key: "pictureDelay", parser: parseClampedFloat(1, 180) },
+	pictureDuration: { key: "pictureDuration", parser: parseClampedFloat(1, 60) },
+	pictureSource: { key: "pictureSource", parser: (s) => ["all", "matrix", "reloaded", "revolutions", "custom"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
+	showClock: { key: "showClock", parser: isTrue },
+	clock12Hour: { key: "clock12Hour", parser: isTrue },
+	clockSize: { key: "clockSize", parser: parseClampedFloat(0.25, 4) },
+	sound: { key: "sound", parser: (s) => ["off", "effects", "music"].includes(s.toLowerCase()) ? s.toLowerCase() : null },
+	soundVolume: { key: "soundVolume", parser: parseClampedFloat(0, 1) },
+	pictureDirectory: { key: "pictureDirectory", parser: (s) => s },
+	donorDirectory: { key: "donorDirectory", parser: (s) => s },
+	desktopBackground: { key: "desktopBackground", parser: isTrue },
+	musicFile: { key: "musicFile", parser: (s) => s },
 	testFix: { key: "testFix", parser: (s) => s },
 	version: { key: "version", parser: (s) => s },
 	font: { key: "font", parser: (s) => s },

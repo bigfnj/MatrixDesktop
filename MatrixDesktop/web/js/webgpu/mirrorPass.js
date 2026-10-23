@@ -1,9 +1,13 @@
+import createResourceOwner, { ownDevice } from "../resourceOwner.js";
 ﻿import { structs } from "../../lib/gpu-buffer.js";
 import { makeComputeTarget, makeUniformBuffer, loadShader, makeBindGroup, makePass } from "./utils.js";
 
 const numTouches = 5;
 
-export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer, canvas }) => {
+export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, timeBuffer, canvas }) => {
+	const owner = createResourceOwner();
+	const device = ownDevice(owner, nativeDevice);
+
 	const touches = Array(numTouches)
 		.fill()
 		.map((_) => [0, 0, -Infinity, 0]);
@@ -69,7 +73,7 @@ export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer, canv
 	})();
 
 	const build = (size, inputs) => {
-		output?.destroy();
+		owner.release(output);
 		output = makeComputeTarget(device, size);
 		screenSize = size;
 		aspectRatio = size[0] / size[1];
@@ -108,5 +112,5 @@ export default ({ config, device, cameraTex, cameraAspectRatio, timeBuffer, canv
 		computePass.end();
 	};
 
-		return makePass("Mirror", loaded, build, run, () => window.removeEventListener("click", clickHandler));
+		return makePass("Mirror", loaded, build, run, () => { window.removeEventListener("click", clickHandler); owner.cleanup(); });
 	};

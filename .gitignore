@@ -79,6 +79,8 @@ packages/
 TestResults/
 coverage/
 coverage.*
+__pycache__/
+*.pyc
 
 # Logs and crash dumps
 *.log

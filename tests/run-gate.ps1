@@ -107,6 +107,10 @@ function Stop-Harness {
 
 $GatePublishDir = Join-Path $RepoRoot 'artifacts\gate\win-x64-fd'
 $ShotDir = Join-Path $RepoRoot 'artifacts\gate\shots'
+# 2026-10-23: a live installed MatrixDesktop can share WebView2's browser process
+# with a smoke instance. A private test profile gives this run attributable child
+# processes without stopping the owner's desktop application.
+$env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $RepoRoot 'artifacts\gate\webview-profile'
 $AppLocalRoot = Join-Path $env:LOCALAPPDATA 'MatrixDesktop'
 $LogPath = Join-Path $AppLocalRoot 'MatrixDesktop.log'
 $DumpDir = Join-Path $AppLocalRoot 'dumps'
@@ -438,8 +442,14 @@ try {
     if (-not (Test-Path -LiteralPath $testProj)) {
         Test-Unchecked 'unit harness' 'tests\MatrixDesktop.Tests does not exist yet'
     } else {
-        & dotnet build $testProj -c Release --nologo -v:minimal | Out-Null
-        if ($LASTEXITCODE -ne 0) {
+        # The solution already includes the harness. Build it separately only when the
+        # caller explicitly reused existing solution output.
+        $harnessBuildExit = 0
+        if ($SkipBuild) {
+            & dotnet build $testProj -c Release --nologo -v:minimal | Out-Null
+            $harnessBuildExit = $LASTEXITCODE
+        }
+        if ($harnessBuildExit -ne 0) {
             Test-Fail 'unit harness build'
         } else {
             $harness = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
@@ -503,11 +513,35 @@ try {
         }
     }
 
+    if ($node) {
+        $lifecycle = Join-Path $RepoRoot 'tests\renderer-lifecycle.mjs'
+        $lifecycleLog = Join-Path $env:TEMP 'md-gate-renderer-lifecycle.log'
+        $lifecycleRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $lifecycle + '"') -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $lifecycleLog -RedirectStandardError "$lifecycleLog.err"
+        if ($lifecycleRun.ExitCode -ne 0) {
+            Test-Fail 'renderer lifecycle regressions' "see $lifecycleLog"
+            Get-Content -LiteralPath $lifecycleLog, "$lifecycleLog.err" | Where-Object { $_ -match '^FAIL' } | ForEach-Object { Write-Host $_ }
+        } else { Test-Ok 'renderer lifecycle regressions' }
+    } else { Test-Unchecked 'renderer lifecycle regressions' 'node is not on PATH' }
+
+    if ($node) {
+        $uc3dTest = Join-Path $RepoRoot 'tests\uc3d-tests.mjs'
+        $uc3dLog = Join-Path $env:TEMP 'md-gate-uc3d-model.log'
+        if (-not (Test-Path -LiteralPath $uc3dTest -PathType Leaf)) {
+            Test-Fail 'UC3D scene regressions' "missing: $uc3dTest"
+        } else {
+            $run = Start-Process -FilePath $node.Source -ArgumentList ('"' + $uc3dTest + '"') -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput $uc3dLog -RedirectStandardError "$uc3dLog.err"
+            if ($run.ExitCode -eq 0) { Test-Ok 'UC3D scene regressions' }
+            else { Test-Fail 'UC3D scene regressions' "see $uc3dLog" }
+        }
+    } else { Test-Unchecked 'UC3D scene regressions' 'node is not on PATH' }
+
     # Every shader, asset and lib path referenced from JS or HTML must resolve. A renamed
     # or deleted asset is otherwise a runtime-only failure that no build catches.
     $refPattern = '["'']((?:\.\./)*(?:shaders|assets|lib|js)/[A-Za-z0-9_./-]+\.(?:glsl|wgsl|png|ttf|js))["'']'
     $refs = New-Object 'Collections.Generic.HashSet[string]'
-    foreach ($src in @(Get-ChildItem -LiteralPath $webRoot -Recurse -Include *.js, *.html -File)) {
+    foreach ($src in @(Get-ChildItem -LiteralPath $webRoot -Recurse -File | Where-Object { $_.Extension -in @(".js", ".html") })) {
         foreach ($m in [regex]::Matches((Get-Content -LiteralPath $src.FullName -Raw), $refPattern)) {
             $rel = $m.Groups[1].Value
             $candidate = [IO.Path]::GetFullPath((Join-Path $src.DirectoryName $rel))
@@ -561,8 +595,11 @@ try {
         if ($LASTEXITCODE -ne 0) {
             Test-Fail 'headless web smoke' 'could not generate the loadState fixture'
         } else {
-            $smokeOut = & $py $smokeScript 2>&1 | Out-String
-            $smokeExit = $LASTEXITCODE
+            $smokeLog = Join-Path $env:TEMP 'md-gate-web-smoke.log'
+            $smokeRun = Start-Process -FilePath $py -ArgumentList ('"' + $smokeScript + '"') -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"
+            $smokeOut = Get-Content -LiteralPath $smokeLog, "$smokeLog.err" | Out-String
+            $smokeExit = $smokeRun.ExitCode
             foreach ($line in ($smokeOut -split "`r?`n")) {
                 if ($line -match '^\s{2}(ok|FAIL)\s') {
                     Write-Host ('  ' + $line.Trim()) -ForegroundColor DarkGray
@@ -591,6 +628,29 @@ try {
     # managed resource as well as stamped into the PE by <ApplicationIcon>, which put it in
     # the payload six times. AppWindowIcon now reads the running .exe's own Win32 icon, so
     # the managed copy is gone and the thing worth asserting moved to the icon check below.
+    Test-Hdr 'tier 1: UC3D importer and WebGL smoke'
+    if (-not $py) {
+        Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
+        Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
+    } else {
+        foreach ($case in @(
+            @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
+            @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' }
+        )) {
+            $path = Join-Path $RepoRoot $case.Script
+            $log = Join-Path $env:TEMP ('md-gate-' + ($case.Name -replace ' ', '-') + '.log')
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Test-Fail $case.Name "missing: $path"
+                continue
+            }
+            $run = Start-Process -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+            if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
+            elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
+            else { Test-Fail $case.Name "exit $($run.ExitCode); see $log" }
+        }
+    }
+
     Test-Hdr 'tier 1: embedded resources'
     $probeDlls = @(
         (Join-Path $RepoRoot 'MatrixDesktop\bin\Release\net10.0-windows\MatrixDesktop.dll'),
@@ -629,7 +689,13 @@ foreach (`$dll in @($literals)) {
 "SEEN:`$seen"
 if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 "@
-        $probeLines = @(& pwsh -NoProfile -Command $resourceProbe 2>&1)
+        # Windows PowerShell's native argument marshalling strips embedded quotes in
+        # -Command text. Encoding preserves the exact probe and works under both shells.
+        $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($resourceProbe))
+        $probeLog = Join-Path $env:TEMP 'md-gate-resource-probe.log'
+        $probeRun = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList @('-NoProfile', '-EncodedCommand', $encodedProbe) -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $probeLog -RedirectStandardError "$probeLog.err"
+        $probeLines = @(Get-Content -LiteralPath $probeLog, "$probeLog.err")
         $seenLine = @($probeLines | Where-Object { $_ -like 'SEEN:*' }) | Select-Object -Last 1
         $verdict = $probeLines | Select-Object -Last 1
         $seen = if ($seenLine) { [int]($seenLine -replace 'SEEN:', '') } else { -1 }
@@ -795,8 +861,8 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         '-p:PublishSingleFile=false'
         '-p:PublishReadyToRun=true'
         '-p:AllowedReferenceRelatedFileExtensions=none'
-        '-p:DebugType=none'
-        '-p:DebugSymbols=false'
+        '-p:DebugType=embedded'
+        '-p:DebugSymbols=true'
     )
 
     $publishOk = $true
@@ -820,7 +886,15 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             Test-Ok 'payload contains every required file'
         }
 
-        $junk = @(Get-ChildItem -LiteralPath $GatePublishDir -Recurse -File -Include *.pdb, *.xml -ErrorAction SilentlyContinue)
+        $symbolHarness = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
+        $symbolLog = Join-Path $env:TEMP 'md-gate-published-symbols.log'
+        & $symbolHarness --verify-published-symbols (Join-Path $GatePublishDir 'MatrixDesktop.dll') (Join-Path $GatePublishDir 'MatrixDesktopConfigurator.dll') *> $symbolLog
+        if ($LASTEXITCODE -ne 0) {
+            Test-Fail 'published exception stacks carry source lines' "see $symbolLog"
+            Get-Content -LiteralPath $symbolLog | Where-Object { $_ -match '^FAIL' } | ForEach-Object { Write-Host $_ }
+        } else { Test-Ok 'published exception stacks carry source lines' }
+
+        $junk = @(Get-ChildItem -LiteralPath $GatePublishDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @(".pdb", ".xml") })
         if ($junk.Count -gt 0) {
             $bytes = ($junk | Measure-Object -Property Length -Sum).Sum
             Test-Fail 'payload carries no .pdb or .xml' ("{0} file(s), {1:N0} bytes: {2}" -f $junk.Count, $bytes, (($junk | Select-Object -First 4 | ForEach-Object { $_.Name }) -join ', '))
@@ -994,7 +1068,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                     # The log assertion has to prove it looked at something. Without the
                     # start marker, "no new ERROR lines" passes vacuously whenever logging
                     # is broken or the pid attribution is wrong.
-                    $records = Get-LogRecordsForPid -ProcessId $proc.Id -Since $launchedAt
+                    $records = @(Get-LogRecordsForPid -ProcessId $proc.Id -Since $launchedAt)
                     $marker = @($records | Where-Object { $_.Level -eq 'INFO' -and $_.Msg -like "$StartMarker*" })
                     if ($marker.Count -eq 0) {
                         Test-Fail "smoke [$caseName] log is attributable" "no '$StartMarker' record for pid $($proc.Id) in $LogPath, so an ERROR check would be vacuous"
@@ -1101,7 +1175,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                     $closeMethod = Stop-GateProcess $proc
                 }
 
-                $records = Get-LogRecordsForPid -ProcessId $proc.Id -Since $launchedAt
+                $records = @(Get-LogRecordsForPid -ProcessId $proc.Id -Since $launchedAt)
                 $marker = @($records | Where-Object { $_.Level -eq 'INFO' -and $_.Msg -like "$StartMarker*" })
                 if ($marker.Count -eq 0) {
                     Test-Fail 'configurator log is attributable' "no '$StartMarker' record for pid $($proc.Id)"
@@ -1120,6 +1194,20 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                     Test-Fail 'configurator shuts down cleanly' "needed '$closeMethod'"
                 }
             }
+        }
+    }
+
+    if (-not $Tier1Only) {
+        Test-Hdr 'tier 3: published UC3D media and preview'
+        if (-not [Environment]::UserInteractive -or -not $py) {
+            Test-Unchecked 'published UC3D media and preview' 'requires an interactive session and Python with Playwright'
+        } else {
+            $nativeScript = Join-Path $RepoRoot 'tests\native-uc3d-smoke.py'
+            $nativeLog = Join-Path $ShotDir 'native-uc3d.log'
+            $nativeRun = Start-Process -FilePath $py -ArgumentList ('"' + $nativeScript + '" --renderer regl --publish "' + $GatePublishDir + '"') `
+                -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeLog -RedirectStandardError "$nativeLog.err"
+            if ($nativeRun.ExitCode -eq 0) { Test-Ok 'published UC3D media and preview' }
+            else { Test-Fail 'published UC3D media and preview' "exit $($nativeRun.ExitCode); see $nativeLog" }
         }
     }
 

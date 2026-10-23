@@ -1,4 +1,4 @@
-﻿MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.0.5)
+﻿MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v1.1.0)
 =====================================================
 
 This file is embedded in both MatrixDesktop.exe and MatrixDesktopConfigurator.exe.
@@ -661,3 +661,110 @@ F) Image effect using a local bundled asset
 - Some internal config properties exist but are NOT exposed as URL params in this build
   (e.g., glintIntensity, baseTexture, glintTexture, brightness/contrast controls, low-level ripple tuning knobs).
   Changing those requires editing web/js/config.js.
+
+UC3D scene options
+==================
+
+- Key: scene
+- Default: matrix
+  Rendering scene: matrix or uc3d. UC3D uses its own camera, image formation and glyph renderer.
+
+- Key: shadedLines
+- Default: true
+  UC3D: vary the brightness of 2D columns.
+
+- Key: sidewaysMovement
+- Default: false
+  UC3D: drift the falling code sideways.
+
+- Key: mouseRotation
+- Default: false
+  UC3D 3D: mouse rotates; right-click stops, left-click resets, wheel rolls. Returns to automatic movement after 20 seconds idle.
+
+- Key: codeRotation
+- Default: true
+  UC3D 3D: automatically rotate the camera around the code.
+
+- Key: forwardMovement
+- Default: true
+  UC3D 3D: move through the code using forwardSpeed.
+
+- Key: randomForwardMovement
+- Default: false
+  UC3D 3D: vary forward/back speed smoothly.
+
+- Key: showPictures
+- Default: false
+  UC3D: form available local pictures from glyphs. No donor pictures are distributed in this package.
+
+- Key: pictureDepth
+- Default: 0
+  UC3D: luminance-based picture relief in 3D, 0 to 2; zero is flat.
+
+- Key: pictureMonochrome
+- Default: true
+  UC3D: use the code color for pictures instead of their original colors.
+
+- Key: pictureCaptions
+- Default: true
+  UC3D: show the filename caption while a picture forms.
+
+- Key: pictureScale
+- Default: 1
+  UC3D: aspect-preserving picture scale, 0.1 to 3.
+
+- Key: pictureDelay
+- Default: 20
+  UC3D: seconds between picture sequences, 1 to 180.
+
+- Key: pictureDuration
+- Default: 8
+  UC3D: picture sequence duration in seconds, 1 to 60.
+
+- Key: pictureSource
+- Default: all
+  UC3D: all, matrix, reloaded, revolutions or custom. Film groups require a local donor picture folder with matching subfolders.
+
+- Key: showClock
+- Default: false
+  UC3D: show the current local time centered over the rain.
+
+- Key: clock12Hour
+- Default: false
+  UC3D: display a 12-hour clock; false uses 24-hour time.
+
+- Key: clockSize
+- Default: 1
+  UC3D: clock scale, 0.25 to 4.
+
+- Key: sound
+- Default: off
+  UC3D: off, effects (procedural code sizzle), or music (original ambient synthesis or the selected local file). Browser autoplay may require Enable sound. Preview stays muted.
+
+- Key: soundVolume
+- Default: 0.25
+  UC3D: audio volume, 0 to 1.
+
+- Key: pictureDirectory
+- Default: none
+  UC3D: optional local personal picture folder, JPG/JPEG/PNG/GIF/BMP. At most 256 images; each at most 32 MiB. Paths with spaces must be quoted.
+
+- Key: donorDirectory
+- Default: none
+  UC3D: optional privately imported donor picture folder; matrix, reloaded and revolutions subfolders select film groups. Donor binary/media are not included.
+
+- Key: desktopBackground
+- Default: false
+  UC3D: capture the current desktop once before startup and draw it behind the code. No live wallpaper parenting; no image is saved to disk.
+
+- Key: musicFile
+- Default: none
+  UC3D: optional local MP3/WAV/OGG/M4A file, at most 32 MiB, for sound=music. No donor audio is included.
+
+- Key: codeColor
+- Default: 0,0.698,0
+  UC3D: normal code RGB color. Each component ranges from zero to one.
+
+- Key: donorGlyphs
+- Default: false
+  UC3D: use the original local 79-character atlas from donorDirectory, when imported. Falls back visibly if unavailable.

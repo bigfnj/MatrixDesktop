@@ -1,283 +1,169 @@
-# MatrixDesktop Smoke Test Plan
+# MatrixDesktop smoke and regression checks
 
-## Scope
+Run a smoke check after each substantial change, then the relevant regression
+tests. Before committing or releasing, run the full gate and verify the published
+application on Windows. A headless browser render alone does not verify WinForms,
+WebView2 integration, native media grants or application shutdown.
 
-Validate the Windows x64 framework-dependent artifact enough to catch launch, asset loading,
-renderer fallback, CLI parsing, windowing, and shutdown regressions.
+## Environment and artifacts
 
-**Read the next section before running anything by hand.** Most of the original case list is
-now checked automatically by `tests\run-gate.ps1`, and re-running those by hand is wasted
-effort. What is left is a short list of things a script genuinely cannot do.
+The supported framework-dependent package needs Windows x64, the .NET 10 Desktop
+Runtime and Microsoft Edge WebView2 Runtime. Browser probes use a Python
+interpreter with Playwright and Pillow. The gate accepts `MD_GATE_PYTHON` to
+select that interpreter. Its browser smoke also needs Playwright Chromium.
 
-## What is automated, and what is not
+| Artifact | Producer and location |
+| --- | --- |
+| Local portable folder | `publish-portable-win-x64-fd.cmd`, producing `publish\win-x64-fd\`. |
+| Gate portable folder | `tests\run-gate.ps1`, producing `artifacts\gate\win-x64-fd\`. |
+| Tagged release | `.github/workflows/release.yml`, producing `MatrixDesktop-<tag>-win-x64-fd.zip` and a SHA256 file. |
 
-Run the gate first:
+All supported folders contain both executables and their `web\` and
+`configurator\` assets. Test the extracted release zip before announcing a
+release. CI calls the tier 1 gate, which owns the Release build and publish;
+there is no separate CI publish sequence.
+
+## Full verification gate
+
+From the repository root:
 
 ```pwsh
-pwsh -File tests\run-gate.ps1
+powershell.exe -NoProfile -File tests\run-gate.ps1
+pwsh -NoProfile -File tests\run-gate.ps1 -Tier1Only
 ```
 
-Exit `0` pass, `1` real failure, `2` something could not be verified (not a pass — the list
-is printed), `3` the gate itself broke. `-Tier1Only` skips the runtime tiers and is what CI
-uses, because tiers 2 and 3 need an attached interactive desktop session to create and
-capture real windows.
+Use Windows PowerShell 5.1 for the first command and PowerShell 7 for the CI
+parity check. `-Tier1Only` explicitly omits the interactive application tiers.
 
-### Automated by the gate — do not re-test by hand
-
-Tier 2 launches `MatrixDesktop.exe` from the publish output in three configurations
-(`default`, `stripes-3d`, `regl-plain`, all with `--windowed --no-exit-on-any-key
-suppressWarnings=true`) and asserts, per configuration:
-
-- the process starts and stays running, and opens no modal dialog
-- it has a live message loop (`WaitForInputIdle`)
-- it creates a visible window, and reports how long that took
-- it **actually rendered**, from a `PrintWindow` capture measured against explicit
-  thresholds: pixel std dev >= 0.04 and non-black fraction >= 0.02. A black or uniform frame
-  fails here rather than passing as "it launched"
-- the **animation is running**, from the measured change between two captures >= 0.005
-- no new `ERROR` in the log, and the log is *attributable*: the check first proves there is
-  a start record for the launched pid, so a missing log cannot make the ERROR check pass
-  vacuously
-- no crash dump appeared in `%LOCALAPPDATA%\MatrixDesktop\dumps\` during the run
-- shutdown completed via `WM_CLOSE`, proving the `OnFormClosing` cleanup path ran rather
-  than the process being killed
-- no orphaned `msedgewebview2` children survive the exited pid
-- no `userdata/` folder was created beside the EXE
-
-Tier 3 does the equivalent for `MatrixDesktopConfigurator.exe` (start, visible window,
-render assertion, attributable log, no ERROR, clean `WM_CLOSE`) and additionally parses the
-presets file beside the executable, failing on a 0-byte file that `Load()` cannot read.
-
-Tier 1 additionally covers, without launching anything: the Release build at 0 warnings, the
-unit harness, `node --check` on every first-party web module, resolution of every shader and
-asset path referenced from JS or HTML, the embedded `Matrix.ico` and argument guide in both
-assemblies, and the publish payload's required files with no `.pdb` or `.xml`.
-
-### Manual only — a script cannot do these
-
-| Case | Why it stays manual |
+| Exit code | Meaning |
 | --- | --- |
-| 2, help dialog | `--help` and `--help-full` both call `ShowDialog()`. **Never run unattended** — the process blocks until a human dismisses it, and the gate would hang. |
-| 9, camera | Needs real webcam hardware and a real OS permission grant. |
-| 10, second monitor | Needs a physical multi-monitor layout; also the only test of borderless-across-all-displays, which the gate does not exercise (it runs `--windowed`). |
-| 15-18, configurator UI | Every one is a click-and-observe interaction: preset save/rename/delete, `Test Argument` launch and replace, `Import` paste and stripe gating, `Randomize` scopes. The gate proves the configurator starts and renders; it proves nothing about what the buttons do. |
-| 8, click ripples | Requires generated mouse clicks on the canvas. |
-| 11, 12, key-exit and locked-down flags | The gate must pass `--no-exit-on-any-key` to survive its own driving terminal, so the key-exit paths are deliberately outside its reach. Cursor hiding and DevTools suppression are also visual. |
-| 5, degenerate values | See the corrected expectation below; the outcome needs a human eye. |
+| `0` | Every selected check ran and passed. |
+| `1` | At least one definite failure. |
+| `2` | At least one selected check could not be verified; inspect every `UNCHECKED` line. |
+| `3` | The verification harness broke. |
 
-Cases 1, 3, 4, 6, 7, 13 and 14 are partly or wholly covered above. Run them by hand only
-when changing the relevant code.
+CI surfaces exit 2 as warning annotations rather than silently treating missing
+coverage as a pass. Exit 1 and 3 fail the workflow.
 
-## Test Environment
+Tier 1 builds with no warnings, runs native regressions and JavaScript lifecycle
+and UC3D scenarios, checks module syntax and referenced assets, and runs the
+configurator DOM/render smoke and UC3D WebGL browser smoke. It also exercises
+the importer's synthetic fixtures, embedded help and icons, version parity,
+published embedded source-line symbols and payload rules. Separate `.pdb`
+and dependency documentation `.xml` files are excluded from the portable folder.
 
-- Windows 10 version 1809+ or Windows 11, x64.
-- .NET 10 Desktop Runtime installed.
-- Microsoft Edge WebView2 Runtime installed.
-- Optional: multi-monitor setup, webcam, and a GPU/browser runtime with WebGPU enabled.
+The runtime tiers launch the published main app in default, stripes/3D and plain
+WebGL configurations, then launch the configurator. They check real windows,
+rendering, attributable logs, crash dumps and clean `WM_CLOSE` shutdown. Main-app
+cases compare successive frames to detect frozen animation and inspect WebView2
+child-process cleanup. A private gate profile avoids sharing the owner's live
+WebView2 browser process.
 
-## Artifact
+`PrintWindow` captures are cropped to the client area. The main-app render
+thresholds are a luminance standard deviation of at least 0.04 and a non-black
+fraction of at least 0.02; animation requires at least 0.005 changed pixels.
+These checks reject blank, uniform and frozen frames. Inspect screenshots too:
+pixel statistics cannot establish visual correctness.
 
-There are two real artifacts. Nothing in this repository produces a file named
-`MatrixDesktop-win-x64-fd-smoke.zip`, which earlier revisions of this document named.
+## UC3D backend and native integration probes
 
-1. **Release zip.** `release.yml` runs on a `v*` tag and writes
-   `MatrixDesktop-<tag>-win-x64-fd.zip` (for example `MatrixDesktop-v1.0.1-win-x64-fd.zip`)
-   to the workflow's working directory, alongside a `.sha256`, and attaches both to the
-   GitHub Release. Extract it and run from the extracted folder. This is what an end user
-   receives, so it is the artifact to test before announcing a release.
+Use the installed Edge channel for actual hardware backend coverage:
 
-2. **Local publish folder.** `publish-portable-win-x64-fd.cmd` produces
-   `publish\win-x64-fd\` containing both executables plus the `web\` and `configurator\`
-   assets. No zip. This is the fastest way to smoke a local change.
-
-`ci.yml` produces neither; it publishes into each project's
-`bin\Publish\win-x64-fd\` and only checks that the two executables exist. The gate publishes
-into `artifacts\gate\win-x64-fd\`.
-
-Primary executable:
-
-```cmd
-MatrixDesktop.exe
+```pwsh
+python tests\uc3d-browser.py --renderer both --channel msedge
 ```
 
-Companion configurator:
+The probe asserts the selected backend rather than accepting silent fallback.
+It checks animated 2D rain, photo RGB in the code field, visible relief, literal
+caption text, the clock and disposal. It records the served shader's digest and
+writes synthetic screenshots and a report to `artifacts\uc3d\`. A missing WebGPU
+adapter returns exit 2. A shader/device failure is a failure, not a WebGPU pass.
 
-```cmd
-MatrixDesktopConfigurator.exe
+After publishing, exercise the native applications and their media bridge:
+
+```pwsh
+python tests\native-uc3d-smoke.py
+python tests\native-uc3d-smoke.py --publish publish\win-x64-fd --donor-directory C:\Private\UC3D-media
 ```
 
-Run commands from inside the artifact folder so relative paths and `web/` assets are present.
-WebView2 profile/cache data is stored under `%LOCALAPPDATA%\MatrixDesktop\WebView2\` by
-default, not beside the EXE. Bundled web assets are staged under
-`%LOCALAPPDATA%\MatrixDesktop\Web\` before WebView2 loads them.
+The default publish input is `artifacts\gate\win-x64-fd\`. These probes open
+test-owned WebView2 debugging profiles and verify both native backends, granted
+local image resources, rejection of ungranted URLs, and configurator preview
+bootstrap data. The optional donor input also exercises the imported manifest,
+glyph atlas and explicit sound-test action. Screenshots and reports under
+`artifacts\native-uc3d\` can contain donor media; keep that directory private.
+Do not run a publish that replaces this folder while its executables are open.
 
-Icon precheck:
+Desktop capture has a separate test:
 
-- In Explorer, both `MatrixDesktop.exe` and `MatrixDesktopConfigurator.exe` should show the
-  Matrix icon.
-- Launch each app and confirm the taskbar button also uses the Matrix icon while the window
-  is open.
+```pwsh
+python tests\desktop-snapshot-smoke.py --self-test
+python tests\desktop-snapshot-smoke.py
+```
 
-## Smoke Cases
+It first covers the virtual desktop with a synthetic test window, checks that
+the capture region is unobstructed, then starts UC3D with desktop capture enabled.
+It validates every captured pixel against the synthetic palette, capture bounds,
+the opt-in media grant and `no-store` response. It also checks that the published
+web tree is unchanged. It writes a report, not captured image pixels, and closes
+its own fixture and application. `--windowed` additionally requires an
+unobstructed full-desktop fixture for the windowed initial-bounds case.
 
-1. Default launch — *gate covers the windowed variant; the borderless span is manual*
-   - Run: `MatrixDesktop.exe`
-   - Expected: borderless Matrix rain appears across displays, no missing asset dialog, black startup background, any physical key exits when the app is foreground.
+## Focused regression commands
 
-2. Help dialog — **manual only, never unattended**
-   - Run: `MatrixDesktop.exe --help`
-   - Expected: help dialog appears and app exits after closing it.
-   - Run: `MatrixDesktop.exe --help-full`
-   - Expected: scrollable argument reference appears and app exits after closing it.
-   - Both use `ShowDialog()` and block until dismissed. Do not put either in a script.
+The full gate already runs the first three commands below. Use them for a
+focused rerun after a relevant smoke passes:
 
-3. Windowed WebGL renderer — *gate covers via the `regl-plain` case; resize is manual*
-   - Run: `MatrixDesktop.exe --windowed --version classic --renderer regl --no-exit-on-any-key`
-   - Expected: normal resizable window opens at a usable size, animation renders, resizing does not blank or crash.
+```pwsh
+node tests\renderer-lifecycle.mjs
+node tests\uc3d-tests.mjs
+python tools\test_import_uc3d_media.py
+python tests\bloom-probe.py --hardware --channel msedge
+```
 
-4. Presets and query conversion — *gate covers `--version 3d`; the raw query form is manual*
-   - Run: `MatrixDesktop.exe --windowed --version resurrections --effect palette --numColumns 70 --resolution 0.75`
-   - Expected: Resurrections glyph/palette variant renders.
-   - Run: `MatrixDesktop.exe "?version=3d&effect=plain&fallSpeed=0.4"`
-   - Expected: raw query string is accepted and renders.
+The bloom probe compares GPU readbacks for the questioned LOD/texture-format
+changes and includes changed-output witnesses. It returns exit 2 if WebGPU
+readback is unavailable. Do not infer a visual fix from a suspicious-looking
+shader expression without measuring its effect.
 
-5. Parameter hardening — **manual; expectation corrected below**
-   - Run: `MatrixDesktop.exe --windowed --numColumns 0 --density 0 --resolution 0 --palette ""`
-   - Expected: **the app does not crash, and the output is not usable.** Measured behaviour:
-     - `--numColumns 0` alone renders a **pure black frame**.
-     - `--numColumns 0` combined with `--resolution 0` renders **two enormous white
-       rectangles**.
-   - Numeric clamping does happen — `web/js/config.js` clamps `numColumns` to `[1, 256]`,
-     `density` to `[0.01, 4]` and `resolution` to `[0.05, 2]`, so `0` becomes `1`, `0.01` and
-     `0.05` respectively. But **a floor of 1 column is far too low to produce a usable
-     render**, which is why the frame is black rather than degraded. The clamp prevents the
-     crash and runaway allocation; it does not deliver a sensible picture. Do not record this
-     case as "renders with safe defaults".
-   - Note this is exactly the shape of failure the gate's render assertion catches: a pure
-     black frame measures below the std-dev floor of 0.04 and fails, rather than passing as
-     "it launched".
-   - Run: `MatrixDesktop.exe --windowed --numColumns 99999 --density 999 --resolution 999`
-   - Expected: app remains responsive; values are clamped instead of causing runaway allocation. This half of the case is accurate as written.
+For a new check or gate, deliberately introduce the defect it should detect,
+confirm the intended named failure, restore the source and rerun. For compiled
+tests, verify the artifact was rebuilt and its test witness actually executed.
 
-6. WebGPU request and fallback — **manual; the gate runs no WebGPU case**
-   - Run: `MatrixDesktop.exe --windowed --renderer webgpu --version 3d`
-   - Expected: renders with WebGPU where supported; otherwise falls back to WebGL/REGL without a crash.
+## Interactive and hardware checks
 
-7. Mirror effect without camera — **manual, needs mouse input**
-   - Run: `MatrixDesktop.exe --windowed --effect mirror --no-exit-on-any-key`
-   - Expected: mirror effect renders; mouse clicks create ripples; repeated clicks do not hang the app.
+The automated probes do not certify the following behavior. Run the rows
+affected by a change, using the published application.
 
-8. Click ripples without mirror/camera — **manual, needs mouse input**
-   - Run: `MatrixDesktop.exe --windowed --effect stripes --renderer webgpu --clickRipples true --clickRippleShape triangle --no-exit-on-any-key`
-   - Expected: stripes render and mouse clicks create triangle-shaped ripples without enabling `effect=mirror` or camera.
-   - Run: `MatrixDesktop.exe --windowed --effect stripes --renderer regl --clickRipples true --clickRippleShape star --no-exit-on-any-key`
-   - Expected: WebGL/REGL stripes render and mouse clicks create star-shaped ripples.
-   - Run: `MatrixDesktop.exe --windowed --effect palette --clickRipples true --clickRippleShape box --no-exit-on-any-key`
-   - Expected: palette render path also supports non-circular click ripples.
-   - Run: `MatrixDesktop.exe --windowed --effect stripes --no-exit-on-any-key`
-   - Expected: default behavior is unchanged; mouse clicks do not create rain-effect ripples unless `clickRipples=true`.
+| Area | Check |
+| --- | --- |
+| Icons and help | Both EXEs show the Matrix icon in Explorer and the taskbar. `--help`, `--help-full` and the configurator's `?` show readable help. These dialogs block until dismissed. |
+| Multi-monitor and window modes | Default borderless mode spans the intended displays; `--single-monitor`, `--monitor N` and `--working-area` use the expected bounds. Resize a windowed instance and check for blank frames or crashes. |
+| Physical key exit | Foreground physical keys close the default app. `--no-exit-on-any-key --exit-on-esc` permits ordinary keys but closes on Esc. Both exit modes disabled permit closing via the window. Injected input is intentionally ignored. |
+| Cursor and DevTools | `--hide-cursor --no-devtools --topmost` hides the app cursor, suppresses DevTools shortcuts and maintains the expected z-order. Closing restores cursor state. |
+| Webcam | `--effect mirror --camera true` obtains permission, renders camera input and releases the camera after closing. This needs an actual camera. |
+| Looking Glass | The Matrix scene's Holoplay preset requires real device calibration and uses the WebGL quilt path. No-device and renderer-routing tests do not certify a physical display. UC3D has no quilt implementation. |
+| Click ripples | Enable `clickRipples` with palette/stripe effects and test the triangle, star and box shapes in both renderers. Without the option, ordinary rain should not gain click ripples. |
+| Presets and launch controls | A fresh store includes `UC3D Trilogy` and the older starters. Save, rename and delete a preset; reopen and verify persistence. Edited starters stay edited, and deleted starters stay deleted. `Test Argument` replaces its previous instance and `Stop Test` closes it. |
+| Import and randomize | Import a full command and a raw query; verify values and output. Stripe colors are emitted only for stripe effects. Randomize respects its selected scope and leaves Launch settings unchanged. |
+| UC3D interaction and sound | Enable 3D mouse rotation; move, stop with right-click, reset with left-click and roll with the wheel. After 20 seconds idle, automatic motion resumes. Check personal picture aspect ratio, source selection, captions, clock, optional snapshot and audible sound. Preview sound requires an explicit button action. |
+| Lock and resume | Lock/unlock or sleep/wake while running. Check that the WebView suspends and the scene resumes without a blank render, stuck sound or duplicate callbacks. |
 
-9. Mirror effect with camera — **manual, needs webcam hardware**
-   - Run: `MatrixDesktop.exe --windowed --effect mirror --camera true --no-exit-on-any-key`
-   - Expected: camera permission/runtime succeeds where available, app renders camera-backed mirror effect, closing the app releases camera indicator.
-   - See the note under Pass Criteria: on a normal close the camera is released by process
-     teardown, not by any code in the app.
+Extreme valid settings can produce an unhelpful image. For example, the Matrix
+scene clamps `numColumns=0` to one column and `resolution=0` to 0.05; those floors
+prevent invalid allocations but do not promise a useful picture. Check that
+extreme inputs remain responsive rather than describing them as safe visual
+defaults.
 
-10. Window modes — **manual, needs a physical multi-monitor layout**
-    - Run: `MatrixDesktop.exe --single-monitor --working-area --no-exit-on-any-key`
-    - Expected: app uses primary monitor working area and leaves taskbar visible.
-    - If a second monitor exists, run: `MatrixDesktop.exe --monitor 1 --working-area --no-exit-on-any-key`
-    - Expected: app opens on monitor index 1 or falls back safely if unavailable.
+## Evidence and failure reporting
 
-11. Key-exit controls — **manual; deliberately outside the gate's reach**
-    - Run: `MatrixDesktop.exe --windowed --no-exit-on-any-key --exit-on-esc`
-    - Expected: ordinary keys do not exit; physical Esc exits.
-    - Run: `MatrixDesktop.exe --windowed --no-esc-exit --no-exit-on-any-key`
-    - Expected: keyboard does not close the app; close via window chrome.
-    - The gate cannot test these: the app installs a global `WH_KEYBOARD_LL` hook, so any
-      keystroke typed into the driving terminal would end an automated run. That is why every
-      gate case passes `--no-exit-on-any-key`.
+Keep the command line, artifact version, Windows/WebView2 versions, actual
+backend, GPU and monitor layout with the result. For UC3D, inspect
+`window.matrixRuntimeDiagnostics` for readiness, frame count, warnings, errors
+and disposal state. Verify rendering with both screenshots and app behavior.
 
-12. Locked-down options — **manual, visual**
-    - Run: `MatrixDesktop.exe --windowed --hide-cursor --no-devtools --topmost --no-exit-on-any-key`
-    - Expected: app opens, cursor is hidden over the app and restored after close; DevTools shortcuts do not open DevTools.
-
-13. WebView2 profile/cache — *gate covers the "no `userdata/` beside the EXE" half*
-    - After launch, inspect artifact folder.
-    - Expected: no `userdata/` folder is created beside the EXE.
-    - Inspect `%LOCALAPPDATA%\MatrixDesktop\WebView2\`.
-    - Expected: WebView2 profile/cache files are created there. Deleting that folder resets WebView2 local state.
-    - Inspect `%LOCALAPPDATA%\MatrixDesktop\Web\`.
-    - Expected: bundled runtime assets are staged there.
-
-14. Argument configurator launch — *gate tier 3 covers this*
-    - Run: `MatrixDesktopConfigurator.exe`
-    - Expected: configurator opens with grouped argument controls, named preset dropdown, and a generated command at the bottom.
-
-15. Argument configurator presets — **manual UI interaction**
-    - On a fresh configurator preset store, run `MatrixDesktopConfigurator.exe`.
-    - Expected: `rainbow-haze`, `paradise`, and `stripe effects` appear in the preset dropdown.
-    - In `MatrixDesktopConfigurator.exe`, change `version`, `effect`, and at least one color/palette value.
-    - Save as a named preset, close the configurator, and reopen it.
-    - Expected: last draft is restored and the named preset is available in the dropdown.
-    - Rename and delete the preset, then delete one starter preset.
-    - Expected: dropdown updates, the app remains responsive, and the deleted starter preset does not return on the next launch.
-    - The gate parses the presets file but exercises none of this.
-
-16. Argument configurator test launch — **manual UI interaction**
-    - In `MatrixDesktopConfigurator.exe`, select `effect=stripes`, set custom stripe colors, and click `Test Argument`.
-    - Expected: MatrixDesktop launches windowed with the generated visual settings and does not exit on ordinary keypresses.
-    - Change the preset and click `Test Argument` again.
-    - Expected: previous test instance is replaced by the new one.
-    - Click `Stop Test`.
-    - Expected: test instance closes.
-
-17. Argument configurator import and stripe gating — **manual UI interaction**
-    - In `MatrixDesktopConfigurator.exe`, click `Import` and paste:
-      `--hide-cursor font=resurrections fps=30 animationSpeed=0.5 forwardSpeed=0.05 numColumns=220 density=2 effect=stripes renderer=webgpu stripeColors=0.5,0,0.5,0,0,1,0,1,0,0,1,0,0,0,1,0.5,0,0.5 raindropLength=0.5 version=3d`
-    - Expected: the draft updates to the pasted values, `Stripe colors` shows six editable rows, and the generated command includes `--stripeColors`.
-    - Change `Effect` to `palette`.
-    - Expected: `Stripe colors` is disabled and the generated command omits `--stripeColors`.
-
-18. Argument configurator randomize — **manual UI interaction**
-    - In `MatrixDesktopConfigurator.exe`, record the current Launch settings.
-    - Select `Visual preset` and click `Randomize` 10 times.
-    - Expected: version/font/renderer/effect/color/motion/layout settings change, Launch settings remain unchanged, and generated effects never select `mirror`, `image`, or `none`.
-    - Select `Colors only` and click `Randomize`.
-    - Expected: colors/palette/stripe colors change while motion/layout and Launch settings stay unchanged.
-    - Select `Motion/Layout` and click `Randomize`.
-    - Expected: FPS, columns, density, bloom, and motion values change while Launch settings stay unchanged.
-    - Expected: stripe effects generate 2-8 stripe colors, non-stripe effects omit `--stripeColors`, and palettes stay at 3-6 stops.
-
-## Pass Criteria
-
-- All selected cases launch without unhandled exception dialogs.
-- `MatrixDesktopConfigurator.exe` is present in the artifact beside `MatrixDesktop.exe`.
-- The `web/` folder assets load offline from the artifact folder.
-- The `configurator/` folder assets load offline from the artifact folder.
-- Closing the app releases the keyboard hook, WebView2, and cursor state — **and the camera,
-  but not by design.** `stopCamera()`, which is what actually stops the `MediaStream` tracks,
-  is reachable from exactly two places: the renderer `cleanup()` functions, and those are
-  called only inside the `if (config.once)` branch (`web/js/regl/main.js:154`,
-  `web/js/webgpu/main.js:171`); and three error paths in `web/js/main.js` when a renderer
-  fails to load. On a normal close with `once` unset, **no code releases the camera** — the
-  OS reclaims the device when the WebView2 process tree exits. The criterion passes, for the
-  wrong reason. Anything that keeps the renderer process alive past window close would break
-  it silently, and no test here would notice.
-- No obvious unbounded memory growth during 5 minutes of windowed animation and repeated
-  resize. **This asserts the absence of something the regl path has no mechanism to prevent.**
-  There is not one `.destroy()` call anywhere under `web/js/regl/`, and `regl.destroy()` is
-  never invoked; only the WebGPU path disposes its textures. The criterion holds solely
-  because resize goes through `fbo.resize(w, h)`, which reuses the existing framebuffer
-  handle instead of allocating a new one. Add a code path that creates framebuffers or
-  textures per resize instead of resizing in place, and this criterion will start failing
-  with nothing in the codebase to stop it.
-
-## Notes
-
-- Runtime smoke testing requires Windows. WSL can validate build, publish output, and
-  JavaScript module syntax, but not WinForms/WebView2 behavior.
-- If a test fails, record Windows version, GPU, monitor count/layout, command line used, and
-  whether WebView2/.NET runtimes are installed.
-- Historical status: click ripples without mirror/camera passed Windows visual smoke testing,
-  including the triangle shape.
+Normal renderer teardown now cancels callbacks, stops camera tracks and releases
+owned GPU resources. Regression tests exercise those paths; they do not prove
+the absence of every memory leak. If testing a suspected leak, use a bounded
+run with a reproducible interaction sequence and compare resource counts after
+cleanup. Record unsupported hardware or skipped checks as unverified.

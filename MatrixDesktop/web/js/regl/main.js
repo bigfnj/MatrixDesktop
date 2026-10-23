@@ -35,6 +35,9 @@ const loadJS = (src) =>
 	});
 
 export default async (canvas, config) => {
+	if (config.scene === "uc3d") {
+		return (await import("./uc3dPass.js")).default(canvas, config);
+	}
 	await Promise.all([loadJS("lib/regl.min.js"), loadJS("lib/gl-matrix.min.js")]);
 
 	const resize = () => {
@@ -62,11 +65,15 @@ export default async (canvas, config) => {
 	
 	let pipeline = [];
 	let cleanedUp = false;
+	let regl;
+	let tick;
 	const cleanup = () => {
 		if (cleanedUp) {
 			return;
 		}
 		cleanedUp = true;
+		window.removeEventListener("pagehide", cleanup);
+		tick?.cancel();
 		window.removeEventListener("resize", resize);
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
@@ -77,6 +84,7 @@ export default async (canvas, config) => {
 		if (config.useCamera) {
 			stopCamera();
 		}
+		regl?.destroy();
 	};
 	resize();
 
@@ -87,6 +95,7 @@ export default async (canvas, config) => {
 	// pagehide covers navigation and window close, and it fires for the configurator's
 	// preview iframe every time that reloads.
 	window.addEventListener("pagehide", cleanup, { once: true });
+	try {
 
 	if (config.useCamera) {
 		await setupCamera();
@@ -107,10 +116,11 @@ export default async (canvas, config) => {
 			break;
 	}
 
-	const regl = createREGL({ canvas, pixelRatio: 1, extensions, optionalExtensions });
+	regl = createREGL({ canvas, pixelRatio: 1, extensions, optionalExtensions });
 
 	const cameraTex = regl.texture(cameraCanvas);
-	const lkg = await getLKG(config.useHoloplay, true);
+	const lkg = await getLKG(config.useHoloplay);
+	if (cleanedUp) { regl.destroy(); return; }
 
 	// All this takes place in a full screen quad.
 	const fullScreenQuad = makeFullScreenQuad(regl);
@@ -120,11 +130,12 @@ export default async (canvas, config) => {
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };
 	const drawToScreen = regl({ uniforms: screenUniforms });
 	await Promise.all(pipeline.map((step) => step.ready));
+	if (cleanedUp) { for (const step of pipeline) step.cleanup?.(); regl.destroy(); return; }
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
 	let last = NaN;
 
-	const tick = regl.frame(({ viewportWidth, viewportHeight }) => {
+	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
 		if (config.once) {
 			tick.cancel();
 		}
@@ -160,7 +171,12 @@ export default async (canvas, config) => {
 			drawToScreen();
 		});
 		if (config.once) {
-			cleanup();
+			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
+			if (config.useCamera) stopCamera();
 		}
 	});
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
 };

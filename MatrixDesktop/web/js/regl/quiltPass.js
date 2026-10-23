@@ -1,8 +1,11 @@
+import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 import { loadText, makePassFBO, makePass } from "./utils.js";
 
 // Multiplies the rendered rain and bloom by a loaded in image
 
-export default ({ regl, config, lkg }, inputs) => {
+export default ({ regl: nativeRegl, config, lkg }, inputs) => {
+	const owner = createResourceOwner();
+	const regl = ownRegl(owner, nativeRegl);
 	if (!lkg.enabled) {
 		return makePass({
 			primary: inputs.primary,
@@ -29,6 +32,7 @@ export default ({ regl, config, lkg }, inputs) => {
 			if (shouldRender) {
 				render({ frag: quiltPassFrag.text() });
 			}
-		}
+		},
+		owner.cleanup
 	);
 };

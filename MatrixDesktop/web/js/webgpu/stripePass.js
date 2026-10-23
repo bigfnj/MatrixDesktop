@@ -1,3 +1,4 @@
+import createResourceOwner, { ownDevice } from "../resourceOwner.js";
 import colorToRGB from "../colorToRGB.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { loadShader, make1DTexture, makeUniformBuffer, makeBindGroup, makeComputeTarget, makePass } from "./utils.js";
@@ -36,7 +37,10 @@ const numVerticesPerQuad = 2 * 3;
 // won't persist across subsequent frames. This is a safe trick
 // in screen space.
 
-export default ({ config, device, timeBuffer }) => {
+export default ({ config, device: nativeDevice, timeBuffer }) => {
+	const owner = createResourceOwner();
+	const device = ownDevice(owner, nativeDevice);
+
 	// Expand and convert stripe colors into 1D texture data
 	const stripeColors = "stripeColors" in config ? config.stripeColors : config.effect === "pride" ? prideStripeColors : transPrideStripeColors;
 	const stripeTex = make1DTexture(
@@ -81,7 +85,7 @@ export default ({ config, device, timeBuffer }) => {
 	})();
 
 	const build = (size, inputs) => {
-		output?.destroy();
+		owner.release(output);
 		output = makeComputeTarget(device, size);
 		screenSize = size;
 
@@ -112,5 +116,5 @@ export default ({ config, device, timeBuffer }) => {
 		computePass.end();
 	};
 
-	return makePass("Stripe", loaded, build, run);
+	return makePass("Stripe", loaded, build, run, owner.cleanup);
 };

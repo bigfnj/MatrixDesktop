@@ -4,22 +4,39 @@ This is a minimal Windows desktop wrapper around the original **Rezmason/matrix*
 
 It uses **WinForms + WebView2** to load the included `web/` folder and runs fully offline.
 
-Current version: **1.0.5** — see [release notes](https://github.com/bigfnj/MatrixDesktop/releases/latest).
+Current version: **1.1.0**. Tagged releases are listed on the [releases page](https://github.com/bigfnj/MatrixDesktop/releases).
+
+### UC3D scene
+
+Select **UC3D** in the configurator's Theme section, or use
+`MatrixDesktop.exe --scene uc3d --volumetric true`. The new scene offers mouse and
+automatic camera motion, pictures formed from code with optional 3D relief,
+clock and caption overlays, a desktop snapshot, and optional sound. The
+**UC3D Trilogy** starter preset uses recovered donor colors and timing.
+
+Personal pictures and privately imported donor media are local inputs. The
+package includes no donor binaries, pictures, music or recovered source.
+See [UC3D options and local media](docs/UC3D.md).
 
 ### Since 1.0.2
 
-- **1.0.5** — the configurator's command panel was taking 42% of the window for a one-line
+- **1.1.0** adds the optional UC3D scene in both rendering backends, local picture and
+  audio inputs, an optional privately imported glyph atlas, and a starter preset.
+  Release assemblies retain embedded debugging symbols without shipping separate PDBs.
+  Renderer teardown, boolean parsing, Looking Glass selection and WebGPU resize behavior
+  are covered by regression tests. See [UC3D options and local media](docs/UC3D.md).
+- **1.0.5**: the configurator's command panel was taking 42% of the window for a one-line
   command; it now takes 27% and the field list gets the space back. The window icon is read
   from the executable's own resources instead of a second embedded copy, which takes 114,688
   bytes out of the payload. The argument guide, `ArgumentCatalog` and `config.js` are now held
   to each other by tests, so a flag cannot be documented without existing, exist without being
   documented, or disagree about its default.
-- **1.0.4** — `glyphIntensity` now works. It had been parsed, documented, offered in the
+- **1.0.4**: `glyphIntensity` now works. It had been parsed, documented, offered in the
   configurator and set by Randomize since v1.0 while being read by no shader. It is now the
   glyph brightness multiplier alongside `cursorIntensity` and `glintIntensity`, in the palette
   and stripe effects, both renderers. `gl-matrix` swapped for upstream's minified build
   (214,503 → 52,494 bytes).
-- **1.0.3** — the configurator's command panel was off the bottom of the window, taking Copy,
+- **1.0.3**: the configurator's command panel was off the bottom of the window, taking Copy,
   Export .ps1, Randomize, Import and Test Argument with it, and the live preview was drawing
   about seven enormous columns instead of eighty. Both were one CSS property. Also reverted a
   v1.0.2 bloom change that was itself the regression, corrected two configurator colour
@@ -66,8 +83,8 @@ These screenshots are rendered by the same bundled offline web app that MatrixDe
 
 Some Visual Studio setups (especially those configured to treat warnings as errors) will balk at:
 
-- **NETSDK1137** — using `Microsoft.NET.Sdk.WindowsDesktop` is unnecessary for .NET 5+.
-- **MSB3277** — `Microsoft.Web.WebView2` can pull in a WPF control assembly reference
+- **NETSDK1137**: using `Microsoft.NET.Sdk.WindowsDesktop` is unnecessary for .NET 5+.
+- **MSB3277**: `Microsoft.Web.WebView2` can pull in a WPF control assembly reference
   (`Microsoft.Web.WebView2.Wpf.dll`) even for WinForms-only apps, which may trigger a
   `WindowsBase` 4.0/5.0 conflict warning.
 
@@ -79,7 +96,7 @@ This solution addresses both:
 
 ## Optimization pass (what changed vs earlier drops)
 
-This version focuses on *portable distribution hygiene* and *leaner publish output* without touching the upstream visualizer logic.
+The portable packaging keeps runtime assets local and omits development files.
 
 ### AppData WebView2 user data
 
@@ -110,20 +127,19 @@ the build. Commit `bd24373` deleted `web/playdate/**`, `web/svg sources/**`,
 `prettier_command.txt`, `webgpu_notes.txt`, `assets/msdf_command.txt`). See
 [`VENDORING.md`](VENDORING.md).
 
-What ships today is all of `MatrixDesktop/web/`: `index.html`, `js/`, `shaders/`, `lib/`,
-`assets/`, and `LICENSE` — 69 tracked files.
+The runtime payload comes from `MatrixDesktop/web/`: `index.html`, `js/`, `shaders/`,
+`lib/`, `assets/`, and `LICENSE`, subject to the project's explicit exclusions.
 
 The `Exclude` list on the `web\**\*` Content glob in `MatrixDesktop.csproj` still names
 those deleted paths, plus `web\msdfgen\**\*` which was never vendored at all. Those clauses
-match nothing on disk now and are kept only as a guard against re-import; `.gitignore` lines
-43-49 guard the same paths on the commit side. Two clauses are still live rules rather than
-history:
+match nothing on disk now and are kept only as a guard against re-import; `.gitignore`
+guards the same paths on the commit side. Two clauses remain active rules:
 
-- `web\**\*.md` and `web\**\*.txt` — these are the reason **not to add a `.md` or `.txt`
+- `web\**\*.md` and `web\**\*.txt`: these are the reason **not to add a `.md` or `.txt`
   file under `MatrixDesktop/web/`**. It would be dropped from every build and publish output,
   and `.gitignore` would refuse to track it in the first place. `web/LICENSE` survives only
   because it has no file extension.
-- `web\.gitmodules`, `web\.gitignore`, `web\.gitattributes` — likewise defensive; the
+- `web\.gitmodules`, `web\.gitignore`, `web\.gitattributes`: likewise defensive; the
   vendored copy is not a submodule.
 
 ### Smaller publish output via invariant globalization
@@ -154,14 +170,14 @@ It provides grouped controls for wrapper flags and visualizer settings, color/pa
 The configurator UI (WinForms shell hosting a WebView2 page) presents all settings on a
 single scrollable surface rather than tabbed pages:
 
-- **Single-screen layout.** Every group (Launch, Theme, Effects, Colors, Motion, Layout,
-  Advanced) is shown at once under sticky section headers. A left-hand jump list scrolls to
+- **Single-screen layout.** Groups, including the UC3D options, share a scrollable surface
+  with sticky section headers. A left-hand jump list scrolls to
   a section, and a filter box narrows the visible fields by name.
 - **Custom color picker.** Color, palette-stop, and stripe swatches open an in-app popover
-  with a draggable saturation/value square, a hue bar, and precise hex / 0–1 RGB entry — no
+  with a draggable saturation/value square, a hue bar, and precise hex / 0–1 RGB entry: no
   OS color dialog, full float precision, and palette/stripe rows are directly editable.
 - **Embedded live preview.** A preview pane renders the matrix effect (served to an iframe
-  from the bundled `web/` assets) and refreshes on any change — field edits, preset
+  from the bundled `web/` assets) and refreshes on any change: field edits, preset
   selection, import, or randomize. The preview query mirrors the actual launch command, so
   what you see matches what `MatrixDesktop.exe` would render.
 - **Range enforcement.** Out-of-range numeric inputs clamp to their allowed min/max on
@@ -171,7 +187,10 @@ The importer accepts full `MatrixDesktop.exe ...` commands, raw argument lines, 
 
 The randomizer has three scopes: `Visual preset`, `Colors only`, and `Motion/Layout`. It keeps launch/window controls untouched, avoids camera/image/mirror/debug effects, caps generated `stripeColors` at 2–8 colors, and caps generated palettes at 3–6 stops.
 
-On first launch, the configurator seeds three starter presets into the normal preset list: `rainbow-haze`, `paradise`, and `stripe effects`. They are regular user presets, so they can be edited, renamed, or deleted.
+On first launch, the configurator seeds `UC3D Trilogy`, `rainbow-haze`, `paradise`, and
+`stripe effects`. These are regular user presets and can be edited, renamed, or deleted.
+Existing stores receive the UC3D preset once without restoring deleted older starters or
+overwriting edited presets.
 
 Preset storage is portable-first:
 
@@ -266,67 +285,70 @@ Notes:
 - If both an enable and a disable flag are supplied for the same wrapper feature, the **last one wins**.
 - Boolean flags accept `true/false`, `1/0`, `y/n`, `yes/no`, and `on/off`, case-insensitively.
 - Bare boolean web flags such as `--camera`, `--volumetric`, `--clickRipples`, or `--skipIntro` are treated as `true`, and so is an explicitly empty value (`--camera=`).
-- Any other value is passed through and the web app only accepts the exact text `true`, so `--camera maybe` is silently `false`.
+- Unrecognized boolean values are false; for example, `--camera maybe` and a direct
+  `?camera=untrue` query do not enable the camera.
 - Never put a space inside a comma-separated value unless you quote the whole value. `--stripeColors 1,0,0, 1,1,0` is split by the shell and then silently dropped as malformed; `--stripeColors 1,0,0,1,1,0` or `--stripeColors "1,0,0, 1,1,0"` both work.
 - Monitor indices are 0-based and come from `Screen.AllScreens`; their order can change if displays are rearranged in Windows.
 - Any unknown parameters are passed through but will be ignored by the web app.
 
 ### Allowed arguments
 
-The following arguments are recognized by the upstream `web/js/config.js` URL parameter parser.
+The following arguments are recognized by `web/js/config.js`. UC3D-specific controls
+are described in [UC3D options and local media](docs/UC3D.md) and the embedded argument guide.
 
 #### Core selection
 
-- `version` (string) — Matrix variant preset.
+- `scene` (string): `matrix` (default) or `uc3d`.
+- `version` (string): Matrix variant preset.
   - Examples: `classic`, `3d`, `operator`, `megacity`, `nightmare`, `paradise`, `resurrections`, `trinity`, `morpheus`, `bugs`, `palimpsest`, `twilight`, `holoplay`, `neomatrixology`.
   - Aliases also exist in the codebase (e.g., `updated`, `throwback`, `1999`, `2003`, `2021`).
-- `font` (string) — glyph set.
+- `font` (string): glyph set.
   - Examples: `matrixcode`, `resurrections`, `gothic`, `coptic`, `huberfishA`, `huberfishD`, `gtarg_tenretniolleh`, `gtarg_alientext`, `neomatrixology`, `megacity`.
-- `effect` (string) — post-process effect.
+- `effect` (string): post-process effect.
   - Examples: `palette` (default), `plain`, `none`, `stripes`, `customStripes`, `pride`, `trans`, `transPride`, `image`, `mirror`.
-- `renderer` (string) — graphics backend.
+- `renderer` (string): graphics backend.
   - `regl` (default WebGL) or `webgpu` (if supported on the machine).
 
 #### Animation and layout
 
-- `numColumns` (int) — size of the glyph grid, clamped to 1–256.
-- `width` (int) — alias of `numColumns`.
-- `density` (number) — volumetric density multiplier, clamped to 0.01–4.
-- `resolution` (number) — render resolution scale factor, clamped to 0.05–2.
-- `animationSpeed` (number) — global animation multiplier.
-- `forwardSpeed` (number) — forward motion speed in volumetric mode.
-- `cycleSpeed` (number) — glyph cycling speed.
-- `fallSpeed` (number) — falling speed.
-- `raindropLength` (number) — raindrop length / spacing control.
-- `dropLength` (number) — alias of `raindropLength`.
-- `slant` (number) — slant angle in **degrees**.
-- `angle` (number) — alias of `slant`.
+- `numColumns` (int): size of the glyph grid, clamped to 1–256.
+- `width` (int): alias of `numColumns`.
+- `density` (number): volumetric density multiplier, clamped to 0.01–4.
+- `resolution` (number): render resolution scale factor, clamped to 0.05–2.
+- `animationSpeed` (number): global animation multiplier.
+- `forwardSpeed` (number): forward motion speed in volumetric mode.
+- `cycleSpeed` (number): glyph cycling speed.
+- `fallSpeed` (number): falling speed.
+- `raindropLength` (number): raindrop length / spacing control.
+- `dropLength` (number): alias of `raindropLength`.
+- `slant` (number): slant angle in **degrees**.
+- `angle` (number): alias of `slant`.
 
 #### Quality / performance knobs
 
-- `fps` (number) — target FPS (0–60).
-- `bloomSize` (number) — bloom size (0–1).
-- `bloomStrength` (number) — bloom strength (0–1).
-- `ditherMagnitude` (number) — dithering amount (0–1).
+- `fps` (number): target FPS (0–60).
+- `bloomSize` (number): bloom size (0–1).
+- `bloomStrength` (number): bloom strength (0–1).
+- `ditherMagnitude` (number): dithering amount (0–1).
 
 #### Feature toggles and click controls
 
-- `camera` (bool) — enables webcam input (used by the mirror effect).
-- `clickRipples` (bool) — enables click-triggered ripples in non-mirror rain effects such as `stripes`, `palette`, or `image`.
-- `clickRippleShape` (string) — click ripple shape: `circle` (default), `box`, `triangle`, or `star`. Invalid values fall back to `circle`.
-- `volumetric` (bool) — enables volumetric/3D rendering.
-- `glyphFlip` (bool) — flips glyphs horizontally.
-- `loops` (bool) — loop mode (WIP).
-- `once` (bool) — render a single frame then stop.
-- `skipIntro` (bool) — when `false`, starts from the intro/blank-screen sequence (web default is `true`).
-- `suppressWarnings` (bool) — suppresses startup notices (e.g., hardware acceleration warning).
-- `isometric` (bool) — experimental mode toggle.
+- `camera` (bool): enables webcam input (used by the mirror effect).
+- `clickRipples` (bool): enables click-triggered ripples in non-mirror rain effects such as `stripes`, `palette`, or `image`.
+- `clickRippleShape` (string): click ripple shape: `circle` (default), `box`, `triangle`, or `star`. Invalid values fall back to `circle`.
+- `volumetric` (bool): enables volumetric/3D rendering.
+- `glyphFlip` (bool): flips glyphs horizontally.
+- `loops` (bool): loop mode (WIP).
+- `once` (bool): render a single frame then stop.
+- `skipIntro` (bool): when `false`, starts from the intro/blank-screen sequence (web default is `true`).
+- `suppressWarnings` (bool): suppresses startup notices (e.g., hardware acceleration warning).
+- `isometric` (bool): experimental mode toggle.
 
 #### Glyph / color controls
 
-- `glyphRotation` (number) — rotate glyphs (degrees).
-- `cursorIntensity` (number) — cursor glow intensity (>= 0).
-- `glyphIntensity` (number) — glyph brightness multiplier (>= 0), the third of the set with
+- `glyphRotation` (number): rotate glyphs (degrees).
+- `cursorIntensity` (number): cursor glow intensity (>= 0).
+- `glyphIntensity` (number): glyph brightness multiplier (>= 0), the third of the set with
   `cursorIntensity` and `glintIntensity`. Default 1 leaves the render unchanged, 0 removes the
   glyphs entirely, higher values brighten them until they clamp. Applies to the palette and
   stripe effects in both renderers, which is exactly where its two siblings apply; the image
@@ -336,37 +358,37 @@ The following arguments are recognized by the upstream `web/js/config.js` URL pa
 Color values are typically provided as comma-separated triples. RGB values are usually in the 0–1 range.
 
 - `backgroundColor` (R,G,B)
-- `backgroundRGB` (R,G,B) — alias of `backgroundColor`
+- `backgroundRGB` (R,G,B): alias of `backgroundColor`
 - `backgroundHSL` (H,S,L)
 
 - `cursorColor` (R,G,B)
-- `cursorRGB` (R,G,B) — alias of `cursorColor`
+- `cursorRGB` (R,G,B): alias of `cursorColor`
 - `cursorHSL` (H,S,L)
 
 - `glintColor` (R,G,B)
-- `glintRGB` (R,G,B) — alias of `glintColor`
+- `glintRGB` (R,G,B): alias of `glintColor`
 - `glintHSL` (H,S,L)
 
 Palettes and stripes are lists:
 
-- `palette` (R,G,B,at,R,G,B,at,...) — where `at` is a stop position (typically 0–1).
-- `paletteRGB` — alias of `palette`
+- `palette` (R,G,B,at,R,G,B,at,...): where `at` is a stop position (typically 0–1).
+- `paletteRGB`: alias of `palette`
 - `paletteHSL` (H,S,L,at,H,S,L,at,...)
 
-- `stripeColors` (R,G,B,R,G,B,...) — stripe color sequence.
-- `stripeRGB` — alias of `stripeColors`
+- `stripeColors` (R,G,B,R,G,B,...): stripe color sequence.
+- `stripeRGB`: alias of `stripeColors`
 - `stripeHSL` (H,S,L,H,S,L,...)
-- `colors` — alias of `stripeColors`
+- `colors`: alias of `stripeColors`
 
 `stripeColors` is used by stripe-based effects only: `stripes`, `customStripes`, `pride`, `trans`, and `transPride`.
 
 #### Image effect
 
-- `url` (string) — image URL to load when `effect=image`.
+- `url` (string): image URL to load when `effect=image`.
 
 #### Advanced / debug
 
-- `testFix` (string) — internal compatibility/debug switch used by the upstream project.
+- `testFix` (string): internal compatibility/debug switch used by the upstream project.
 
 ## Build (Visual Studio)
 
@@ -406,12 +428,12 @@ Output: `publish\win-x64-fd\`, containing `MatrixDesktop.exe`,
 dependencies.
 
 Requires the **.NET 10 Desktop Runtime** on the target machine. Publish both projects
-together and at the same version — the script does this, and
+together and at the same version: the script does this, and
 `Portable-win-x64-framework-dependent.pubxml` explains why it matters.
 
 ### Option B (experimental): trimmed self-contained folder
 
-A size optimization only. It publishes **`MatrixDesktop.exe` alone — no configurator** — and
+A size optimization only. It publishes **`MatrixDesktop.exe` without the configurator**.
 IL trimming can break code that relies on reflection or COM activation in ways that only
 show up at runtime. Validate on your target machines before shipping it.
 
@@ -433,19 +455,23 @@ publish (NETSDK1176), so it never produced an executable.
 
 ## Verification gate
 
-`tests\run-gate.ps1` is the pre-release check: 43 checks with a desktop session, 14 of them
-in tier 1, which is what CI runs.
+`tests\run-gate.ps1` is the pre-release check. CI calls its tier 1 checks once, including
+the build and publish, rather than maintaining a second build sequence.
 
 ```pwsh
-pwsh -File tests\run-gate.ps1 -Tier1Only   # 14 checks, what CI runs, no session needed
-pwsh -File tests\run-gate.ps1              # 43 checks, adds the runtime smoke tiers
+powershell.exe -NoProfile -File tests\run-gate.ps1 -Tier1Only
+powershell.exe -NoProfile -File tests\run-gate.ps1
+pwsh -NoProfile -File tests\run-gate.ps1 -Tier1Only # the CI shell
 ```
 
 Tier 1 covers everything that does not need an interactive desktop session: a zero-warning
-build, the 86-test regression harness, `node --check` over every first-party web module,
+build, the native regression harness, renderer lifecycle and UC3D scenario tests,
+the media importer's synthetic tests, `node --check` over every first-party web module,
 every referenced shader and asset resolving, a headless DOM smoke, the embedded argument
 guide, a window icon in both executables at every size the app asks for, the guide header's
-version matching both csproj, and the publish payload. The runtime tiers create real windows
+version matching both csproj, embedded source-line symbols, and the publish payload.
+The UC3D WebGL browser smoke checks rendered picture colors and relief as well as
+animation and disposal. The runtime tiers create real windows
 and capture frames, so they need an attached session and cannot run on a headless runner.
 
 One tier-1 check is about the gate itself: it asserts the publish flags it uses appear in
@@ -455,7 +481,7 @@ which is exactly what it used to do.
 The headless DOM smoke (`tests/web-smoke.py`, Playwright + Chromium) is worth calling out,
 because it exists to catch the one thing the runtime tiers structurally cannot. Those tiers
 photograph the real windows and measure pixel statistics, and a window whose footer has been
-pushed off-screen still measures perfectly healthy — which is exactly how v1.0.2 shipped a
+pushed off-screen still measures perfectly healthy: which is exactly how v1.0.2 shipped a
 configurator with its whole command panel out of view. So these assertions are geometric:
 bounding boxes inside the viewport, shell height equal to the viewport, the field list
 actually scrolling, the command panel staying under 30% of the window, the preview pane's
@@ -470,13 +496,19 @@ If Playwright is not installed for the interpreter it finds, the gate reports th
 not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific
 interpreter to override the search.
 
+Installed Edge can exercise both UC3D rendering backends with
+`python tests\uc3d-browser.py --renderer both --channel msedge`. The separate published-app
+and desktop-snapshot probes are documented in [SMOKE_TEST_PLAN.md](SMOKE_TEST_PLAN.md).
+Use an interpreter with Playwright and Pillow installed. A missing WebGPU adapter reports
+unverified coverage; it does not establish a WebGPU pass.
+
 Exit codes:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Pass. Every check that ran, passed. |
+| `0` | Pass. Every selected check ran and passed. |
 | `1` | A real failure. At least one check failed and the cause is in the code or the repo. |
-| `2` | Something could not be verified — a check was skipped for lack of an interactive session, missing build output, or similar. Not a pass; the skipped list is printed. |
+| `2` | Something could not be verified: a check was skipped for lack of an interactive session, missing build output, or similar. Not a pass; the skipped list is printed. |
 | `3` | The gate itself broke. Treat as a harness bug, not a product failure. |
 
 Exit 2 is worth treating as acceptable in CI while still printing the not-verified list,
@@ -502,7 +534,7 @@ which is what `ci.yml` does. Exit 1 and 3 fail the build.
 
 ## Attribution / License
 
-The `MatrixDesktop` wrapper code in this repository is licensed under the **MIT License** — see
+The `MatrixDesktop` wrapper code in this repository is licensed under the **MIT License**: see
 [`LICENSE`](LICENSE). That covers `MatrixDesktop/`, `MatrixDesktopConfigurator/`, `Shared/`, and
 `tests/`.
 
@@ -511,7 +543,6 @@ which is also MIT licensed, copyright (c) 2018 Rezmason. Its license text is at
 `MatrixDesktop/web/LICENSE` and is reproduced at the bottom of the root `LICENSE`. Both licenses
 are MIT, so the combined work distributes under MIT with both copyright notices retained.
 
-It is a fork, not a pristine copy: 16 files under `web/` carry local changes.
-See [`VENDORING.md`](VENDORING.md) for the exact list, the fork point, and how to diff against
-upstream.
+The web tree includes local modifications and new modules. See [`VENDORING.md`](VENDORING.md)
+for the change inventory, the unrecorded upstream fork point, and refresh instructions.
 

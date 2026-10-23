@@ -1,3 +1,4 @@
+import createResourceOwner, { ownDevice } from "../resourceOwner.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeComputeTarget, loadShader, makeUniformBuffer, makeBindGroup, makePass } from "./utils.js";
 
@@ -24,7 +25,7 @@ const makePyramid = (device, size, pyramidHeight) =>
 				)
 			);
 
-const destroyPyramid = (pyramid) => pyramid?.forEach((texture) => texture.destroy());
+
 
 const makePyramidLevelView = (pyramid, level) => pyramid[level].createView();
 
@@ -33,7 +34,10 @@ const makePyramidViews = (pyramid) => pyramid.map((tex) => tex.createView());
 // The bloom pass is basically an added blur of the rain pass's high-pass output.
 // The blur approximation is the sum of a pyramid of downscaled, blurred textures.
 
-export default ({ config, device }) => {
+export default ({ config, device: nativeDevice }) => {
+	const owner = createResourceOwner();
+	const device = ownDevice(owner, nativeDevice);
+
 	const pyramidHeight = 4;
 	const bloomSize = config.bloomSize;
 	const bloomStrength = config.bloomStrength;
@@ -44,7 +48,7 @@ export default ({ config, device }) => {
 	// If there's no bloom to apply, return a no-op pass with an empty bloom texture
 	if (!enabled) {
 		const emptyTexture = makeComputeTarget(device, [1, 1]);
-		return makePass("No Bloom", null, (size, inputs) => ({ ...inputs, bloom: emptyTexture }));
+		return makePass("No Bloom", null, (size, inputs) => ({ ...inputs, bloom: emptyTexture }), null, owner.cleanup);
 	}
 
 	const assets = [loadShader(device, "shaders/wgsl/bloomBlur.wgsl"), loadShader(device, "shaders/wgsl/bloomCombine.wgsl")];
@@ -104,13 +108,13 @@ export default ({ config, device }) => {
 		// Since the bloom is blurry, we downscale everything
 			scaledScreenSize = screenSize.map((x) => Math.max(1, Math.floor(x * bloomSize)));
 
-		destroyPyramid(hBlurPyramid);
+		hBlurPyramid?.forEach(owner.release);
 		hBlurPyramid = makePyramid(device, scaledScreenSize, pyramidHeight);
 
-		destroyPyramid(vBlurPyramid);
+		vBlurPyramid?.forEach(owner.release);
 		vBlurPyramid = makePyramid(device, scaledScreenSize, pyramidHeight);
 
-		output?.destroy();
+		owner.release(output);
 		output = makeComputeTarget(device, scaledScreenSize);
 
 		hBlurBindGroups = [];
@@ -160,5 +164,5 @@ export default ({ config, device }) => {
 		computePass.end();
 	};
 
-	return makePass("Bloom", loaded, build, run);
+	return makePass("Bloom", loaded, build, run, owner.cleanup);
 };

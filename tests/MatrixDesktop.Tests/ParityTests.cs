@@ -154,6 +154,20 @@ internal static class ParityTests
         }
         Check.True(MatrixDesktop.Shared.FlagNormalization.ParseBool(null, true), "a missing value falls back to the caller's default");
         Check.True(MatrixDesktop.Shared.FlagNormalization.ParseBool("   ", true), "a blank value falls back to the caller's default");
+        foreach (var v in new[] { "truthy", "untrue", "nottrue", "true-ish", "maybe" })
+        {
+            Check.False(MatrixDesktop.Shared.FlagNormalization.ParseBool(v, true), $"'{v}' is not a boolean spelling");
+            Check.Equal("camera=false", MatrixDesktop.MatrixArgs.BuildQueryString(["--camera", v]), $"CLI rejects '{v}'");
+            Check.Equal("camera=false", MatrixDesktop.MatrixArgs.BuildQueryString(["?camera=" + v]), $"raw query rejects '{v}'");
+            var metadata = ArgumentCatalog.Create();
+            var importer = new ArgumentImporter(metadata);
+            foreach (var command in new[] { "--camera " + v, "?camera=" + v })
+            {
+                var result = importer.Import(command, new CommandBuilder(metadata).CreateDefaultDraft());
+                Check.False(result.Draft["camera"]!.GetValue<bool>(), $"import rejects '{command}' like direct launch");
+            }
+        }
+        Check.False(MatrixDesktop.Shared.FlagNormalization.ParseBool(null, false), "missing false default stays false");
     }
 
     private static void KeyNormalisation()

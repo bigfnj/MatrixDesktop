@@ -1,3 +1,4 @@
+import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 import colorToRGB from "../colorToRGB.js";
 import { loadText, make1DTexture, makePassFBO, makePass } from "./utils.js";
 
@@ -27,7 +28,9 @@ const prideStripeColors = [
 	.map((color) => Array(2).fill(color))
 	.flat();
 
-export default ({ regl, config }, inputs) => {
+export default ({ regl: nativeRegl, config }, inputs) => {
+	const owner = createResourceOwner();
+	const regl = ownRegl(owner, nativeRegl);
 	const output = makePassFBO(regl, config.useHalfFloat);
 
 	const { backgroundColor, cursorColor, glintColor, cursorIntensity, glintIntensity, glyphIntensity, ditherMagnitude } = config;
@@ -69,6 +72,7 @@ export default ({ regl, config }, inputs) => {
 			if (shouldRender) {
 				render({ frag: stripePassFrag.text() });
 			}
-		}
+		},
+		owner.cleanup
 	);
 };

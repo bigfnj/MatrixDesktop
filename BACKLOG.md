@@ -2,13 +2,14 @@
 
 ## Picking this up cold
 
-State as of **v1.0.5**, 2026-09-11. `main` is clean, tagged, CI and Release green.
+State as of **v1.1.0**, 2026-10-23. UC3D integration and the current Open items are
+resolved below. Deferred product features remain a separate-session list by owner decision.
 
 **Verify before you trust anything.** One command, and it is the whole story:
 
 ```pwsh
-pwsh -File tests\run-gate.ps1              # 43 checks, needs a desktop session
-pwsh -File tests\run-gate.ps1 -Tier1Only   # 14 checks, what CI runs, no session needed
+pwsh -File tests\run-gate.ps1              # 49 checks, needs a desktop session
+pwsh -File tests\run-gate.ps1 -Tier1Only   # 19 checks, what CI runs, no session needed
 ```
 
 Exit `0` pass, `1` fail, `2` could not verify, `3` the gate itself broke. **`2` is not a pass.**
@@ -26,9 +27,11 @@ gate is decoration.
 
 | Layer | Catches | Blind to |
 | --- | --- | --- |
-| `tests\MatrixDesktop.Tests` (86 tests, console EXE, exit code is the result) | argument parsing, command building, colour maths, storage, and drift between the guide, `ArgumentCatalog` and `config.js` | anything that renders |
+| `tests\MatrixDesktop.Tests` (98 tests, console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
 | `tests\web-smoke.py` (13 checks, headless Chromium, runs in CI) | geometry, theme contrast, whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+| `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
+| `tests\uc3d-browser.py`, `tests\native-uc3d-smoke.py` | actual backend readiness, picture/depth behavior and published native media delivery | physical Looking Glass hardware |
 
 That middle blind spot is not hypothetical. v1.0.2 shipped with the configurator's entire
 command panel below the bottom of the window and every pixel statistic looked fine.
@@ -57,21 +60,70 @@ two of them used to share the heading "Worth doing", which is how a v1.0.5 summa
 claim the backlog was empty when three items were still open. Anything struck through below
 has shipped.
 
-Nothing here is blocking, and nothing here is a defect a user can currently hit.
+No active items remain in the agreed scope. This closure ledger preserves every former
+Open row; the historical sections below describe their original diagnoses.
 
-| Open | Where | Shape |
+| Former Open item | Disposition | Implementation and checkable evidence |
 | --- | --- | --- |
-| Release builds carry no line numbers in crash traces | `DebugType=none` in both csproj | Small, but measuring the size delta has twice been defeated by incremental build |
-| CI and the gate both build and publish | `ci.yml`, `tests/run-gate.ps1` | Needs a decision, not code: does CI keep its own payload assertions or defer to the gate |
-| The two boolean parsers disagree | `Shared/FlagNormalization.cs`, `web/js/config.js:402` | `--topmost truthy` is true, `--camera truthy` is false |
-| No `quiltPass` in the WebGPU pipeline | `web/js/webgpu/` | Larger: port the pass, or document the gap |
-| `version=holoplay` renders garbage on ordinary hardware | `web/js/regl/lkgHelper.js` | Larger: the hardcoded fallback device is wrong, the timeout only stops it hanging |
-| Per-pass GPU disposal is incomplete | `web/js/regl/`, `web/js/webgpu/` | Hygiene; the browser reclaims these on context loss |
-| Two upstream shader/FBO defects | `bloomCombine.wgsl`, `regl/bloomPass.js` | Reportable to Rezmason; deliberately unfixed under `VENDORING.md` policy |
-| WebGPU reads `canvas.clientWidth` every frame | `web/js/webgpu/main.js:172` | Watching, not acting: non-default renderer, rewiring risks more than it saves |
+| Release builds carry no line numbers | FIXED | Embedded symbols in both projects, publish profiles, release and gate. Published exception stacks must contain source lines (`PublishedSymbols.cs`). Clean ReadyToRun comparison added 36,864 bytes across both assemblies. |
+| CI and gate duplicate build/publish | FIXED | `ci.yml` delegates build, tests and publish to the gate; independent browser setup remains. Gate nonzero results propagate. |
+| Boolean parsers disagree | FIXED | Both accept exact true/false aliases; unknown values are false. `untrue` was the actual substring defect. `renderer-lifecycle.mjs` and `ParityTests.cs`; substring mutation fails the named parity case. |
+| WebGPU lacks a quilt pass | FIXED | Holoplay requests route to REGL before the adapter probe and report that choice. `Holoplay uses REGL before any WebGPU adapter probe` kills an inverted selection mutation. Physical display certification remains unavailable. |
+| Ordinary hardware gets fake Holoplay calibration | FIXED | `lkgHelper.js` disables lenticular output on missing/invalid/late calibration. Lifecycle test exercises failures and valid calibration; fake-device mutation fails it. |
+| GPU disposal incomplete | FIXED | Explicit owners, per-pass cleanup, canceled loops and partial-init cleanup in both legacy renderers. All pass families tested across resize/double cleanup; missing cleanup mutation fails the matching pass. |
+| Two upstream shader/FBO defects | CLOSED-VERIFIED | `bloom-probe.py`: changing WGSL LOD to zero changed 0/8192 bytes; a halved-contribution witness changed 6719. REGL black placeholder format changed 0/3404 bytes; nonblack witness changed 3404. Placeholder disposal is fixed under GPU ownership; no upstream defect claim remains. |
+| WebGPU reads layout every frame | FIXED | `canvasSize.js` caches CSS dimensions with ResizeObserver and handles DPR changes. Test covers stable frames, CSS-only resize, hidden/restored canvas; per-frame-read mutation fails it. |
+| Features from other screensavers | FIXED / ACCEPTED-RECORDED | UC3D behavior is reconstructed as a separate scene with local importer, pictures, relief, motion, glyphs, clock, sound and snapshot options. Tests in `uc3d-tests.mjs`, `uc3d-browser.py`, `MediaCatalogTests.cs` and importer suite. Owner explicitly deferred ZMatrix to another session on 2026-10-23; source below retained. |
+
+### Findings resolved during UC3D integration
+
+| Finding | Disposition | Evidence |
+| --- | --- | --- |
+| Imported donor directory disabled unless pictures enabled | FIXED | Catalog dependency now permits glyph/audio-only imports. Native smoke exercises donor glyphs and effects. |
+| Preview granted no audio for its explicit Test sound action | FIXED | Audio resources are available while preview playback stays muted until requested. Native configurator smoke clicks Test sound. |
+| Native media handlers never receive mapped asset-host requests | FIXED | Granted resources use a separate intercepted local origin, with page-origin CORS and exact resource IDs. Native smoke fetches real bytes and rejects ungranted IDs. |
+| Preview iframe requests bypass the deprecated WebView2 request filter | FIXED | Request-source kinds explicitly include child frames. Published configurator test loads original glyphs, images and the selected sound. |
+| Fractional or oversized manifest schema crashes startup | FIXED | Numeric kind and TryGetInt32 validation reject invalid versions with a warning/folder fallback. Existing malformed-manifest regression includes fractional, oversized, string and null schemas. |
+| Fragment compilation failure leaves an untracked WebGL program and vertex shader | FIXED | `createProgram` releases shaders on every outcome and releases failed programs. Fake-GL regression varies both shader failures, linking failure and success; removing shader cleanup fails exactly that named case. |
+| Gate child-process checks share an existing user's WebView profile | FIXED | Gate uses an isolated test profile; full gate verifies each owned application's WebView children are reaped. |
+| New preset migration would resurrect deleted starters | FIXED | Seed version 3 introduces only the new UC3D preset to existing users. A reverted migration guard fails the named migration test. |
+| UC3D behavior differs from the original native renderer | ACCEPTED-RECORDED | `docs/UC3D.md` describes the original implementation and compatibility limits. Decompiled exports and donor media remain private; exact visual parity is not claimed. |
+
+ZMatrix, marketplace, OBS/Spout/NDI and per-monitor configurations remain deferred by the
+owner's explicit scope selection. They are not silently closed or part of this burn-down.
 
 Outside this repo: both EXEs are unsigned, so every download trips SmartScreen. That is a
 cross-repo code-signing decision, not a MatrixDesktop task.
+
+## Feature sources
+
+Features the owner wants offered as options here, taken from other Matrix screensavers. Added
+2026-10-22. None of these sources can be copied in as code, because this repo is MIT and public.
+Read each source for what it does, write that down, and build it fresh under `web/`.
+
+### ZMatrix, via bigfnj/zmatrix-modernized
+
+Deferred to a separate session at the owner's request (2026-10-23).
+
+[bigfnj/zmatrix-modernized](https://github.com/bigfnj/zmatrix-modernized) is the owner's Windows
+11 / VS 2026 x64 build of ZMatrix (copyright 2002 Z. Shaker), a C++ GDI renderer that draws on
+the desktop. **GPL v2** (`src/LICENSE.TXT`, `src/SourceCodeReadme.txt`), so its code cannot come
+into this repo. Candidate features, from its `README_Win11.md` and `src/default.cfg`:
+
+- Rain drawn on the desktop itself, behind the icons, by parenting to the `WorkerW` host across
+  the whole virtual screen. A live-wallpaper mode, where MatrixDesktop today is a fullscreen
+  window on top.
+- Blending with the existing wallpaper instead of covering it (`BGMode=bgmodeBitmap`,
+  `BlendMode=blendmodeOR`), with the background captured via `PaintDesktop`.
+- "Special string" streams: a phrase list (default `The matrix has you`) that falls as its own
+  stream at `SpecialStringStreamProbability=0.1`, with its own font and colours.
+- Per-stream speed variance (`SpeedVariance`), a separate fade colour, and a user-chosen font and
+  character set.
+- Trail cleanup modes (`MonotonousCleanupEnabled`, `RandomizedCleanupEnabled`, `BackTrace`). What
+  they do has not been read yet; it lives in `src/zsMatrix/zsMatrix.cpp`.
+
+Its bundled "Matrix Code Font" by e-RBi is described as freeware, free to distribute, in
+`src/readme.txt`.
 
 ## v1.0 — Completed
 

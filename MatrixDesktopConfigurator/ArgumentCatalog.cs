@@ -36,6 +36,7 @@ internal static class ArgumentCatalog
                 Title = "Theme",
                 Fields =
                 [
+                    Select("scene", "Scene", "web", "matrix", ("matrix", "Matrix"), ("uc3d", "UC3D")),
                     Select("version", "Version", "web", "classic",
                         ("classic", "Classic"),
                         ("3d", "3D"),
@@ -156,6 +157,39 @@ internal static class ArgumentCatalog
                     Number("bloomSize", "Bloom size", "web", 0.4, 0, 1, 0.01),
                     Number("bloomStrength", "Bloom strength", "web", 0.7, 0, 1, 0.01),
                     Number("ditherMagnitude", "Dither", "web", 0.05, 0, 1, 0.01),
+                ],
+            },
+            new ArgumentGroup
+            {
+                Id = "uc3d",
+                Title = "UC3D",
+                Fields =
+                [
+                    Color("codeColor", "Normal code color", "web", 0, 0.698, 0),
+                    Toggle("donorGlyphs", "Use local donor glyphs", "web", false, "donorGlyphs", help: "Use the original character atlas from your imported donor media folder."),
+                    Toggle("shadedLines", "Shaded 2D lines", "web", true, "shadedLines"),
+                    Toggle("sidewaysMovement", "Sideways movement", "web", false, "sidewaysMovement"),
+                    Toggle("mouseRotation", "Mouse-controlled rotation", "web", false, "mouseRotation", help: "Move the mouse to rotate; right-click stops, left-click resets, wheel rolls. Resets after 20 seconds idle."),
+                    Toggle("codeRotation", "Automatic 3D rotation", "web", true, "codeRotation"),
+                    Toggle("forwardMovement", "Forward/back movement", "web", true, "forwardMovement"),
+                    Toggle("randomForwardMovement", "Random forward/back movement", "web", false, "randomForwardMovement"),
+                    Toggle("showPictures", "Form pictures from code", "web", false, "showPictures"),
+                    Toggle("pictureMonochrome", "Monochrome pictures", "web", true, "pictureMonochrome"),
+                    Toggle("pictureCaptions", "Picture captions", "web", true, "pictureCaptions"),
+                    Toggle("showClock", "Show clock", "web", false, "showClock"),
+                    Toggle("clock12Hour", "12-hour clock", "web", false, "clock12Hour"),
+                    Toggle("desktopBackground", "Desktop snapshot background", "web", false, "desktopBackground", help: "Capture the desktop once when the app starts. This is a snapshot, not live wallpaper."),
+                    Number("pictureDepth", "Picture relief depth", "web", 0, 0, 2, 0.05, "3D luminance relief. Set to zero for a flat picture."),
+                    Number("pictureScale", "Picture scale", "web", 1, 0.1, 3, 0.05, "Aspect-preserving picture size."),
+                    Number("pictureDelay", "Picture delay (seconds)", "web", 20, 1, 180, 1, "Wait between picture sequences."),
+                    Number("pictureDuration", "Picture duration (seconds)", "web", 8, 1, 60, 1, "How long a picture sequence lasts."),
+                    Number("clockSize", "Clock size", "web", 1, 0.25, 4, 0.1, "Scale of the centered clock."),
+                    Number("soundVolume", "Sound volume", "web", 0.25, 0, 1, 0.05, "Preview starts muted. Use its Test sound button or Test Argument to hear sound."),
+                    Select("pictureSource", "Picture source", "web", "all", ("all", "All available pictures"), ("matrix", "The Matrix"), ("reloaded", "Reloaded"), ("revolutions", "Revolutions"), ("custom", "My pictures")),
+                    Text("pictureDirectory", "My picture folder", "web", ""),
+                    Text("donorDirectory", "Local donor media folder", "web", ""),
+                    Select("sound", "Sound", "web", "off", ("off", "None"), ("effects", "Code sizzle"), ("music", "Ambient music / local file")),
+                    Text("musicFile", "Local music file (optional)", "web", ""),
                 ],
             },
             new ArgumentGroup

@@ -1,5 +1,10 @@
 using MatrixDesktop.Tests;
 
+if (args.Length >= 2 && args[0] == "--verify-published-symbols")
+{
+    return PublishedSymbols.Verify(args[1..]);
+}
+
 // Secondary mode: write the loadState payload the configurator's WebView2 host would send,
 // so tests\web-smoke.py can drive configurator\index.html in headless Chromium without a
 // WebView2 host at all.
@@ -24,6 +29,7 @@ tests.AddRange(CommandBuilderTests.All);
 tests.AddRange(ParityTests.All);
 tests.AddRange(GuideTests.All);
 tests.AddRange(StorageTests.All);
+tests.AddRange(MediaCatalogTests.All);
 
 var failures = 0;
 foreach ((string name, Action test) in tests)

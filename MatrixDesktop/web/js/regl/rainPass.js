@@ -1,3 +1,4 @@
+import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 import { loadImage, loadText, makePassFBO, makeDoubleBuffer, makePass } from "./utils.js";
 import createClickRipples from "../clickRipples.js";
 
@@ -33,7 +34,9 @@ const blVert = [1, 0];
 const brVert = [1, 1];
 const quadVertices = [tlVert, trVert, brVert, tlVert, brVert, blVert];
 
-export default ({ regl, config, lkg, canvas }) => {
+export default ({ regl: nativeRegl, config, lkg, canvas }) => {
+	const owner = createResourceOwner();
+	const regl = ownRegl(owner, nativeRegl);
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
 	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
 
@@ -223,8 +226,8 @@ export default ({ regl, config, lkg, canvas }) => {
 		viewport: regl.prop("viewport"),
 
 		attributes: {
-			aPosition: quadPositions,
-			aCorner: Array(numQuads).fill(quadVertices),
+			aPosition: regl.buffer(quadPositions),
+			aCorner: regl.buffer(Array(numQuads).fill(quadVertices)),
 		},
 		count: numQuads * numVerticesPerQuad,
 
@@ -333,6 +336,6 @@ export default ({ regl, config, lkg, canvas }) => {
 				}
 			}
 		},
-		clickRipples.cleanup
+		() => { clickRipples.cleanup(); owner.cleanup(); }
 	);
 };

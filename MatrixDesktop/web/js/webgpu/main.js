@@ -1,3 +1,4 @@
+import createCanvasSize from "../canvasSize.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
 
@@ -33,9 +34,21 @@ const effects = {
 };
 
 export default async (canvas, config) => {
+	if (config.scene === "uc3d") {
+		return (await import("./uc3dPass.js")).default(canvas, config);
+	}
 	await loadJS("lib/gl-matrix.min.js");
 	let pipeline = null;
 	let cleanedUp = false;
+	let initialized = false;
+	let device;
+	let canvasContext;
+	let frameRequest;
+	let sizeTracker;
+	const destroyContext = () => {
+		canvasContext?.unconfigure();
+		device?.destroy();
+	};
 
 	const dblclickHandler = () => {
 		if (document.fullscreenElement == null) {
@@ -65,10 +78,14 @@ export default async (canvas, config) => {
 			return;
 		}
 		cleanedUp = true;
+		window.removeEventListener("pagehide", cleanup);
+		cancelAnimationFrame(frameRequest);
+		sizeTracker?.cleanup();
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
 		}
 		pipeline?.cleanup?.();
+		if (initialized) destroyContext();
 		if (config.useCamera) {
 			stopCamera();
 		}
@@ -80,6 +97,7 @@ export default async (canvas, config) => {
 	// actually releases the webcam and turns its indicator off. pagehide covers navigation
 	// and window close, and it fires for the configurator's preview iframe every reload.
 	window.addEventListener("pagehide", cleanup, { once: true });
+	try {
 
 	if (config.useCamera) {
 		await setupCamera();
@@ -90,8 +108,8 @@ export default async (canvas, config) => {
 	if (!adapter) {
 		throw new Error("WebGPU not supported: no GPU adapter available");
 	}
-	const device = await adapter.requestDevice();
-	const canvasContext = canvas.getContext("webgpu");
+	device = await adapter.requestDevice();
+	canvasContext = canvas.getContext("webgpu");
 
 	// console.table(device.limits);
 
@@ -151,9 +169,12 @@ export default async (canvas, config) => {
 	let last = NaN;
 
 	let outputs;
+	let built = false;
 	const canvasSize = [0, 0];
+	sizeTracker = createCanvasSize(canvas, config.resolution);
 
 	const renderLoop = (now) => {
+		if (cleanedUp) return;
 		if (isNaN(start)) {
 			start = now;
 		}
@@ -169,15 +190,14 @@ export default async (canvas, config) => {
 			}
 		}
 
-		const devicePixelRatio = window.devicePixelRatio ?? 1;
-		const canvasWidth = Math.max(1, Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution));
-		const canvasHeight = Math.max(1, Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution));
+		const [canvasWidth, canvasHeight] = sizeTracker.get();
 		canvasSize[0] = canvasWidth;
 		canvasSize[1] = canvasHeight;
-		if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
+		if (!built || canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
 			canvas.width = canvasWidth;
 			canvas.height = canvasHeight;
 			outputs = pipeline.build(canvasSize);
+			built = true;
 		}
 
 		if (config.useCamera) {
@@ -194,11 +214,26 @@ export default async (canvas, config) => {
 		device.queue.submit([encoder.finish()]);
 
 		if (!config.once) {
-			requestAnimationFrame(renderLoop);
+			frameRequest = requestAnimationFrame(renderLoop);
 		} else {
-			cleanup();
+			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
+			if (config.useCamera) stopCamera();
 		}
 	};
 
-	requestAnimationFrame(renderLoop);
+	initialized = true;
+	if (cleanedUp) {
+		pipeline?.cleanup?.();
+		sizeTracker?.cleanup();
+		destroyContext();
+		return;
+	}
+	frameRequest = requestAnimationFrame(renderLoop);
+	} catch (error) {
+		const closing = cleanedUp;
+		initialized = true;
+		cleanup();
+		destroyContext();
+		if (!closing) throw error;
+	}
 };
