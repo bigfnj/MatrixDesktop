@@ -93,6 +93,23 @@ await test("camera is requested only by the mirror effect", () => {
 	assert.equal(makeConfig({ camera: "true" }).useCamera, false, "the default palette effect must not open the camera");
 });
 
+await test("an intro that cannot progress is skipped instead of rendering nothing", () => {
+	const warnings = [], warn = console.warn;
+	console.warn = (message) => warnings.push(String(message));
+	try {
+		for (const speeds of [{ fallSpeed: "0" }, { animationSpeed: "0" }, { animationSpeed: "-1" }, { fallSpeed: "-0.3" }]) {
+			const before = warnings.length;
+			assert.equal(makeConfig({ skipIntro: "false", ...speeds }).skipIntro, true, JSON.stringify(speeds));
+			assert.equal(warnings.length, before + 1, `${JSON.stringify(speeds)} must say why the intro was skipped`);
+		}
+		const before = warnings.length;
+		assert.equal(makeConfig({ skipIntro: "false" }).skipIntro, false, "default speeds keep the intro");
+		assert.equal(makeConfig({ skipIntro: "false", animationSpeed: "-1", fallSpeed: "-0.3" }).skipIntro, false, "two negative speeds still progress");
+		assert.equal(makeConfig({ skipIntro: "false", scene: "uc3d", animationSpeed: "0" }).skipIntro, false, "UC3D has no intro sweep");
+		assert.equal(warnings.length, before, "an intro that can progress must not warn");
+	} finally { console.warn = warn; }
+});
+
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {
 	let disconnects = 0;
 	const run = (behavior) => getLKG(true, { timeoutMs: 5, loadCore: async () => ({ Client: class {

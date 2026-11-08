@@ -699,6 +699,12 @@ export default (urlParams) => {
 	}
 	if (config.scene === "uc3d" && config.uc3dControls === "legacy" && validParams.bloomStrength == null)
 		config.bloomStrength = defaults.bloomStrength;
+	// The Matrix intro sweep advances by animationSpeed * fallSpeed. At zero, or with opposite
+	// signs, it never reaches the bottom row, so the rain would stay black (or saturate).
+	if (config.scene === "matrix" && !config.skipIntro && config.animationSpeed * config.fallSpeed <= 0) {
+		console.warn(`skipIntro=false ignored: the intro cannot progress at animationSpeed ${config.animationSpeed} and fallSpeed ${config.fallSpeed}.`);
+		config.skipIntro = true;
+	}
 
 	if (config.bloomSize <= 0) {
 		config.bloomStrength = 0;
