@@ -63,6 +63,17 @@ internal sealed class NativeMediaBridge : IDisposable
         _configuration = "";
     }
 
+    // Before the window is shown, take only what must precede it: the UC3D desktop
+    // snapshot, which a screen copy would otherwise take of this window. Prepare does
+    // the rest once the asset root is known, so ZMatrix work is never built twice.
+    internal void CaptureDesktopBeforeShow(string query, Rectangle captureBounds)
+    {
+        if (_disposed || _desktop is not null) return;
+        var options = ParseQuery(query);
+        if (options.TryGetValue("scene", out var scene) && scene.Equals("uc3d", StringComparison.OrdinalIgnoreCase) && Enabled(options, "desktopBackground"))
+            CaptureDesktop(captureBounds);
+    }
+
     internal void Prepare(string query, Rectangle captureBounds, int atlasDpi = 96)
     {
         if (_disposed || (query == _configuration && captureBounds == _captureBounds && atlasDpi == _atlasDpi)) return;

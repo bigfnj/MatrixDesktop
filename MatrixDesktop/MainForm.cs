@@ -92,8 +92,9 @@ public sealed class MainForm : Form
         BackColor = System.Drawing.Color.Black;
 
         _startupQueryString = MatrixArgs.BuildQueryString(passthroughArgs);
-        // Capture the requested desktop before this window is shown.
-        _mediaBridge.Prepare(_startupQueryString, CaptureBounds);
+        // Capture the requested desktop before this window is shown; the full
+        // preparation waits for the staged web root in InitializeCurrentWebViewAsync.
+        _mediaBridge.CaptureDesktopBeforeShow(_startupQueryString, CaptureBounds);
 
         _webView = CreateWebView(GetAppDataUserDataFolder());
         Controls.Add(_webView);

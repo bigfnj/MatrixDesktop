@@ -14,7 +14,13 @@ internal static class NativeBridgeTests
         ("Native bridge takes the UC3D desktop from the wallpaper for wallpaper and preview hosts", DesktopSourceFollowsHostKind),
         ("Native bridge refresh re-reads a wallpaper-sourced UC3D desktop only", RefreshRereadsWallpaperDesktop),
         ("Native bridge bootstrap marks only wallpaper, /s and /p hosts non-interactive", InteractiveFollowsHostKind),
+        ("Native bridge ZMatrix startup prepares once", ZMatrixStartupPreparesOnce),
+        ("Native bridge UC3D snapshot precedes show and survives startup", Uc3dSnapshotPrecedesShow),
     ];
+
+    // MainForm's startup order: the constructor runs the before-show step, then
+    // InitializeCurrentWebViewAsync sets the staged web root and prepares.
+    private static readonly string StagedRoot = Path.Combine(AppContext.BaseDirectory, "staged-web-root");
 
     private static readonly Rectangle Small = new(0, 0, 32, 32);
     private static readonly Rectangle Virtual = new(-1920, -120, 3840, 1200);
@@ -132,5 +138,33 @@ internal static class NativeBridgeTests
                     $"The {name} bootstrap must carry interactive={interactive.ToString().ToLowerInvariant()}, got {value}.");
             }
         }
+    }
+
+    private static void ZMatrixStartupPreparesOnce()
+    {
+        const string query = "scene=zmatrix";
+        var captures = new Captures();
+        using var bridge = Bridge(NativeHostKind.Wallpaper, captures);
+        bridge.CaptureDesktopBeforeShow(query, Virtual);
+        bridge.SetAssetRoot(StagedRoot);
+        bridge.Prepare(query, Virtual, 96);
+        var bootstrap = Bootstrap(bridge);
+        var generation = bootstrap.GetProperty("nativeGeneration").GetInt32();
+        Require(captures.Wallpaper == 1 && generation == 1,
+            $"ZMatrix startup must capture the wallpaper once and publish generation 1: captures={captures.Wallpaper}, generation={generation}.");
+        Require(bootstrap.GetProperty("wallpaper").ValueKind == JsonValueKind.Object, "ZMatrix startup must still publish its wallpaper.");
+    }
+
+    private static void Uc3dSnapshotPrecedesShow()
+    {
+        const string query = "scene=uc3d&desktopBackground=true";
+        var captures = new Captures();
+        using var bridge = Bridge(NativeHostKind.Interactive, captures);
+        bridge.CaptureDesktopBeforeShow(query, Virtual);
+        Require(captures.Screen == 1, $"The UC3D screen snapshot must be taken before the window is shown: {captures.Screen} captures.");
+        bridge.SetAssetRoot(StagedRoot);
+        bridge.Prepare(query, Virtual, 96);
+        Require(captures.Screen == 1 && Bootstrap(bridge).GetProperty("desktopUrl").ValueKind == JsonValueKind.String,
+            $"The before-show snapshot must survive startup with no second capture: {captures.Screen} captures.");
     }
 }
