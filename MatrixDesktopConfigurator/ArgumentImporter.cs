@@ -303,7 +303,9 @@ internal sealed class ArgumentImporter
                 return ZMatrixControlProfile.ParseStructured(field, value);
 
             case "text":
-                return JsonValue.Create(value ?? string.Empty);
+                // A flag with no value is not applied. A copied command carries a value holding
+                // %, !, $ or a backtick as json64 text (CommandBuilder.AddWebTokens).
+                return value is null ? null : JsonValue.Create(global::Shared.StructuredArgumentCodec.DecodeText(value));
 
             case "color":
                 return ParseColor(value, isHsl);
@@ -494,7 +496,7 @@ internal sealed class ArgumentImporter
         catch (JsonException) { return false; }
     }
 
-    private static (string Key, string? Value) SplitKeyValue(string token, List<string> tokens, ref int index)
+    private (string Key, string? Value) SplitKeyValue(string token, List<string> tokens, ref int index)
     {
         var eq = token.IndexOf('=');
         if (eq >= 0)
@@ -509,7 +511,9 @@ internal sealed class ArgumentImporter
         }
 
         var next = (tokens[index + 1] ?? string.Empty).Trim();
-        if (LooksLikeKeyToken(next) && !(CanonicalKey(key) == "url" && next.Contains("://", StringComparison.Ordinal)))
+        // A text value is literal and may contain '=' (C:\Music\a=b.mp3, an image URL query),
+        // so after a text flag only an explicit flag or raw query starts another argument.
+        if (LooksLikeKeyToken(next) && !(IsTextKey(key) && !IsExplicitKeyToken(next)))
         {
             return (key, null);
         }
@@ -517,6 +521,13 @@ internal sealed class ArgumentImporter
         index++;
         return (key, next);
     }
+
+    private bool IsTextKey(string key)
+        => _fieldsByKey.TryGetValue(CanonicalKey(key), out var field) && field.Scope == "web" && field.Kind == "text";
+
+    private static bool IsExplicitKeyToken(string token)
+        => token.StartsWith("--", StringComparison.Ordinal) || token.StartsWith("/", StringComparison.Ordinal)
+           || token.StartsWith("?", StringComparison.Ordinal);
 
     private static bool LooksLikeKeyToken(string token)
     {

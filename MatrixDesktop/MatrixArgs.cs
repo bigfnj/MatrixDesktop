@@ -38,6 +38,18 @@ internal static class MatrixArgs
         "zmOpaqueBackground",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
+    // Literal text values: the configurator catalog's text-kind fields, which ParityTests
+    // hold this list to. A Windows file name or an image URL query can contain '=', so after
+    // one of these flags the next token is its value unless it is an explicit flag, and a
+    // copied command's json64 text value is decoded back to the literal here.
+    internal static readonly FrozenSet<string> TextKeys = new[]
+    {
+        "url",
+        "pictureDirectory",
+        "donorDirectory",
+        "musicFile",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
     public static bool IsHelpRequested(string[]? args)
     {
         if (args is null || args.Length == 0) return false;
@@ -134,7 +146,7 @@ internal static class MatrixArgs
                 if (i + 1 < args.Count)
                 {
                     var next = (args[i + 1] ?? string.Empty).Trim();
-                    if (!LooksLikeKeyToken(next))
+                    if (!LooksLikeKeyToken(next) || (TextKeys.Contains(key) && !IsExplicitKeyToken(next)))
                     {
                         value = next;
                         i++; // consume the value token
@@ -174,6 +186,11 @@ internal static class MatrixArgs
             if (BoolKeys.Contains(key))
             {
                 finalValue = NormalizeBoolValue(finalValue);
+            }
+            else if (TextKeys.Contains(key))
+            {
+                // Before escaping, so the renderer and the bridge's folder lookups see the value.
+                finalValue = global::Shared.StructuredArgumentCodec.DecodeText(finalValue);
             }
 
             final[key] = finalValue;
@@ -291,6 +308,11 @@ internal static class MatrixArgs
 
         return false;
     }
+
+    // A token that always starts another argument, even where a text value is expected.
+    private static bool IsExplicitKeyToken(string token)
+        => IsHelpToken(token) || token.StartsWith("--", StringComparison.Ordinal)
+           || token.StartsWith("/", StringComparison.Ordinal) || token.StartsWith("?", StringComparison.Ordinal);
 
     private static bool IsStructuredPair(string token)
     {

@@ -177,6 +177,8 @@ internal sealed partial class CommandBuilder
             var serialized = SerializeWebValue(field, value);
             if (encodeStructured && field.Kind is "font" or "characters" or "phrases")
                 serialized = global::Shared.StructuredArgumentCodec.Encode(serialized);
+            else if (encodeStructured && field.Kind == "text" && global::Shared.StructuredArgumentCodec.TextNeedsEncoding(serialized))
+                serialized = global::Shared.StructuredArgumentCodec.EncodeText(serialized);
             if (string.IsNullOrWhiteSpace(serialized))
             {
                 continue;
@@ -431,8 +433,11 @@ internal sealed partial class CommandBuilder
 
     // A copied command may be pasted into cmd.exe or PowerShell, where these
     // characters are shell-significant (an unquoted '&' in an image URL, for
-    // instance, would truncate the command). Wrapping the token in double
-    // quotes makes the whole value literal in both shells.
+    // instance, would truncate the command). Double quotes keep whitespace, '&',
+    // '|', '<', '>', '^' and parentheses literal in both shells, but not '%'
+    // (cmd and batch files expand it), '!' (delayed expansion), '$' or a
+    // backtick (PowerShell expands both). Text values holding those travel as
+    // json64 instead (AddWebTokens), as structured values always do.
     private static bool NeedsQuoting(string token)
     {
         foreach (var c in token)
