@@ -199,7 +199,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
                 var applied = _playback.Reasons;
                 var surface = _form;
                 if (surface is null || surface.IsDisposed || !_ready) return;
-                try { await surface.SetHostPausedAsync(applied != PauseReason.None, applied.ToString()); }
+                try { await surface.SetHostPausedAsync(applied != PauseReason.None, PlaybackPolicy.SuspendsRenderer(applied), applied.ToString()); }
                 catch when (surface.IsDisposed || !ReferenceEquals(surface, _form)) { }
                 if (applied != _playback.Reasons || !ReferenceEquals(surface, _form)) _reconcileRequested = true;
             }

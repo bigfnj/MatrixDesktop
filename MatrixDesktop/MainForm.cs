@@ -111,16 +111,20 @@ public sealed class MainForm : Form
         }
     }
 
-    internal async Task SetHostPausedAsync(bool paused, string reason)
+    // suspend comes from PlaybackPolicy.SuspendsRenderer. A pause that does not suspend only
+    // freezes the page, and brings back a renderer an earlier suspend hid (unlock while still
+    // manually paused), so the frozen frame stays on the desktop.
+    internal async Task SetHostPausedAsync(bool paused, bool suspend, string reason)
     {
         if (_isShuttingDown || IsDisposed) return;
-        if (!paused) _webView.CoreWebView2?.Resume();
+        var suspendRenderer = paused && suspend;
+        if (!suspendRenderer) _webView.CoreWebView2?.Resume();
         if (_webView.CoreWebView2 is not null)
         {
             var state = System.Text.Json.JsonSerializer.Serialize(new { paused, reason });
             await _webView.CoreWebView2.ExecuteScriptAsync($"window.matrixHostPlaybackState={state};window.dispatchEvent(new CustomEvent('matrix-host-state',{{detail:window.matrixHostPlaybackState}}));");
         }
-        if (paused) await TrySuspendWebViewAsync(reason);
+        if (suspendRenderer) await TrySuspendWebViewAsync(reason);
         else { _webView.Visible = true; _isSuspended = false; }
     }
 
@@ -346,6 +350,8 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Shared.Logger.Warn($"Failed to suspend WebView (reason='{reason}'): {ex.Message}");
+            // The hide above already happened; nothing else would ever show the renderer again.
+            try { if (!_isShuttingDown) _webView.Visible = true; } catch { /* shutdown race */ }
         }
         finally
         {

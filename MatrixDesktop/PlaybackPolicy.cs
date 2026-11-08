@@ -19,6 +19,12 @@ internal sealed class PlaybackPolicy
         return before != Reasons;
     }
 
+    // Only a lock, sleep or display-off hides and suspends the renderer. Every other pause
+    // (tray, fullscreen elsewhere, battery, shell recovery) freezes the page and leaves it
+    // visible, so the desktop keeps the frozen frame instead of black or the static wallpaper.
+    internal static bool SuspendsRenderer(PauseReason reasons) =>
+        (reasons & (PauseReason.Session | PauseReason.Suspend | PauseReason.DisplayOff)) != 0;
+
     internal static string ResolvePriority(string requested, bool wallpaper) =>
         requested == "auto" ? wallpaper ? "idle" : "normal" : requested;
 

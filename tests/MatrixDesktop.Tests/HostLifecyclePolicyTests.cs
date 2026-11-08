@@ -12,7 +12,28 @@ internal static class HostLifecyclePolicyTests
         ("Host write probe still reports a write-denied folder as unwritable", DeniedProbe),
         ("Host storage warns when it falls back past the preferred base folder", FallbackWarning),
         ("Host priority reports a class Windows did not grant", PriorityReadBack),
+        ("Host pause keeps the frozen frame visible unless lock, sleep or display-off took it away", PauseSuspension),
     ];
+
+    // AUD-06. Hiding and suspending the renderer for every pause put black or the static
+    // wallpaper on the desktop for a tray pause, a fullscreen app on another monitor or battery.
+    private static void PauseSuspension()
+    {
+        const PauseReason hiding = PauseReason.Session | PauseReason.Suspend | PauseReason.DisplayOff;
+        var flags = Enum.GetValues<PauseReason>().Where(reason => reason != PauseReason.None).ToArray();
+        Check.Equal(7, flags.Length, "the subset sweep must cover every pause reason");
+        for (var mask = 0; mask < 1 << flags.Length; mask++)
+        {
+            var reasons = PauseReason.None;
+            for (var bit = 0; bit < flags.Length; bit++) if ((mask & (1 << bit)) != 0) reasons |= flags[bit];
+            Check.Equal((reasons & hiding) != 0, PlaybackPolicy.SuspendsRenderer(reasons), $"renderer suspension for '{reasons}'");
+        }
+        foreach (var visible in new[] { PauseReason.Manual, PauseReason.Fullscreen, PauseReason.Battery, PauseReason.ShellRecovery,
+                     PauseReason.Manual | PauseReason.Fullscreen | PauseReason.Battery | PauseReason.ShellRecovery })
+            Check.False(PlaybackPolicy.SuspendsRenderer(visible), $"a '{visible}' pause must keep the frozen frame on the desktop");
+        foreach (var hidden in new[] { PauseReason.Session, PauseReason.Manual | PauseReason.Session, PauseReason.Suspend, PauseReason.DisplayOff })
+            Check.True(PlaybackPolicy.SuspendsRenderer(hidden), $"a '{hidden}' pause must still suspend the renderer");
+    }
 
     // Models System.Diagnostics.Process: the setter caches the requested class, Windows
     // grants High for RealTime without the privilege, and only Refresh exposes the grant.
