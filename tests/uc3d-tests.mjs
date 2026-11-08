@@ -6,7 +6,7 @@ import { selectImages, createMedia } from "../MatrixDesktop/web/js/uc3d/media.js
 import { formatClock, createOverlays } from "../MatrixDesktop/web/js/uc3d/overlays.js";
 import { createAudio } from "../MatrixDesktop/web/js/uc3d/audio.js";
 import { startLoop, createRuntime } from "../MatrixDesktop/web/js/uc3d/runtime.js";
-import { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
+import startREGL, { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
 import startWebGPU from "../MatrixDesktop/web/js/webgpu/uc3dPass.js";
 import "./uc3d-config-tests.mjs";
 
@@ -435,6 +435,7 @@ await asyncTest("WebGPU initialization rejects missing contexts and preserves er
       globalThis.window = { addEventListener() {}, removeEventListener() {} };
       const resource = () => { resources++; return { createView: () => ({}), destroy() { released++; } }; };
       const device = {
+        limits: { maxTextureDimension2D: 8192 },
         destroy() { destroyed++; }, queue: { copyExternalImageToTexture() {}, writeBuffer() {} },
         createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
         createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
@@ -442,7 +443,7 @@ await asyncTest("WebGPU initialization rejects missing contexts and preserves er
         addEventListener() {}, lost: new Promise(() => {}),
       };
       Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: {
-        requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "rgba8unorm",
+        requestAdapter: async () => ({ limits: { maxTextureDimension2D: 8192 }, requestDevice: async () => device }), getPreferredCanvasFormat: () => "rgba8unorm",
       } } });
       const originalError = new Error("controlled configure failure");
       const context = {
@@ -551,6 +552,113 @@ await asyncTest("a failed slideshow picture warns once however often the slidesh
       assert.equal(decoded.length, 1, `the failure warning was pushed ${decoded.length} times`);
     } finally { runtime.dispose(); }
   } finally { console.warn = previousWarn; dom.restore(); }
+});
+// Page globals for driving a whole backend pass with a manual animation frame.
+async function withPassEnvironment(bootstrap, run) {
+  const names = ["navigator", "window", "document", "Image", "fetch", "GPUBufferUsage", "GPUTextureUsage", "requestAnimationFrame", "cancelAnimationFrame", "createImageBitmap"];
+  const descriptors = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const previous = { warn: console.warn, error: console.error }, callbacks = [];
+  try {
+    console.warn = () => {}; console.error = () => {};
+    const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() {} });
+    globalThis.document = { createElement: element, body: { append() {} }, addEventListener() {}, removeEventListener() {} };
+    globalThis.window = { matrixHostBootstrap: bootstrap, devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+    globalThis.Image = class { naturalWidth = 32; naturalHeight = 32; async decode() {}
+      set src(url) { const size = /(\d+)x(\d+)/.exec(url ?? ""); if (size) { this.naturalWidth = Number(size[1]); this.naturalHeight = Number(size[2]); } } };
+    globalThis.fetch = async () => ({ ok: true, text: async () => "synthetic shader source" });
+    globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2, VERTEX: 4 };
+    globalThis.GPUTextureUsage = { TEXTURE_BINDING: 1, COPY_DST: 2, RENDER_ATTACHMENT: 4 };
+    globalThis.requestAnimationFrame = callback => { callbacks.push(callback); return callbacks.length; };
+    globalThis.cancelAnimationFrame = () => {};
+    // A stopped loop's last scheduled frame stays queued; running every pending callback keeps it a no-op.
+    await run({ tick: now => { for (const callback of callbacks.splice(0)) callback(now); }, diagnostics: () => globalThis.window.matrixRuntimeDiagnostics });
+  } finally {
+    console.warn = previous.warn; console.error = previous.error;
+    for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; }
+  }
+}
+// WebGL double: allocations above MAX_TEXTURE_SIZE raise INVALID_VALUE (1281), as a real context does.
+function fakeGL(maxTexture) {
+  const allocations = [], constants = { NO_ERROR: 0, FRAMEBUFFER_COMPLETE: 0x8cd5, MAX_TEXTURE_SIZE: 0x0d33, MAX_RENDERBUFFER_SIZE: 0x84e8, MAX_VIEWPORT_DIMS: 0x0d3a };
+  let pending = 0, lost = false;
+  const target = { ...constants, allocations,
+    lose() { lost = true; },
+    isContextLost: () => lost,
+    getParameter: name => name === constants.MAX_VIEWPORT_DIMS ? new Int32Array([maxTexture, maxTexture]) : [constants.MAX_TEXTURE_SIZE, constants.MAX_RENDERBUFFER_SIZE].includes(name) ? maxTexture : 0,
+    getExtension: () => ({ vertexAttribDivisorANGLE() {}, drawArraysInstancedANGLE() {} }),
+    texImage2D(...args) {
+      if (args.length !== 9) return;
+      allocations.push([args[3], args[4]]);
+      if (args[3] > maxTexture || args[4] > maxTexture) pending ||= 1281;
+    },
+    checkFramebufferStatus: () => lost ? 0 : constants.FRAMEBUFFER_COMPLETE,
+    getError() { const error = lost ? 0x9242 : pending; pending = 0; return error; },
+    getShaderParameter: () => true, getProgramParameter: () => true,
+    createShader: () => ({}), createProgram: () => ({}), createTexture: () => ({}), createBuffer: () => ({}), createFramebuffer: () => ({}),
+    getUniformLocation: () => ({}), getAttribLocation: () => 0,
+  };
+  return new Proxy(target, { get: (object, key) => key in object ? object[key] : typeof key === "string" && /^[A-Z0-9_]+$/.test(key) ? key : () => {} });
+}
+const passCanvas = (context, clientWidth, clientHeight) => {
+  const listeners = new Map();
+  return { dataset: {}, clientWidth, clientHeight, width: 300, height: 150, listeners, getContext: () => context,
+    addEventListener: (name, listener) => listeners.set(name, listener), removeEventListener: name => listeners.delete(name) };
+};
+await asyncTest("REGL UC3D fits its render target to the WebGL texture limit with the aspect kept", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    // 8000x4000 exceeds ZMatrix's 16.7 Mpx budget; UC3D has none, so it stays unchanged.
+    for (const [clientWidth, clientHeight] of [[16400, 100], [1200, 100], [8000, 4000]]) {
+      const gl = fakeGL(16384), canvas = passCanvas(gl, clientWidth, clientHeight);
+      const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        tick(0);
+        assert.deepEqual(diagnostics().errors, [], `canvas ${clientWidth}x${clientHeight} failed: ${diagnostics().errors.join("; ")}`); assert.equal(diagnostics().ready, true);
+        const target = gl.allocations.at(-1);
+        assert.ok(target[0] <= 16384 && target[1] <= 16384, `render target ${target} exceeds 16384`);
+        assert.deepEqual([canvas.width, canvas.height], target);
+        const reducedWarnings = diagnostics().warnings.filter(message => message.startsWith("Render resolution was reduced")).length;
+        if (clientWidth <= 16384) assert.deepEqual(target, [clientWidth, clientHeight], "an ordinary size must be unchanged");
+        else assert.ok(Math.abs(target[0] / target[1] - clientWidth / clientHeight) < 2, `aspect ${target[0] / target[1]} was not kept`);
+        assert.equal(reducedWarnings, clientWidth > 16384 ? 1 : 0, "a reduced render resolution must warn once");
+      } finally { stop(); }
+    }
+  });
+});
+function fakeGPU(adapterLimit, defaultLimit) {
+  const textures = [], copies = [], resource = () => ({ createView: () => ({}), destroy() {} });
+  const device = {
+    limits: { maxTextureDimension2D: defaultLimit }, destroy() {},
+    queue: { copyExternalImageToTexture: (source, destination, size) => copies.push(size), writeBuffer() {}, submit() {} },
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
+    createBuffer: resource, createTexture: descriptor => { textures.push(descriptor.size); return resource(); },
+    createSampler: () => ({}), createBindGroup: () => ({}),
+    createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline() {}, setBindGroup() {}, setVertexBuffer() {}, draw() {}, end() {} }), finish: () => ({}) }),
+    addEventListener() {}, lost: new Promise(() => {}),
+  };
+  const adapter = { limits: { maxTextureDimension2D: adapterLimit }, requestDevice: async descriptor => {
+    // Model the default limit: a device only receives the adapter maximum when it asks for it.
+    device.limits.maxTextureDimension2D = Math.min(adapterLimit, descriptor?.requiredLimits?.maxTextureDimension2D ?? defaultLimit); return device; } };
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: { requestAdapter: async () => adapter, getPreferredCanvasFormat: () => "rgba8unorm" } } });
+  const context = { configure() {}, unconfigure() {}, getCurrentTexture: () => resource() };
+  return { device, textures, copies, context };
+}
+await asyncTest("WebGPU UC3D requests the adapter texture limit and fits the canvas and render target to it", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    for (const [clientWidth, clientHeight] of [[200, 50], [40, 10]]) {
+      const gpu = fakeGPU(64, 32), canvas = passCanvas(gpu.context, clientWidth, clientHeight);
+      const stop = await startWebGPU(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        tick(0);
+        assert.deepEqual(diagnostics().errors, []); assert.equal(diagnostics().ready, true);
+        const target = gpu.textures.at(-1);
+        assert.ok(gpu.textures.every(([w, h]) => w <= 64 && h <= 64), `texture sizes ${JSON.stringify(gpu.textures)} exceed 64; render target ${JSON.stringify(target)}`);
+        assert.deepEqual([canvas.width, canvas.height], target);
+        if (clientWidth > 64) assert.deepEqual(target, [64, 16], "the fit must use the requested adapter limit and keep 4:1");
+        else assert.deepEqual(target, [clientWidth, clientHeight], "an ordinary size must be unchanged");
+      } finally { stop(); }
+    }
+  });
 });
 test("UC3D overlay warnings are capped at 32 distinct entries", () => {
   const dom = runtimeDom();

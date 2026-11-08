@@ -3,7 +3,9 @@ import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig
 export default async function startUC3D(canvas, config) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("UC3D WebGPU: no adapter available");
-  const device = await adapter.requestDevice();
+  // The default limit is 8192; a wide virtual screen needs the adapter's own maximum.
+  const device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D } });
+  const limit = device.limits.maxTextureDimension2D;
   let runtime = null, stop = null, dead = false, geometry = null, target = null, context = null;
   const buffers = [], textures = [];
   const cleanup = () => {
@@ -105,7 +107,7 @@ export default async function startUC3D(canvas, config) {
       const compositePass = encoder.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
       compositePass.setPipeline(compositePipeline); compositePass.setBindGroup(0, compositeBindGroup); compositePass.draw(3); compositePass.end();
       device.queue.submit([encoder.finish()]);
-    }, cleanup);
+    }, cleanup, limit);
     return stop;
   } catch (error) {
     runtime?.diagnostics.errors.push(error.message);

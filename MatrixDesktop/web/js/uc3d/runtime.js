@@ -4,6 +4,7 @@ import { createOverlays } from "./overlays.js";
 import { createAudio } from "./audio.js";
 import colorToRGB from "../colorToRGB.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { fitSurface } from "../zmatrix/surface.js";
 
 export async function loadImage(url) {
   if (!url) return null;
@@ -77,6 +78,7 @@ export async function createRuntime(canvas, options, backend) {
   if (dead) throw new Error("UC3D initialization was canceled by navigation");
   return {
     config, diagnostics, desktop, background,
+    warn: message => overlays.addWarning(message),
     update(seconds, width, height) {
       if (dead) return null;
       currentTime = seconds;
@@ -127,9 +129,10 @@ export async function createRuntime(canvas, options, backend) {
 
 // Both backends use one lifecycle and throttling implementation. No rendering callback
 // can survive pagehide, explicit teardown, or an initialization/runtime failure.
-export function startLoop(canvas, runtime, draw, cleanup) {
+// maximumDimension is the backend's texture/viewport limit for the canvas and render target.
+export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity) {
   const clock = createPlaybackClock();
-  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null;
+  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
   const requestedFps = Number(runtime.config.fps ?? 60);
   const fps = Number.isFinite(requestedFps) ? Math.max(0, Math.min(120, requestedFps)) : 60;
   const dispose = () => {
@@ -144,8 +147,10 @@ export function startLoop(canvas, runtime, draw, cleanup) {
     if (start === null) start = now;
     if (fps === 0 || now - previous >= 1000 / fps - 0.5 || runtime.config.once) {
       const ratio = window.devicePixelRatio || 1;
-      const width = Math.max(1, Math.ceil(canvas.clientWidth * ratio * (runtime.config.resolution ?? 0.75)));
-      const height = Math.max(1, Math.ceil(canvas.clientHeight * ratio * (runtime.config.resolution ?? 0.75)));
+      // One aspect-preserving factor keeps a wide virtual screen inside the GPU limit.
+      const { width, height, factor } = fitSurface(canvas.clientWidth * ratio * (runtime.config.resolution ?? 0.75),
+        canvas.clientHeight * ratio * (runtime.config.resolution ?? 0.75), maximumDimension, Infinity);
+      if (factor < 1 && !reduced) { reduced = true; runtime.warn?.("Render resolution was reduced to fit the GPU texture limit."); }
       if (runtime.config.uc3dControls === "original") {
         // Do not simulate an entire sleep/lock interval on the first resumed frame.
         // Dropped time is intentional; active simulation resumes without catch-up debt.

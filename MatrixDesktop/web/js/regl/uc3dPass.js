@@ -84,6 +84,10 @@ export default async function startUC3D(canvas, config) {
     const screenPosition = gl.getAttribLocation(compositeProgram, "position");
     const compositeLocations = Object.fromEntries(["rain", "desktop", "composition", "background"].map(name => [name, gl.getUniformLocation(compositeProgram, name)]));
     let width = 0, height = 0, geometrySize = 0;
+    // The render target, its viewport and the drawing buffer must all fit this limit.
+    const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) ?? [];
+    const limit = Math.min(...[gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), viewport[0], viewport[1]]
+      .map(value => Number(value) > 0 ? Number(value) : Infinity));
     canvas.addEventListener("webglcontextlost", contextLost);
     stop = startLoop(canvas, runtime, (frame, w, h) => {
       if (w !== width || h !== height) {
@@ -133,7 +137,7 @@ export default async function startUC3D(canvas, config) {
       gl.uniform4fv(compositeLocations.background, [...runtime.background, runtime.desktop ? 0.72 : 0]);
       gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disableVertexAttribArray(screenPosition);
       const error = gl.getError(); if (error !== gl.NO_ERROR) throw new Error(`UC3D WebGL error ${error}`);
-    }, cleanup);
+    }, cleanup, limit);
     return stop;
   } catch (error) { runtime?.diagnostics.errors.push(error.message); cleanup(); throw error; }
 }
