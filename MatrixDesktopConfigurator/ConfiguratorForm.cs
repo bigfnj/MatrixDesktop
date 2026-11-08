@@ -26,7 +26,8 @@ public sealed class ConfiguratorForm : Form
     private const int CatastrophicFailureHResult = unchecked((int)0x8000FFFF);
 
     private readonly ConfiguratorMetadata _metadata = ArgumentCatalog.Create();
-    private readonly StorageService _storage = new();
+    private readonly StorageService _storage;
+    private readonly string _windowTag;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false,
@@ -50,8 +51,12 @@ public sealed class ConfiguratorForm : Form
     private string? _previewWebRoot;
     private readonly MatrixDesktop.Shared.NativeMediaBridge _mediaBridge = new(preview: true);
 
-    public ConfiguratorForm()
+    // The storage is resolved once in Program, so the single-instance guard and this form
+    // agree on the store path.
+    internal ConfiguratorForm(StorageService storage)
     {
+        _storage = storage;
+        _windowTag = SingleInstanceGuard.ObjectName(storage.StoragePath);
         Text = "MatrixDesktop Configurator";
         MinimumSize = new System.Drawing.Size(980, 720);
         ClientSize = new System.Drawing.Size(1240, 820);
@@ -115,7 +120,23 @@ public sealed class ConfiguratorForm : Form
     {
         base.OnHandleCreated(e);
         TryApplyNativeWindowIcons();
+        // Lets a refused second launch find this exact window (Program.ActivateOwningWindow).
+        SetProp(Handle, _windowTag, (IntPtr)1);
     }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        // A string property holds a global atom reference until it is removed.
+        if (IsHandleCreated) RemoveProp(Handle, _windowTag);
+        base.OnHandleDestroyed(e);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetProp(IntPtr hwnd, string name, IntPtr data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr RemoveProp(IntPtr hwnd, string name);
 
     protected override async void OnFormClosing(FormClosingEventArgs e)
     {

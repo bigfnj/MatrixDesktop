@@ -425,6 +425,58 @@ Strings=First|Second
         assert registry_snapshot() == before_registry, "native configurator teardown changed registration state"
 
 
+def second_instance_case(playwright, publish):
+    """AUD-01: a second configurator on the same store exits 0; the owner and its store are untouched.
+
+    Runs on a private copy of the published folder with a synthetic portable store, so the
+    gate's own store is never involved. Removing the early exit in Program.Main makes the
+    second process start a full configurator, which fails the 5 s exit requirement.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="second-instance-", dir=ARTIFACTS))
+    app = root / "app"
+    shutil.copytree(publish, app)
+    exe = app / "MatrixDesktopConfigurator.exe"
+    store = app / "MatrixDesktopConfigurator.presets.json"
+    backup = store.with_name(store.name + ".bak")
+    store.write_text(json.dumps({"schemaVersion": 1, "presetSeedVersion": 0, "selectedPresetId": None, "lastDraft": {},
+        "userPresets": [{"id": "second-instance-owner", "name": "Owner preset", "values": {"scene": "matrix", "numColumns": 61}}],
+        "uiTheme": "dark"}), encoding="utf-8")
+    process, browser = native.open_application(playwright, exe, [], "second-instance-owner")
+    second = None
+    try:
+        page = native.page_at(browser, "https://configurator.local/")
+        page.wait_for_function("document.querySelectorAll('.field').length>40")
+        # Startup seeding may already have saved; compare from the settled owner onward.
+        page.wait_for_timeout(500)
+        before = {path: path.read_bytes() if path.exists() else None for path in (store, backup)}
+        assert before[store] and b"second-instance-owner" in before[store], "the owner did not load the synthetic store"
+        env = os.environ.copy()
+        env["WEBVIEW2_USER_DATA_FOLDER"] = str(root / "second-profile")
+        second = subprocess.Popen([str(exe)], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            second.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("a second configurator on the same store kept running instead of exiting")
+        assert second.returncode == 0, f"the refused second configurator exited {second.returncode}"
+        assert process.poll() is None, "the owning configurator exited when a second one was launched"
+        assert page.evaluate("document.querySelectorAll('.field').length") > 40, "the owning configurator lost its window"
+        after = {path: path.read_bytes() if path.exists() else None for path in (store, backup)}
+        assert after == before, "a refused second configurator changed the store or its backup"
+        native.close_window(process)
+        print("PASS second configurator on one store exits 0; owner window, store and backup unchanged", flush=True)
+        return {"ownerPid": process.pid, "secondPid": second.pid, "secondExit": second.returncode}
+    finally:
+        if second is not None and second.poll() is None:
+            native.stop_application(second)
+        native.stop_application(process)
+        browser.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish", type=Path, default=ROOT / "artifacts" / "gate" / "win-x64-fd")
@@ -432,6 +484,7 @@ def main():
     args = parser.parse_args()
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
+        second_instance_case(playwright, args.publish)
         for renderer in (["regl", "webgpu"] if args.renderer == "both" else [args.renderer]):
             configurator_case(playwright, args.publish / "MatrixDesktopConfigurator.exe", renderer)
     print("PASS portable preset and backup bytes restored by the native preservation helper.", flush=True)

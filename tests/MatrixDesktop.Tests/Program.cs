@@ -18,6 +18,13 @@ if (args.Length >= 2 && args[0] == "--verify-published-symbols")
     return PublishedSymbols.Verify(args[1..]);
 }
 
+// ConfiguratorHostTests: a second process asking for a configurator store's guard.
+if (args.Length == 2 && args[0] == "--try-configurator-guard")
+{
+    using var guard = SingleInstanceGuard.TryAcquire(args[1]);
+    return guard is null ? 3 : 0;
+}
+
 // Secondary mode: write the loadState payload the configurator's WebView2 host would send,
 // so tests\web-smoke.py can drive configurator\index.html in headless Chromium without a
 // WebView2 host at all.
@@ -79,6 +86,7 @@ tests.AddRange(ImporterTests.All);
 tests.AddRange(CommandBuilderTests.All);
 tests.AddRange(PowerShellExportTests.All);
 tests.AddRange(DraftCloseFlushTests.All);
+tests.AddRange(ConfiguratorHostTests.All);
 tests.AddRange(ParityTests.All);
 tests.AddRange(GuideTests.All);
 tests.AddRange(StorageTests.All);
