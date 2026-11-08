@@ -68,17 +68,40 @@ STUB = """
       return {state: structuredClone(host)};
     },
   };
+  // ConfiguratorForm answers buildCommand, importCommand and testCommand synchronously on its UI
+  // thread, one at a time in arrival order, and sends every reply through ExecuteScriptAsync in
+  // that order, so the C# harness requests for them queue here. Run concurrently, a slow harness
+  // start answered an older command last and the page kept the command of an edit it had already
+  // replaced. buildWebQuery is not queued: the host awaits the media bridge for it.
+  // __hostDelay holds the next queued request back that many milliseconds, as a slow start does.
+  // A body is serialized when the page posts it, as WebView2 does: payload.draft is the page's
+  // live draft, which a later edit changes while the request waits its turn.
+  const askHost = async body => {
+    const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body});
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  };
+  let hostQueue = Promise.resolve();
+  const askHostInOrder = msg => {
+    const body = JSON.stringify(msg);
+    const delay = window.__hostDelay || 0;
+    window.__hostDelay = 0;
+    const answer = hostQueue.then(async () => {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      return askHost(body);
+    });
+    hostQueue = answer.catch(() => {});
+    return answer;
+  };
   window.chrome = window.chrome || {};
   window.chrome.webview = { postMessage: async msg => {
     window.__smokeMessages.push(structuredClone(msg));
     try {
       let payload = {};
       if (msg.type === 'loadState') payload = state;
-      else if (['buildCommand','buildWebQuery','importCommand','testCommand'].includes(msg.type)) {
-        const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(msg)});
-        if (!response.ok) throw new Error(await response.text());
-        payload = await response.json();
-      } else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
+      else if (['buildCommand','importCommand','testCommand'].includes(msg.type)) payload = await askHostInOrder(msg);
+      else if (msg.type === 'buildWebQuery') payload = await askHost(JSON.stringify(msg));
+      else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
       else if (msg.type === 'loadHelp') payload = {text:window.__helpText??null};
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
@@ -1081,7 +1104,13 @@ def hex_rows(rows):
 
 
 def wait_command(page, text):
-    page.wait_for_function("text=>document.querySelector('#commandOutput').value.includes(text)", arg=text)
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    try:
+        page.wait_for_function("text=>document.querySelector('#commandOutput').value.includes(text)", arg=text)
+    except PlaywrightTimeout as error:
+        # A bare timeout cannot tell a stale reply (an older command shown) from a failed build (empty, error status).
+        raise AssertionError("the command never showed " + repr(text) + "; it shows " + repr(page.locator("#commandOutput").input_value())
+                             + " with status " + repr(page.locator("#statusLine").inner_text())) from error
     return page.locator("#commandOutput").input_value()
 
 
@@ -1114,8 +1143,27 @@ def check_effective_defaults(page, fixture):
     assert saved(page)["numColumns"] == 80, "Columns 80 on operator was not kept"
 
 
+def check_host_reply_order(page, _fixture):
+    # The real host answers command builds one at a time in arrival order, so a slow earlier
+    # build (a cold harness start under load) holds the next one back rather than landing after
+    # it: the command shown is the latest edit's. Concurrent answers once timed out the check above.
+    builds = "window.__smokeMessages.filter(m=>m.type==='buildCommand').length"
+    answered = "window.__smokeReplies.filter(r=>r.type==='buildCommand').length"
+    page.wait_for_function(builds + ">0 && " + answered + "===" + builds)  # init's build has settled
+    start = page.evaluate(builds)
+    page.evaluate("window.__hostDelay=1500")
+    field(page, "effect").locator("select").select_option("stripes")
+    page.wait_for_function(builds + "===" + str(start + 1))
+    field(page, "effect").locator("select").select_option("pride")
+    page.wait_for_function(answered + "===" + str(start + 2))
+    page.wait_for_timeout(200)  # both replies received
+    command = page.locator("#commandOutput").input_value()
+    assert "--effect pride" in command, "a slow earlier command reply replaced the latest edit's command: " + command
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
+    ("A slow earlier command reply never replaces the latest edit's command", check_host_reply_order),
     ("ZMatrix catalog renders every structured control", check_catalog),
     ("ZMatrix editor changes survive real C# command import", check_editors),
     ("ZMatrix scene and cleanup dependencies retain disabled values", check_gating),
