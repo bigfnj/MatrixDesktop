@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Microsoft.Win32;
 using Shared;
 
@@ -10,6 +11,8 @@ internal static class ScreensaverRegistrationTests
            ("Screensaver restore preserves a later owner selection", OwnerReplacement),
            ("Explicit screensaver re-registration backs up the latest owner choice", Reregistration),
            ("Failed screensaver activation rolls back the current selection", FailedActivation),
+           ("Screensaver registration commands report designed refusals instead of crashing", CommandRefusals),
+           ("Screensaver restore command lets an unexpected failure reach the crash handler", CommandDefect),
            ("Registry fixtures remove every key they create", FixtureCleanup)]
         : [];
 
@@ -87,6 +90,57 @@ internal static class ScreensaverRegistrationTests
         ScreensaverRegistration.RestoreWithKeys(desktop, backup, true, _ => { });
         Check.Equal(@"C:\synthetic-second.scr", (string)desktop.GetValue("SCRNSAVE.EXE")!,
             "explicit re-registration must back up the owner's latest choice rather than an obsolete first choice");
+    });
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void CommandRefusals()
+    {
+        WithKeys((desktop, backup) =>
+        {
+            ScreensaverRegistration.RegisterWithKeys(@"C:\synthetic\MatrixDesktop.scr", desktop, backup, false, _ => { });
+            desktop.SetValue("SCRNSAVE.EXE", @"C:\synthetic-owner-choice.scr");
+            var (ok, message) = ScreensaverRegistration.RunRestoreCommandWithKeys(desktop, backup, true,
+                _ => throw new InvalidOperationException("activation must not run after ownership changes"));
+            Check.False(ok, "a later owner selection must be reported as a refusal");
+            Check.Contains(message ?? "", "has changed since MatrixDesktop was selected", "the refusal must say why");
+            Check.Equal(@"C:\synthetic-owner-choice.scr", (string)desktop.GetValue("SCRNSAVE.EXE")!, "a refused restore must keep the owner's selection");
+            Check.Equal("1", (string)desktop.GetValue("ScreenSaveActive")!, "a refused restore must not touch activation");
+            Check.Equal(1, (int)backup.GetValue("Saved")!, "a refused restore must retain its backup");
+        });
+        WithKeys((desktop, backup) =>
+        {
+            ScreensaverRegistration.RegisterWithKeys(@"C:\synthetic\MatrixDesktop.scr", desktop, backup, false, _ => { });
+            backup.SetValue("SCRNSAVE.EXE.present", 1, RegistryValueKind.DWord); // claims a value the backup does not hold
+            var (ok, message) = ScreensaverRegistration.RunRestoreCommandWithKeys(desktop, backup, true, _ => { });
+            Check.False(ok, "an incomplete backup must be reported as a refusal");
+            Check.Contains(message ?? "", "backup is incomplete", "the refusal must say why");
+            Check.Equal(@"C:\synthetic\MatrixDesktop.scr", (string)desktop.GetValue("SCRNSAVE.EXE")!, "a refused restore must keep the current selection");
+        });
+        WithKeys((desktop, backup) =>
+        {
+            ScreensaverRegistration.RegisterWithKeys(@"C:\synthetic\MatrixDesktop.scr", desktop, backup, false, _ => { });
+            var (ok, message) = ScreensaverRegistration.RunRestoreCommandWithKeys(desktop, backup, true,
+                active => { if (!active) throw new Win32Exception(5, "synthetic activation failure"); });
+            Check.False(ok, "a Windows activation failure must be reported rather than crash");
+            Check.Contains(message ?? "", "synthetic activation failure", "the report must carry the Windows message");
+            Check.Equal(@"C:\synthetic\MatrixDesktop.scr", (string)desktop.GetValue("SCRNSAVE.EXE")!, "a failed restore must roll back");
+        });
+        // Only the file check runs: nothing here can reach the owner's real registration.
+        var missing = Path.Combine(Path.GetTempPath(), "matrix-missing-" + Guid.NewGuid().ToString("N"), "MatrixDesktop.scr");
+        var (registered, reason) = ScreensaverRegistration.RunCommand(() => ScreensaverRegistration.RequireScreensaverFile(missing));
+        Check.False(registered, "a missing screensaver must be reported as a refusal");
+        Check.Contains(reason ?? "", "screensaver is missing", "the refusal must say why");
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void CommandDefect() => WithKeys((desktop, backup) =>
+    {
+        ScreensaverRegistration.RegisterWithKeys(@"C:\synthetic\MatrixDesktop.scr", desktop, backup, false, _ => { });
+        var escaped = false;
+        try { ScreensaverRegistration.RunRestoreCommandWithKeys(desktop, backup, true, _ => throw new NullReferenceException("synthetic defect")); }
+        catch (NullReferenceException) { escaped = true; }
+        Check.True(escaped, "an unexpected defect must reach the crash handler instead of being reported as a refusal");
+        Check.Equal(@"C:\synthetic\MatrixDesktop.scr", (string)desktop.GetValue("SCRNSAVE.EXE")!, "a failed restore must roll back");
     });
 
     // A probe parent of its own, so litter from older runs or a concurrent harness cannot hide a leak.
