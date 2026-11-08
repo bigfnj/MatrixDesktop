@@ -481,3 +481,26 @@ function Invoke-GateBuildAndRun {
     }
     return Get-GateCaseVerdict -ExitCode $run.ExitCode -Log $Log -Witness $Witness
 }
+
+# ---------------------------------------------------------------- loadState fixture suites
+
+# The node suites that read the loadState fixture need node and the fixture the built harness
+# writes, never Python. They used to run only inside the web smoke's innermost branch, so with
+# no Python or no harness they vanished from the report without an UNCHECKED line (R2-31).
+# Takes no Python input on purpose. -FixtureExit is the harness's --dump-state exit code, or
+# $null when the harness was not built. Returns one verdict per name, in order: Outcome 'run',
+# or 'unchecked' with the reason in Detail.
+function Get-FixtureSuiteVerdicts {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [bool]$NodeFound,
+        [AllowNull()][object]$FixtureExit
+    )
+    $why = ''
+    if (-not $NodeFound) { $why = 'node is not on PATH' }
+    elseif ($null -eq $FixtureExit) { $why = 'the test harness has not been built, so the loadState fixture cannot be generated' }
+    elseif ([int]$FixtureExit -ne 0) { $why = "the loadState fixture could not be generated (--dump-state exited $FixtureExit)" }
+    return @($Names | ForEach-Object {
+        [pscustomobject]@{ Name = $_; Outcome = $(if ($why) { 'unchecked' } else { 'run' }); Detail = $why }
+    })
+}

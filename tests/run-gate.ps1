@@ -602,6 +602,36 @@ try {
     # geometric instead, and because they run in headless Chromium they need no session, no
     # GPU and no WebView2, so they are the only configurator UI coverage that works in CI.
     Test-Hdr 'tier 1: headless web smoke'
+    # The loadState fixture, and the node suites that read it, need the built harness and node
+    # but never Python, so they run ahead of the Python lookup and report by name whatever else
+    # is missing (Get-FixtureSuiteVerdicts, gate-lib.ps1; R2-31). The fixture is regenerated
+    # from the real ArgumentCatalog every run, so it can never be a stale snapshot of a
+    # catalogue that has since changed.
+    $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
+    $fixture = Join-Path $RepoRoot 'artifacts\gate\loadState.json'
+    $fixtureExit = $null
+    if (Test-Path -LiteralPath $testExe -PathType Leaf) {
+        & $testExe --dump-state $fixture | Out-Null
+        $fixtureExit = $LASTEXITCODE
+        if ($fixtureExit -ne 0) { Test-Fail 'loadState fixture generates' "$testExe --dump-state exited $fixtureExit" }
+    }
+    $fixtureSuites = @(
+        @{ Name = 'UC3D rebuilt slider metadata and web parsers agree'; Script = 'tests\uc3d-config-tests.mjs'; Log = 'md-gate-uc3d-config.log' }
+        @{ Name = 'ZMatrix rebuilt metadata and structured web parsers agree'; Script = 'tests\zmatrix-config-tests.mjs'; Log = 'md-gate-zmatrix-config.log' }
+        # AUD-13 drift guard: the C# effective-default tables against config.js and the stripe passes.
+        @{ Name = 'configurator effective defaults match the renderer for every version and effect'; Script = 'tests\effective-defaults-tests.mjs'; Log = 'md-gate-effective-defaults.log' }
+    )
+    $suiteVerdicts = @(Get-FixtureSuiteVerdicts -Names @($fixtureSuites | ForEach-Object { $_.Name }) -NodeFound ([bool]$node) -FixtureExit $fixtureExit)
+    for ($i = 0; $i -lt $fixtureSuites.Count; $i++) {
+        $suite = $fixtureSuites[$i]
+        if ($suiteVerdicts[$i].Outcome -ne 'run') { Test-Unchecked $suite.Name $suiteVerdicts[$i].Detail; continue }
+        $suiteLog = Join-Path $env:TEMP $suite.Log
+        $suiteRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + (Join-Path $RepoRoot $suite.Script) + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $suiteLog -RedirectStandardError "$suiteLog.err"
+        if ($suiteRun.ExitCode -eq 0) { Test-Ok $suite.Name }
+        else { Test-Fail $suite.Name "see $suiteLog" }
+    }
+
     # Prefer an interpreter that actually has playwright. On a developer box the bare
     # 'python' is deliberately the sanctioned system one, which does not, so searching PATH
     # alone would report CANNOT VERIFY forever and this check would never once run locally.
@@ -611,46 +641,16 @@ try {
     # a candidate without Playwright writes to stderr and that crashed Windows PowerShell 5.1.
     $py = Find-GatePython -Candidates @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')
     $smokeScript = Join-Path $RepoRoot 'tests\web-smoke.py'
-    $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
     if (-not $py) {
         Test-Unchecked 'headless web smoke' 'no python on PATH (set MD_GATE_PYTHON to point at one)'
     } elseif (-not (Test-Path -LiteralPath $smokeScript -PathType Leaf)) {
         Test-Fail 'headless web smoke' "missing: $smokeScript"
-    } elseif (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+    } elseif ($null -eq $fixtureExit) {
         Test-Unchecked 'headless web smoke' 'the test harness has not been built, so the loadState fixture cannot be generated'
     } else {
-        # The fixture is regenerated from the real ArgumentCatalog every run, so it can never
-        # be a stale snapshot of a catalogue that has since changed.
-        $fixture = Join-Path $RepoRoot 'artifacts\gate\loadState.json'
-        & $testExe --dump-state $fixture | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Test-Fail 'headless web smoke' 'could not generate the loadState fixture'
+        if ($fixtureExit -ne 0) {
+            Test-Unchecked 'headless web smoke' 'the loadState fixture could not be generated; its FAIL is listed above'
         } else {
-            if ($node) {
-                $configTest = Join-Path $RepoRoot 'tests\uc3d-config-tests.mjs'
-                $configLog = Join-Path $env:TEMP 'md-gate-uc3d-config.log'
-                $configRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $configTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $configLog -RedirectStandardError "$configLog.err"
-                if ($configRun.ExitCode -eq 0) { Test-Ok 'UC3D rebuilt slider metadata and web parsers agree' }
-                else { Test-Fail 'UC3D rebuilt slider metadata and web parsers agree' "see $configLog" }
-                $zmatrixConfigTest = Join-Path $RepoRoot 'tests\zmatrix-config-tests.mjs'
-                $zmatrixConfigLog = Join-Path $env:TEMP 'md-gate-zmatrix-config.log'
-                $zmatrixConfigRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $zmatrixConfigTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $zmatrixConfigLog -RedirectStandardError "$zmatrixConfigLog.err"
-                if ($zmatrixConfigRun.ExitCode -eq 0) { Test-Ok 'ZMatrix rebuilt metadata and structured web parsers agree' }
-                else { Test-Fail 'ZMatrix rebuilt metadata and structured web parsers agree' "see $zmatrixConfigLog" }
-                # AUD-13 drift guard: the C# effective-default tables against config.js and the stripe passes.
-                $defaultsTest = Join-Path $RepoRoot 'tests\effective-defaults-tests.mjs'
-                $defaultsLog = Join-Path $env:TEMP 'md-gate-effective-defaults.log'
-                $defaultsRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $defaultsTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $defaultsLog -RedirectStandardError "$defaultsLog.err"
-                if ($defaultsRun.ExitCode -eq 0) { Test-Ok 'configurator effective defaults match the renderer for every version and effect' }
-                else { Test-Fail 'configurator effective defaults match the renderer for every version and effect' "see $defaultsLog" }
-            } else {
-                Test-Unchecked 'UC3D rebuilt slider metadata and web parsers agree' 'node is not on PATH'
-                Test-Unchecked 'ZMatrix rebuilt metadata and structured web parsers agree' 'node is not on PATH'
-                Test-Unchecked 'configurator effective defaults match the renderer for every version and effect' 'node is not on PATH'
-            }
             $smokeLog = Join-Path $env:TEMP 'md-gate-web-smoke.log'
             $smokeRun = Start-Process -FilePath $py -ArgumentList ('"' + $smokeScript + '"') -Wait -PassThru -NoNewWindow `
                 -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"

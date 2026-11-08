@@ -638,6 +638,59 @@ try {
         if (-not (Test-Path -LiteralPath "$log.build" -PathType Leaf)) { throw "no build log at $log.build" }
         if (Test-Path -LiteralPath $log) { throw "the earlier run log is still at $log, where it reads as this run's" }
     }
+
+    # ------------------------------------------------------------ R2-31 loadState fixture suites
+
+    Invoke-TestCase 'R2-31 (a) each fixture suite is UNCHECKED by name for a missing input, and runs only with node and the fixture' {
+        $names = @('first suite', 'second suite', 'third suite')
+        $legs = @(
+            @{ Label = 'node missing'; NodeFound = $false; FixtureExit = 0; Want = 'node is not on PATH' }
+            @{ Label = 'harness not built'; NodeFound = $true; FixtureExit = $null; Want = 'the test harness has not been built, so the loadState fixture cannot be generated' }
+            @{ Label = 'fixture failed'; NodeFound = $true; FixtureExit = 3; Want = 'the loadState fixture could not be generated (--dump-state exited 3)' }
+        )
+        foreach ($leg in $legs) {
+            $verdicts = @(Get-FixtureSuiteVerdicts -Names $names -NodeFound $leg.NodeFound -FixtureExit $leg.FixtureExit)
+            Assert-Equal ($names -join ',') (@($verdicts | ForEach-Object { $_.Name }) -join ',') "$($leg.Label): one verdict per suite, in order"
+            $wrong = @($verdicts | Where-Object { $_.Outcome -ne 'unchecked' -or $_.Detail -ne $leg.Want } | ForEach-Object { "$($_.Name)=$($_.Outcome) '$($_.Detail)'" })
+            Assert-Equal 0 $wrong.Count "$($leg.Label): every suite UNCHECKED with '$($leg.Want)'; wrong: $($wrong -join '; ')"
+        }
+        $ready = @(Get-FixtureSuiteVerdicts -Names $names -NodeFound $true -FixtureExit 0)
+        Assert-Equal 'run,run,run' (@($ready | ForEach-Object { $_.Outcome }) -join ',') 'node and a fixture: every suite runs'
+    }
+
+    Invoke-TestCase 'R2-31 (b) with no Python and no built harness the gate still reports each fixture suite by name' {
+        # The real block text from run-gate.ps1, from the web smoke's header to the next one, run
+        # against recording stubs; nothing in it launches a process when the harness is absent.
+        $gatePath = Join-Path $here 'run-gate.ps1'
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile($gatePath, [ref]$null, [ref]$null)
+        $headers = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Test-Hdr' }, $true))
+        $from = @($headers | Where-Object { $_.Extent.Text -like "*'tier 1: headless web smoke'*" })
+        $to = @($headers | Where-Object { $_.Extent.Text -like "*'tier 1: UC3D importer and WebGL smoke'*" })
+        Assert-Equal '1,1' "$($from.Count),$($to.Count)" 'run-gate.ps1 has one web smoke header and one importer header'
+        $text = $gateAst.Extent.Text.Substring($from[0].Extent.EndOffset, $to[0].Extent.StartOffset - $from[0].Extent.EndOffset)
+        $block = [scriptblock]::Create($text)
+        $script:Reported = New-Object 'Collections.Generic.List[string]'
+        function Test-Ok { param([string]$Msg) $script:Reported.Add("ok|$Msg") }
+        function Test-Fail { param([string]$Msg, [string]$Detail) $script:Reported.Add("FAIL|$Msg|$Detail") }
+        function Test-Unchecked { param([string]$Msg, [string]$Why) $script:Reported.Add("UNCHECKED|$Msg|$Why") }
+        function Find-GatePython { param([string[]]$Candidates) return $null }
+        $RepoRoot = Join-Path $scratch 'no-harness-root'
+        New-Item -ItemType Directory -Path (Join-Path $RepoRoot 'tests') | Out-Null
+        # Truthy, and never started: without the harness there is no fixture to give it.
+        $node = [pscustomobject]@{ Source = (Join-Path $scratch 'no-such-node.exe') }
+        . $block
+        $all = @($script:Reported)
+        $harnessWhy = 'the test harness has not been built, so the loadState fixture cannot be generated'
+        foreach ($name in 'UC3D rebuilt slider metadata and web parsers agree', 'ZMatrix rebuilt metadata and structured web parsers agree',
+            'configurator effective defaults match the renderer for every version and effect') {
+            $lines = @($all | Where-Object { $_ -like "*|$name|*" -or $_ -like "*|$name" })
+            Assert-Equal 1 $lines.Count "'$name' is reported exactly once (reported: $($all -join ' / '))"
+            Assert-Equal "UNCHECKED|$name|$harnessWhy" $lines[0] "'$name' names the missing harness"
+        }
+        $witness = @($all | Where-Object { $_ -like 'UNCHECKED|headless web smoke|no python on PATH*' })
+        Assert-Equal 1 $witness.Count "the block ran to the Python check (reported: $($all -join ' / '))"
+        Assert-Equal 0 @($all | Where-Object { $_ -like 'FAIL|*' }).Count "nothing failed (reported: $($all -join ' / '))"
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
