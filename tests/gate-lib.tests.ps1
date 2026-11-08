@@ -457,6 +457,27 @@ try {
         Assert-Equal 'fail' $old.Outcome 'the registered case against the old stand-in'
     }
 
+    # uc3d-calibration.py writes <output>\report.json at exit, so two cases sharing a folder
+    # leave only the last one's summary: the hidden-adapter case replaced the regl case's 22
+    # reports with an empty one on every gate run (R2-32).
+    Invoke-TestCase 'AUD-59 (d) calibration cases write distinct output folders' {
+        $repo = Split-Path -Parent $here
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $folders = @()
+        foreach ($node in @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.HashtableAst] }, $true))) {
+            try { $value = $node.SafeGetValue() } catch { continue }
+            if (-not ($value -is [hashtable] -and $value.ContainsKey('Script') -and $value['Script'] -eq 'tests\uc3d-calibration.py')) { continue }
+            # The script's default; a relative --output resolves against the repo, where the gate runs.
+            $output = 'artifacts\uc3d-calibration'
+            $m = [regex]::Match("$($value['Arguments'])", '(?:^|\s)--output(?:=|\s+)(?:"(?<q>[^"]*)"|(?<p>\S+))')
+            if ($m.Success) { $output = if ($m.Groups['q'].Success) { $m.Groups['q'].Value } else { $m.Groups['p'].Value } }
+            $folders += [IO.Path]::GetFullPath((Join-Path $repo $output)).TrimEnd('\', '/').ToLowerInvariant()
+        }
+        if ($folders.Count -lt 2) { throw "run-gate.ps1 registers $($folders.Count) uc3d-calibration.py case(s), expected the regl and the hidden-adapter cases" }
+        $shared = @($folders | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { "$($_.Name) ($($_.Count) cases)" })
+        Assert-Equal 0 $shared.Count "every calibration case needs its own report folder; shared: $($shared -join ', ')"
+    }
+
     # ------------------------------------------------------------ AUD-54 WebView2 profile record
 
     function New-Record { param([string]$Level, [string]$Msg) [pscustomobject]@{ Level = $Level; Msg = $Msg } }

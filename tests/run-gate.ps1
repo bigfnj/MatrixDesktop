@@ -696,8 +696,10 @@ try {
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' },
             # AUD-59: with no WebGPU adapter the calibration must report unverified coverage
-            # (exit 2 and its witness), as README says, not a product failure (exit 1).
-            @{ Name = 'UC3D calibration reports a hidden WebGPU adapter as unverified'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer webgpu --only amount-500'
+            # (exit 2 and its witness), as README says, not a product failure (exit 1). Its own
+            # --output, or its empty report.json replaces the regl case's summary (R2-32); a
+            # literal, because gate-lib.tests.ps1 reads these cases back with SafeGetValue.
+            @{ Name = 'UC3D calibration reports a hidden WebGPU adapter as unverified'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer webgpu --only amount-500 --output artifacts\gate\uc3d-calibration-hidden-adapter'
                 Environment = @{ MD_UC3D_HIDE_WEBGPU_ADAPTER = '1' }; ExpectCannotVerify = '(?m)^\s*CANNOT VERIFY WebGPU'; Forbidden = '(?m)^\s*PASS webgpu' },
             @{ Name = 'ZMatrix WebGL smoke'; Script = 'tests\zmatrix-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'ZMatrix configurator controls and imports'; Script = 'tests\zmatrix-configurator.py'; Arguments = '' },
