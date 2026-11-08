@@ -39,12 +39,22 @@ INITIAL_PAUSE = """(() => {
 
 
 LOSS_HOOK = """(() => {
-  // Record the renderer's loss reports and swallow js/main.js's own hook, so its recovery
-  // reload cannot replace the page under this check.
+  // Record the renderer's loss reports and pass each one on to js/main.js's hook, so the
+  // page's own recovery (js/rendererRecovery.js) runs as it does in the product.
   const calls = [];
+  let pageHook = null;
   Object.defineProperty(window, 'matrixRendererLost', { configurable: true,
-    get() { return reason => calls.push(String(reason)); }, set() {} });
+    get() { return reason => { calls.push(String(reason)); return pageHook?.(reason); }; },
+    set(value) { pageHook = value; } });
   window.__matrixRendererLostCalls = calls;
+  // This loop starts before any renderer, so it runs first in every frame: a loss it causes
+  // meets the renderer's own frame callback in that frame, before webglcontextlost (a later
+  // task) arrives. The capture listener reads ready as that event arrives.
+  window.__frameFirst = [];
+  const first = () => { requestAnimationFrame(first); for (const task of window.__frameFirst.splice(0)) task(); };
+  requestAnimationFrame(first);
+  window.__readyAtLostEvent = null;
+  addEventListener('webglcontextlost', () => { window.__readyAtLostEvent = Boolean(window.matrixRuntimeDiagnostics?.ready); }, true);
 })();"""
 
 
@@ -95,34 +105,92 @@ def capture(page):
     return Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
 
 
-def check_regl_context_loss(context, port):
-    """A lost WebGL context must stop claiming ready and report to the page hook once.
+def lose_regl_context(page):
+    """Lose the running renderer's WebGL context; it must clear ready and report the loss once.
 
-    regl re-creates every texture empty on restore, so a restored context draws black;
-    the renderer must stay not ready (and stop counting frames) after the restore too.
+    The first frame that finds the context lost must already clear ready: the canvas is
+    blank from the loss on, and webglcontextlost only arrives in a later task.
     """
+    page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+    page.evaluate("window.__beforeLoss = true; window.__loseContext = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__frameFirst.push(() => window.__loseContext.loseContext())")
+    try:
+        page.wait_for_function("window.__beforeLoss !== true || !matrixRuntimeDiagnostics.ready", timeout=1000)
+    except Exception:
+        raise AssertionError("WebGL context loss left matrixRuntimeDiagnostics.ready true") from None
+    assert page.evaluate("window.__beforeLoss === true"), "the page reloaded during a pending WebGL loss instead of waiting for the restore"
+    try:
+        page.wait_for_function("window.__readyAtLostEvent !== null", timeout=1000)
+    except Exception:
+        raise AssertionError("webglcontextlost never reached the page, so the check proved nothing") from None
+    assert page.evaluate("window.__readyAtLostEvent") is False, "ready was still true when webglcontextlost arrived, after a frame had found the context lost"
+    lost = page.evaluate("({ errors: matrixRuntimeDiagnostics.errors, calls: window.__matrixRendererLostCalls, frames: matrixRuntimeDiagnostics.frames })")
+    assert lost["errors"] == ["WebGL context lost"], f"context loss was not recorded: {lost['errors']}"
+    assert lost["calls"] == ["WebGL context lost"], f"page hook calls after the loss: {lost['calls']}"
+    return lost
+
+
+def check_regl_context_loss(context, port):
+    """A lost WebGL context must stop claiming ready, report to the page hook once, and draw again.
+
+    regl re-creates every texture empty on restore, so a restored context draws black.
+    js/rendererRecovery.js answers the restore event itself by reloading the page, within
+    a budget of 3 reloads per 5 minutes, so the first leg expects a new document that
+    draws. Past the budget the page keeps the old renderer under a notice instead; the
+    second leg spends the budget, so the restored renderer stays in the page and must stay
+    not ready (and stop counting frames) for as long as it is watched.
+    """
+    url = f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1"
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.add_init_script(LOSS_HOOK)
     try:
-        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1", wait_until="load")
-        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
-        page.evaluate("window.__loseContext = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__loseContext.loseContext()")
+        page.goto(url, wait_until="load")
+        lose_regl_context(page)
+        page.wait_for_timeout(1000)
+        assert page.evaluate("window.__beforeLoss === true"), "the page reloaded during a pending WebGL loss instead of waiting for the restore"
         try:
-            page.wait_for_function("!matrixRuntimeDiagnostics.ready", timeout=1000)
+            with page.expect_navigation(wait_until="commit", timeout=5000):
+                page.evaluate("window.__loseContext.restoreContext()")
         except Exception:
-            raise AssertionError("WebGL context loss left matrixRuntimeDiagnostics.ready true") from None
-        lost = page.evaluate("({ errors: matrixRuntimeDiagnostics.errors, calls: window.__matrixRendererLostCalls, frames: matrixRuntimeDiagnostics.frames })")
-        assert lost["errors"] == ["WebGL context lost"], f"context loss was not recorded: {lost['errors']}"
-        assert lost["calls"] == ["WebGL context lost"], f"page hook calls after the loss: {lost['calls']}"
+            raise AssertionError("the page did not reload within 5 s of restoreContext()") from None
+        page.wait_for_function("window.__beforeLoss === undefined && window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+        for _ in range(12):  # the rain builds up after the reload
+            image = capture(page).convert("L")
+            bright = sum(image.histogram()[41:]) / (image.width * image.height)
+            if bright > 0.01:
+                break
+            page.wait_for_timeout(500)
+        assert bright > 0.01, f"the reloaded page draws black: {bright:.2%} of pixels above luma 40"
+        reloaded = page.evaluate("({ errors: matrixRuntimeDiagnostics.errors, calls: window.__matrixRendererLostCalls })")
+        assert reloaded == {"errors": [], "calls": []}, f"the reloaded page reports a loss: {reloaded}"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
+
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(LOSS_HOOK)
+    try:
+        page.goto(url, wait_until="load")
+        # Spend the reload budget, so the page keeps this renderer through the restore.
+        page.evaluate("sessionStorage.setItem('matrixRendererRecoveries', JSON.stringify([Date.now(), Date.now(), Date.now()]))")
+        lost = lose_regl_context(page)
         page.evaluate("window.__loseContext.restoreContext()")
         page.wait_for_timeout(1500)
-        restored = page.evaluate("({ ready: matrixRuntimeDiagnostics.ready, frames: matrixRuntimeDiagnostics.frames, calls: window.__matrixRendererLostCalls, contextLost: document.querySelector('canvas').getContext('webgl').isContextLost() })")
+        restored = page.evaluate("({ beforeLoss: window.__beforeLoss === true, ready: matrixRuntimeDiagnostics.ready, "
+                                 "frames: matrixRuntimeDiagnostics.frames, calls: window.__matrixRendererLostCalls, "
+                                 "contextLost: document.querySelector('canvas').getContext('webgl').isContextLost(), "
+                                 "notice: [...document.querySelectorAll('.notice')].some(n => n.textContent.includes('could not be recovered automatically')) })")
+        assert restored["beforeLoss"], "the page reloaded although the reload budget was spent, so the check proved nothing"
         assert not restored["contextLost"], "the WebGL context did not restore, so the check proved nothing"
         assert not restored["ready"], "ready came back after restore although the restored context draws black"
         assert restored["frames"] == lost["frames"], f"frames advanced after the loss: {lost['frames']} -> {restored['frames']}"
         assert restored["calls"] == ["WebGL context lost"], f"page hook calls after the restore: {restored['calls']}"
+        assert restored["notice"], "past the reload budget the page did not explain the loss"
         page.evaluate("matrixRuntimeDiagnostics.dispose()")
         page.wait_for_timeout(100)
         assert not errors, errors
@@ -255,7 +323,7 @@ def main():
                         failed.close()
                         print("PASS native bootstrap failure remains visible as text and prevents renderer initialization", flush=True)
                         check_regl_context_loss(context, server.server_port)
-                        print("PASS original Matrix regl context loss clears ready, reports once to the page and stays not ready after restore", flush=True)
+                        print("PASS original Matrix regl context loss clears ready and reports once; the restore reloads into a drawing page, and past the reload budget the restored renderer stays not ready under a notice", flush=True)
                         check_regl_time_rebase(context, server.server_port)
                         print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
                         check_regl_single_frame(context, server.server_port)

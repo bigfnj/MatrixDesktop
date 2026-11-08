@@ -3,6 +3,11 @@
 // UC3D and ZMatrix scenes dispose themselves on loss, so a reload is the one recovery that
 // works for every scene. The budget lives in sessionStorage because it must survive the
 // reloads it counts; without storage there is no budget, so no reload either.
+// The AUD-19 contract: a renderer stops reporting matrixRuntimeDiagnostics.ready on a loss
+// and never reports it again, and this module brings the page back drawing. It reloads as
+// soon as a lost WebGL context is restored (from its own capture listener, whether or not
+// a renderer called the hook), 10 s after a WebGL loss that is never restored, and at once
+// after a WebGPU device loss. Past the budget it shows a persistent notice instead.
 export const RECOVERY_KEY = "matrixRendererRecoveries";
 
 export default ({
