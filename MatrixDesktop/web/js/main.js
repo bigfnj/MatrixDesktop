@@ -94,8 +94,9 @@ document.body.onload = async () => {
 	// it, so it burned one of the browser's live-context budget immediately before the real
 	// context is created. Now skipped entirely when the answer cannot matter.
 	const softwareRendering = !config.suppressWarnings && isRunningSwiftShader();
-	// Wallpaper, screensaver and preview hosts deliver no input to the page, so nobody could
-	// press "Plug me in": warn and start rather than leave a static notice up forever.
+	// Nothing on a wallpaper, screensaver or preview host can press "Plug me in" (a wallpaper's
+	// opt-in pointer forwarding reaches only the canvas): warn and start rather than leave a
+	// static notice up forever.
 	const nonInteractive = window.matrixHostBootstrap?.interactive === false;
 	if (softwareRendering && nonInteractive) {
 		console.warn("Hardware acceleration is disabled; rendering in software because this host takes no input.");

@@ -4,7 +4,7 @@ import { makeComputeTarget, makeUniformBuffer, loadTexture, loadShader, makeBind
 
 // Multiplies the rendered rain and bloom by a loaded in image
 
-// AUD-21: a bundled default, so effect=image needs no network; upstream fetched a photo from
+// AUD-21: a bundled default, so effect=image needs no network; upstream fetched an image from
 // upload.wikimedia.org here.
 const defaultBGURL = "assets/sand.png";
 
