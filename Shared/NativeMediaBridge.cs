@@ -234,7 +234,10 @@ internal sealed class NativeMediaBridge : IDisposable
             (new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special));
     }
 
-    private bool Unchanged(string query, Rectangle bounds, int dpi) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi;
+    // The same request is unchanged only while the wallpaper it applied is still current: the
+    // configurator re-sends its query when the preview is shown, after any wallpaper change.
+    private bool Unchanged(string query, Rectangle bounds, int dpi) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi
+        && (_wallpaper is null || _wallpaper.Epoch == Volatile.Read(ref _environment));
 
     // 2026-11-08 (AUD-09): the wallpaper capture with its PNG encode and both GDI atlases take
     // most of a second on a large virtual screen. An edit or a refresh therefore builds what the
@@ -314,7 +317,7 @@ internal sealed class NativeMediaBridge : IDisposable
     private static extern bool SystemParametersInfo(uint action, uint parameter, ref uint value, uint update);
 
     // The configurator never refreshes, so preference and display changes expire the wallpaper here.
-    private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    internal void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
     {
         if (e.Category is UserPreferenceCategory.Desktop or UserPreferenceCategory.Color or UserPreferenceCategory.Accessibility or UserPreferenceCategory.VisualStyle)
             InvalidateEnvironment();
@@ -368,8 +371,17 @@ internal sealed class NativeMediaBridge : IDisposable
         try
         {
             if (_disposed) return;
+            var generation = _generation;
+            var before = BootstrapJson(0);
             await BuildAheadAsync(query, bounds, 96);
             Prepare(query, bounds);
+            // As in a refresh, an update that changed nothing keeps its generation and is not
+            // republished, because the ZMatrix page discards its raster on every bootstrap it applies.
+            if (BootstrapJson(0) == before)
+            {
+                _generation = generation;
+                return;
+            }
             await PublishBootstrapAsync();
         }
         finally { DropBuilt(); _updateLock.Release(); }

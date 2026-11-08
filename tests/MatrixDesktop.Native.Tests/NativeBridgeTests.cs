@@ -26,6 +26,7 @@ internal static class NativeBridgeTests
         ("Native bridge refresh rebuilds the atlases when font smoothing changes", SmoothingRefreshRebuildsAtlases),
         ("Native bridge builds edit and refresh work off the UI thread", NativeWorkRunsOffTheUiThread),
         ("Native bridge keeps atlas roles apart when their inputs match", BuiltAtlasRolesStayApart),
+        ("Native bridge same-query update follows a wallpaper change", SameQueryUpdateFollowsWallpaper),
     ];
 
     // MainForm's startup order: the constructor runs the before-show step, then
@@ -388,5 +389,26 @@ internal static class NativeBridgeTests
             : $"none published (warnings: {bootstrap.GetProperty("warnings")})";
         Require(work.Normal == 1 && work.Special == 1 && special.Contains("-special", StringComparison.Ordinal),
             $"Each role must publish its own atlas: normal={work.Normal}, special={work.Special}, special page {special}.");
+    }
+
+    // R2-09: the configurator re-sends the same query when its preview is shown again, so a
+    // wallpaper change in between must reach that update; one that changed nothing republishes nothing.
+    private static void SameQueryUpdateFollowsWallpaper()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        string Url() => Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!;
+        void Broadcast() => bridge.OnUserPreferenceChanged(null, new Microsoft.Win32.UserPreferenceChangedEventArgs(Microsoft.Win32.UserPreferenceCategory.Desktop));
+        Update(bridge, "scene=zmatrix");
+        var first = Url();
+        Broadcast();
+        Update(bridge, "scene=zmatrix");
+        Require(work.Wallpaper == 2 && Url() == first && Generation(bridge) == 1,
+            $"A same-query update after a broadcast must re-read the wallpaper, and an unchanged one keeps its id and generation 1: {work.Wallpaper} reads, {Url()} at generation {Generation(bridge)}.");
+        work.Fill = 9;
+        Broadcast();
+        Update(bridge, "scene=zmatrix");
+        Require(Url() != first && Served(bridge, Url()) is [9, ..] && Generation(bridge) == 2,
+            $"A same-query update after a wallpaper change must serve the new wallpaper under a new id as generation 2: {Url()} serves [{string.Join(",", Served(bridge, Url()) ?? [])}] at generation {Generation(bridge)}.");
     }
 }
