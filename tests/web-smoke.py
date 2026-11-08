@@ -1038,43 +1038,62 @@ def check_context_loss_recovery(browser, origin):
 
 
 def check_image_effect_offline(browser, origin):
-    """effect=image with no url must render with no network instead of failing the renderer."""
-    name = "effect=image with no url renders with every external request blocked"
-    page = browser.new_page(viewport={"width": 480, "height": 360})
-    blocked, warnings = [], []
-    page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
+    """effect=image must render with no network (AUD-21): with no url it draws the bundled default
+    image without any external request, and an image that cannot load leaves the rain uncoloured
+    with a console warning instead of failing the renderer."""
+    unreachable = "https://example.invalid/background.png"
+    cases = (
+        ("effect=image with no url renders its bundled default with no external request", "", None),
+        ("effect=image with an unreachable url still renders and names it in a warning",
+         "&url=https%3A%2F%2Fexample.invalid%2Fbackground.png", unreachable),
+    )
+    for name, query, expected_block in cases:
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        blocked, warnings = [], []
+        page.on("console", lambda m, warnings=warnings: warnings.append(m.text) if m.type == "warning" else None)
 
-    def offline(route):
-        if route.request.url.startswith(origin + "/"):
-            route.continue_()
-        else:
-            blocked.append(route.request.url)
-            route.abort("internetdisconnected")
+        def offline_for(blocked):
+            def offline(route):
+                if route.request.url.startswith(origin + "/"):
+                    route.continue_()
+                else:
+                    blocked.append(route.request.url)
+                    route.abort("internetdisconnected")
+            return offline
 
-    try:
-        page.route("**/*", offline)
-        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&effect=image", wait_until="load")
         try:
-            page.wait_for_function(READY, timeout=20000)
-        except Exception:
-            notice = page.evaluate("() => [...document.querySelectorAll('.notice')].map(n => n.textContent.trim()).join(' | ')")
-            fail(name, f"no ready renderer within 20 s ({len(blocked)} external request(s) blocked); notice: {notice or 'none'}")
-            return
-        page.wait_for_timeout(1500)
-        lit = bright_fraction(page.screenshot())
-        problems = []
-        if page.evaluate("document.querySelectorAll('.notice').length") > 0:
-            problems.append("a .notice is shown")
-        if lit <= LIT:
-            problems.append(f"only {lit:.2%} bright pixels, so the rain is not visible")
-        if blocked and not any("background image" in text.lower() for text in warnings):
-            problems.append("no console warning names the missing background image")
-        if problems:
-            fail(name, "; ".join(problems))
-        else:
-            ok(name, f"{len(blocked)} external request(s) blocked, {lit:.1%} bright pixels")
-    finally:
-        page.close()
+            page.route("**/*", offline_for(blocked))
+            page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&effect=image{query}", wait_until="load")
+            try:
+                page.wait_for_function(READY, timeout=20000)
+            except Exception:
+                notice = page.evaluate("() => [...document.querySelectorAll('.notice')].map(n => n.textContent.trim()).join(' | ')")
+                fail(name, f"no ready renderer within 20 s ({len(blocked)} external request(s) blocked); notice: {notice or 'none'}")
+                continue
+            page.wait_for_timeout(1500)
+            lit = bright_fraction(page.screenshot())
+            image_warnings = [text for text in warnings if "background image" in text.lower()]
+            problems = []
+            if page.evaluate("document.querySelectorAll('.notice').length") > 0:
+                problems.append("a .notice is shown")
+            if lit <= LIT:
+                problems.append(f"only {lit:.2%} bright pixels, so the rain is not visible")
+            if expected_block is None:
+                if blocked:
+                    problems.append("the default image needs the network: " + ", ".join(blocked))
+                if image_warnings:
+                    problems.append("the bundled default image did not load: " + image_warnings[0])
+            else:
+                if blocked != [expected_block]:
+                    problems.append(f"expected only {expected_block} to be blocked, got {blocked}")
+                if not any(expected_block in text for text in image_warnings):
+                    problems.append("no console warning names the unreachable background image")
+            if problems:
+                fail(name, "; ".join(problems))
+            else:
+                ok(name, f"{len(blocked)} external request(s) blocked, {lit:.1%} bright pixels")
+        finally:
+            page.close()
 
 
 def check_startup_paths(browser, origin):

@@ -383,6 +383,8 @@ for (const backend of ["WebGPU", "REGL"]) {
 		const empty = await runImagePass(backend, { url: "" });
 		assert.equal(plain.requested.length, 1);
 		assert.notEqual(plain.requested[0], "", "with no url the default image must be requested");
+		assert.doesNotMatch(plain.requested[0], /^[a-z][a-z\d+.-]*:/i, "the default image must be bundled, not fetched from the network");
+		assert.ok((await readFile(new URL(plain.requested[0], root))).length > 0, "the default image must ship in web/");
 		assert.deepEqual(empty.requested, plain.requested, "url= must request the same default image as no url");
 		for (const run of [plain, empty]) {
 			assert.deepEqual([run.warnings, run.diagnostics.errors], [[], []], "a loaded image must not warn");

@@ -4,7 +4,9 @@ import { makeComputeTarget, makeUniformBuffer, loadTexture, loadShader, makeBind
 
 // Multiplies the rendered rain and bloom by a loaded in image
 
-const defaultBGURL = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Flammarion_Colored.jpg/917px-Flammarion_Colored.jpg";
+// AUD-21: a bundled default, so effect=image needs no network; upstream fetched a photo from
+// upload.wikimedia.org here.
+const defaultBGURL = "assets/sand.png";
 
 export default ({ config, device: nativeDevice }) => {
 	const owner = createResourceOwner();
