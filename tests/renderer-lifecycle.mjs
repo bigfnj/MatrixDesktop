@@ -163,6 +163,54 @@ await test("WebGPU-to-REGL fallback draws on a fresh canvas and keeps the WebGPU
 	}
 });
 
+await test("a lost renderer reloads within a budget and then explains itself", async () => {
+	const { default: install, RECOVERY_KEY } = await import("../MatrixDesktop/web/js/rendererRecovery.js");
+	const run = ({ stamps = [], storage, time = 1_000_000 } = {}) => {
+		const listeners = {}, timers = [], log = { reloads: 0, errors: [], prevented: 0 };
+		const items = new Map([[RECOVERY_KEY, JSON.stringify(stamps)]]);
+		const hook = install({
+			target: { addEventListener: (type, fn, capture) => { assert.equal(capture, true, `${type} must be a capture listener`); listeners[type] = fn; } },
+			storage: storage ?? (() => ({ getItem: (key) => items.get(key) ?? null, setItem: (key, value) => items.set(key, value) })),
+			reload: () => log.reloads++, showError: (error) => log.errors.push(error.message), now: () => time,
+			setTimer: (fn, ms) => { timers.push({ fn, ms, live: true }); return timers.length; },
+			clearTimer: (id) => { if (id != null) timers[id - 1].live = false; },
+		});
+		const fire = (type) => listeners[type]?.({ preventDefault: () => log.prevented++ });
+		return { hook, fire, timers, log, items };
+	};
+	let page = run();
+	page.fire("webglcontextlost");
+	assert.equal(page.log.prevented, 1, "the loss must ask the browser to restore the context");
+	assert.equal(page.log.reloads, 0, "a WebGL loss waits for the restore");
+	page.hook("WebGL context lost");
+	assert.equal(page.log.reloads, 0, "a renderer's hook call during a pending WebGL loss must not reload early");
+	page.fire("webglcontextrestored");
+	assert.equal(page.log.reloads, 1, "a restored context must reload the page");
+	assert.equal(page.timers[0].live, false, "the restore must cancel the no-restore timer");
+	assert.deepEqual(JSON.parse(page.items.get(RECOVERY_KEY)), [1_000_000]);
+	page.fire("webglcontextrestored"); page.hook("again");
+	assert.equal(page.log.reloads, 1, "one loss reloads once");
+	page = run();
+	page.fire("webglcontextlost");
+	assert.equal(page.timers[0].ms, 10000);
+	page.timers[0].fn();
+	assert.equal(page.log.reloads, 1, "no restore within the wait must still reload");
+	page = run();
+	page.hook("WebGPU device lost (unknown)");
+	assert.equal(page.log.reloads, 1, "a WebGPU device loss reloads at once");
+	page = run({ stamps: [999_000, 998_000, 997_000] });
+	page.fire("webglcontextlost"); page.fire("webglcontextrestored");
+	assert.equal(page.log.reloads, 0, "three recoveries in five minutes exhaust the budget");
+	assert.match(page.log.errors[0] ?? "", /could not be recovered automatically/);
+	page = run({ stamps: [999_000, 998_000, 1_000_000 - 5 * 60 * 1000] });
+	page.hook("WebGPU device lost");
+	assert.equal(page.log.reloads, 1, "a stamp older than five minutes no longer counts");
+	page = run({ storage: () => { throw new Error("SecurityError"); } });
+	page.hook("WebGPU device lost");
+	assert.equal(page.log.reloads, 0, "without storage there is no budget, so no reload");
+	assert.equal(page.log.errors.length, 1);
+});
+
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {
 	let disconnects = 0;
 	const run = (behavior) => getLKG(true, { timeoutMs: 5, loadCore: async () => ({ Client: class {

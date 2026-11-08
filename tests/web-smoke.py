@@ -834,10 +834,93 @@ def check_noninteractive_software_start(browser, origin):
             page.close()
 
 
+def bright_fraction(png_bytes, threshold=40):
+    from PIL import Image
+    histogram = Image.open(io.BytesIO(png_bytes)).convert("L").histogram()
+    return sum(histogram[threshold + 1:]) / max(1, sum(histogram))
+
+
+LOSE = ("() => { window.__beforeLoss = true; const gl = document.querySelector('canvas').getContext('webgl'); "
+        "window.__lose = gl.getExtension('WEBGL_lose_context'); window.__lose.loseContext(); }")
+
+
+LIT = 0.002  # a lost-and-restored canvas is exactly black; ZMatrix rain at 480x360 lights about 0.8%
+
+
+def check_context_loss_recovery(browser, origin):
+    """A lost WebGL context must come back as rendering rain, not a black page that looks healthy."""
+    for scene in ("matrix", "uc3d", "zmatrix"):
+        name = f"{scene} renders again after a WebGL context loss and restore"
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        try:
+            page.goto(f"{origin}/index.html?suppressWarnings=true&scene={scene}&numColumns=40", wait_until="load")
+            page.wait_for_function(READY, timeout=30000)
+            page.wait_for_timeout(1500)
+            before = bright_fraction(page.screenshot())
+            if before <= LIT:
+                fail(name, f"witness failed: only {before:.2%} bright pixels before the loss")
+                continue
+            page.evaluate(LOSE)
+            page.wait_for_timeout(300)
+            try:
+                with page.expect_navigation(timeout=8000):
+                    page.evaluate("window.__lose.restoreContext()")
+            except Exception:
+                fail(name, "the page did not reload within 8 s of restoreContext()")
+                continue
+            page.wait_for_function(READY + " && window.__beforeLoss === undefined", timeout=30000)
+            first = page.evaluate("window.matrixRuntimeDiagnostics.frames")
+            for _ in range(12):  # rain builds up after the reload; ZMatrix starts sparse
+                page.wait_for_timeout(500)
+                after = bright_fraction(page.screenshot())
+                if after > LIT:
+                    break
+            frames = page.evaluate("window.matrixRuntimeDiagnostics.frames")
+            if frames > first and after > LIT:
+                ok(name, f"bright {before:.1%} -> {after:.1%}, frames {first} -> {frames}")
+            else:
+                fail(name, f"after the reload: frames {first} -> {frames}, {after:.2%} bright pixels")
+        except Exception as exc:
+            fail(name, f"{type(exc).__name__}: {str(exc).splitlines()[0]}")
+        finally:
+            page.close()
+
+    name = "a WebGL context that is never restored still reloads"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    try:
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+        page.wait_for_function(READY, timeout=30000)
+        with page.expect_navigation(timeout=14000):
+            page.evaluate(LOSE)
+        ok(name)
+    except Exception as exc:
+        fail(name, f"no reload within 14 s of an unrestored loss: {type(exc).__name__}")
+    finally:
+        page.close()
+
+    name = "a renderer loss past the reload budget leaves a visible notice"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    try:
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+        page.wait_for_function(READY, timeout=30000)
+        page.evaluate("() => sessionStorage.setItem('matrixRendererRecoveries', JSON.stringify([Date.now(), Date.now(), Date.now()]))")
+        page.evaluate("() => { window.__beforeLoss = true; window.matrixRendererLost('WebGPU device lost (smoke)'); }")
+        page.wait_for_function("[...document.querySelectorAll('.notice')].some(n => n.textContent.includes('could not be recovered'))", timeout=5000)
+        if page.evaluate("window.__beforeLoss") is True:
+            ok(name)
+        else:
+            fail(name, "the page reloaded although the budget was spent")
+    except Exception as exc:
+        fail(name, f"no notice after the budget was spent: {type(exc).__name__}")
+    finally:
+        page.close()
+
+
 def check_startup_paths(browser, origin):
     check_config_error_boundary(browser, origin)
     check_plug_me_in(browser, origin)
     check_noninteractive_software_start(browser, origin)
+    check_context_loss_recovery(browser, origin)
 
 
 def main():

@@ -2,6 +2,7 @@ import makeConfig from "./config.js";
 import { wantsWebGPU } from "./rendererChoice.js";
 import { stopCamera } from "./camera.js";
 import loadBackend from "./rendererLoader.js";
+import installRecovery from "./rendererRecovery.js";
 
 const canvas = document.createElement("canvas");
 document.body.appendChild(canvas);
@@ -50,6 +51,21 @@ const showError = (error) => {
 	notice.appendChild(message);
 	document.body.appendChild(notice);
 };
+
+// A lost GPU context or device reloads the page within a budget, then leaves a notice
+// (see rendererRecovery.js). Renderers call window.matrixRendererLost?.(reason). The native
+// bootstrap only matches the query the page was opened with, so a reload first undoes
+// Plug me in's history rewrite.
+const startupSearch = location.search;
+window.matrixRendererLost = installRecovery({
+	target: window,
+	storage: () => window.sessionStorage,
+	reload: () => {
+		if (location.search !== startupSearch) history.replaceState(history.state, "", location.pathname + startupSearch);
+		location.reload();
+	},
+	showError,
+});
 
 document.body.onload = async () => {
 	// WebView2 can retain an older document-created script in a reused iframe.
