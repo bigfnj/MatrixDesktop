@@ -21,12 +21,13 @@ internal static class HostWiring
     internal static int Verify(string path)
     {
         List<Call> calls;
+        List<Call> functionLoads = [];
         List<string> mainFormConstructors;
         try
         {
             using var stream = File.OpenRead(path);
             using var pe = new PEReader(stream);
-            calls = ReadCalls(pe, pe.GetMetadataReader());
+            calls = ReadCalls(pe, pe.GetMetadataReader(), functionLoads);
             mainFormConstructors = InstanceConstructorAccess(pe.GetMetadataReader(), "MatrixDesktop.MainForm");
         }
         catch (Exception error)
@@ -96,9 +97,18 @@ internal static class HostWiring
             Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::ExitThreadCore" && call.Callee == "MatrixDesktop.WallpaperInstanceGuard::Dispose"),
                 "the context must release the guard when it exits, or a newer launch waits out its bound");
         });
+        // R2-02. CreateTray subscribes Opening twice (Refresh desktop visibility, AUD-09, and this
+        // refresh), so "CreateTray calls add_Opening" passed with this refresh deleted. Resolve the
+        // method each Opening delegate is built from and require one to read AutostartService.
         failures += Run($"the tray refreshes Start with Windows when its menu opens: {path}", () =>
-            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::CreateTray" && call.Callee == "System.Windows.Forms.ToolStripDropDown::add_Opening"),
-                "CreateTray must subscribe the menu's Opening, so another launch's or the configurator's shortcut change shows"));
+        {
+            var handlers = DelegateTargets(calls, functionLoads, "MatrixDesktop.MatrixApplicationContext::CreateTray",
+                "System.ComponentModel.CancelEventHandler::.ctor", "System.Windows.Forms.ToolStripDropDown::add_Opening");
+            Check.True(handlers.Count > 0, "witness: the scan must resolve the handler of each Opening subscription in CreateTray");
+            Check.True(handlers.Any(handler => Reaches(calls, handler, ReadsAutostart, depth: 2)),
+                "an Opening handler in CreateTray must read AutostartService, so a shortcut that another launch or Explorer changed shows when the menu opens: "
+                + string.Join("; ", handlers));
+        });
         // AUD-07. RendererFailurePolicy has its own tests; these prove WebView2 failures reach it.
         failures += Run($"WebView2 process failures reach RendererFailurePolicy: {path}", () =>
         {
@@ -126,13 +136,35 @@ internal static class HostWiring
             .Where(method => reader.GetString(method.Name) == ".ctor")
             .Select(method => (method.Attributes & System.Reflection.MethodAttributes.MemberAccessMask).ToString()).ToList();
 
+    // The method each delegate passed to subscribe in caller is built from: the nearest ldftn
+    // before the subscribe call, with the delegate's constructor between them.
+    private static List<string> DelegateTargets(List<Call> calls, List<Call> functionLoads, string caller, string delegateConstructor, string subscribe) =>
+        calls.Where(call => call.Caller == caller && call.Callee == subscribe).Select(call =>
+        {
+            var constructed = calls.LastOrDefault(made => made.Caller == caller && made.Callee == delegateConstructor && made.Offset < call.Offset);
+            var loaded = constructed is null ? null : functionLoads.LastOrDefault(load => load.Caller == caller && load.Offset < constructed.Offset);
+            return loaded?.Callee;
+        }).OfType<string>().ToList();
+
+    // True when method, or a MatrixDesktop method it calls within depth steps, calls a matching callee.
+    private static bool Reaches(List<Call> calls, string method, Func<string, bool> matches, int depth)
+    {
+        var callees = calls.Where(call => call.Caller == method).Select(call => call.Callee).Distinct().ToList();
+        return callees.Any(matches) || depth > 1 && callees.Where(callee => callee.StartsWith("MatrixDesktop.", StringComparison.Ordinal) && callee != method)
+            .Any(callee => Reaches(calls, callee, matches, depth - 1));
+    }
+
+    // Reads, never writes: Enabled, or the State family that compares the shortcut with this launch.
+    private static bool ReadsAutostart(string callee) =>
+        callee == "MatrixDesktop.AutostartService::get_Enabled" || callee.StartsWith("MatrixDesktop.AutostartService::State", StringComparison.Ordinal);
+
     private static int Run(string name, Action check)
     {
         try { check(); Console.WriteLine($"PASS  {name}"); return 0; }
         catch (Exception error) { Console.WriteLine($"FAIL  {name}: {error.Message}"); return 1; }
     }
 
-    private static List<Call> ReadCalls(PEReader pe, MetadataReader reader)
+    private static List<Call> ReadCalls(PEReader pe, MetadataReader reader, List<Call> functionLoads)
     {
         var calls = new List<Call>();
         foreach (var typeHandle in reader.TypeDefinitions)
@@ -163,6 +195,8 @@ internal static class HostWiring
                             var token = il.ReadInt32();
                             if (code == OpCodes.Call || code == OpCodes.Callvirt || code == OpCodes.Newobj)
                                 calls.Add(new Call(caller, offset, MethodName(reader, MetadataTokens.EntityHandle(token)), previous));
+                            else if (code == OpCodes.Ldftn || code == OpCodes.Ldvirtftn)
+                                functionLoads.Add(new Call(caller, offset, MethodName(reader, MetadataTokens.EntityHandle(token)), previous));
                             break;
                         default: il.ReadInt32(); break;
                     }
