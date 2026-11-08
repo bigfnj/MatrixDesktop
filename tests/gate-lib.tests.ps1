@@ -397,6 +397,66 @@ try {
         Assert-Equal $null (Get-RuntimeConfigOption -Path $bare -Name 'System.Globalization.Invariant') 'no configProperties at all'
     }
 
+    # ------------------------------------------------------------ AUD-59 expected cannot-verify case
+
+    # Stand-ins for uc3d-calibration.py: the fixed script (honours the hidden-adapter hook) and
+    # the script as it was (no probe, so the backend assertion raises and Python exits 1).
+    $fixedCalibration = New-StubFile 'calibration_fixed.py' ("import os`n" +
+        "if os.environ.get('MD_UC3D_HIDE_WEBGPU_ADAPTER') == '1':`n" +
+        "    print('CANNOT VERIFY WebGPU: browser has no adapter', flush=True)`n" +
+        "    raise SystemExit(2)`n" +
+        "print('PASS webgpu amount-500: synthetic adapter', flush=True)`n")
+    $oldCalibration = New-StubFile 'calibration_old.py' ("import sys`n" +
+        "print('Traceback (most recent call last):', file=sys.stderr)`n" +
+        "print(`"AssertionError: expected the webgpu backend, observed 'regl'`", file=sys.stderr)`n" +
+        "raise SystemExit(1)`n")
+    $hiddenCase = @{ Arguments = ' --renderer webgpu --only amount-500'; Environment = @{ MD_UC3D_HIDE_WEBGPU_ADAPTER = '1' }
+        ExpectCannotVerify = '(?m)^\s*CANNOT VERIFY WebGPU'; Forbidden = '(?m)^\s*PASS webgpu' }
+
+    Invoke-TestCase 'AUD-59 (a) an expected cannot-verify case passes only on exit 2 with the witness and no WebGPU pass' {
+        if (-not $Python) { return 'CANNOT VERIFY AUD-59 (a): no Python interpreter for the stubs' }
+        $fixed = Invoke-GatePythonCase -Python $Python -ScriptPath $fixedCalibration -Case $hiddenCase -Log (New-LogPath 'aud59-fixed')
+        Assert-Equal 'ok' $fixed.Outcome "the fixed script with the adapter hidden ($($fixed.Detail))"
+        Assert-Equal 'CANNOT VERIFY WebGPU: browser has no adapter' $fixed.Detail 'the pass quotes the witness'
+        $old = Invoke-GatePythonCase -Python $Python -ScriptPath $oldCalibration -Case $hiddenCase -Log (New-LogPath 'aud59-old')
+        Assert-Equal 'fail' $old.Outcome 'the old script exits 1, a product failure'
+        if ($old.Detail -notlike 'expected the cannot-verify exit 2, observed exit 1*') { throw "the failure does not say what was expected ($($old.Detail))" }
+        $both = New-StubFile 'calibration_both.py' ("print('CANNOT VERIFY WebGPU: browser has no adapter')`nprint('PASS webgpu amount-500: 500 streams')`nraise SystemExit(2)`n")
+        $mixed = Invoke-GatePythonCase -Python $Python -ScriptPath $both -Case $hiddenCase -Log (New-LogPath 'aud59-both')
+        Assert-Equal 'fail' $mixed.Outcome 'a WebGPU pass printed with the adapter hidden'
+        $usage = New-StubFile 'calibration_usage.py' ("import argparse`nargparse.ArgumentParser().parse_args()`n")
+        $usageVerdict = Invoke-GatePythonCase -Python $Python -ScriptPath $usage -Case $hiddenCase -Log (New-LogPath 'aud59-usage')
+        Assert-Equal 'fail' $usageVerdict.Outcome 'an argparse exit 2 has no witness'
+        $plain = Invoke-GatePythonCase -Python $Python -ScriptPath $fixedCalibration -Case @{ Arguments = '' } -Log (New-LogPath 'aud59-plain')
+        Assert-Equal 'ok' $plain.Outcome 'a case without ExpectCannotVerify keeps the ordinary verdict (exit 0 passes)'
+    }
+
+    Invoke-TestCase 'AUD-59 (b) a case Environment reaches the child only' {
+        if (-not $Python) { return 'CANNOT VERIFY AUD-59 (b): no Python interpreter for the stubs' }
+        Assert-Equal $null ([Environment]::GetEnvironmentVariable('MD_UC3D_HIDE_WEBGPU_ADAPTER', 'Process')) 'the test starts without the hook set'
+        $without = Invoke-GatePythonCase -Python $Python -ScriptPath $fixedCalibration -Case @{ Arguments = ''; ExpectCannotVerify = $hiddenCase.ExpectCannotVerify } -Log (New-LogPath 'aud59-noenv')
+        Assert-Equal 'fail' $without.Outcome 'without the Environment entry the stand-in finds an adapter and exits 0'
+        $with = Invoke-GatePythonCase -Python $Python -ScriptPath $fixedCalibration -Case $hiddenCase -Log (New-LogPath 'aud59-env')
+        Assert-Equal 'ok' $with.Outcome 'the Environment entry reaches the child'
+        Assert-Equal $null ([Environment]::GetEnvironmentVariable('MD_UC3D_HIDE_WEBGPU_ADAPTER', 'Process')) 'the hook is removed from this process again'
+    }
+
+    Invoke-TestCase 'AUD-59 (c) the registered tier-1 case hides the adapter and expects the cannot-verify exit' {
+        if (-not $Python) { return 'CANNOT VERIFY AUD-59 (c): no Python interpreter for the stubs' }
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $registered = @()
+        foreach ($node in @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.HashtableAst] }, $true))) {
+            try { $value = $node.SafeGetValue() } catch { continue }
+            if ($value -is [hashtable] -and $value.ContainsKey('Script') -and $value['Script'] -eq 'tests\uc3d-calibration.py' -and "$($value['Arguments'])" -match '--renderer webgpu') { $registered += $value }
+        }
+        Assert-Equal 1 $registered.Count 'run-gate.ps1 registers one webgpu calibration case'
+        $case = $registered[0]
+        $fixed = Invoke-GatePythonCase -Python $Python -ScriptPath $fixedCalibration -Case $case -Log (New-LogPath 'aud59-registered-fixed')
+        Assert-Equal 'ok' $fixed.Outcome "the registered case against the fixed stand-in ($($fixed.Detail))"
+        $old = Invoke-GatePythonCase -Python $Python -ScriptPath $oldCalibration -Case $case -Log (New-LogPath 'aud59-registered-old')
+        Assert-Equal 'fail' $old.Outcome 'the registered case against the old stand-in'
+    }
+
     Invoke-TestCase 'AUD-28 (f) the newest CI run on the tagged commit decides, and no run is a failure' {
         function New-Run { param([long]$Id, [string]$Status, [string]$Conclusion) [pscustomobject]@{ id = $Id; status = $Status; conclusion = $Conclusion } }
         Assert-Equal 'missing' (Get-CiCheckVerdict -CheckRuns @()).Outcome 'CI never ran on the commit'

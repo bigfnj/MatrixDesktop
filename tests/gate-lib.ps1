@@ -319,13 +319,72 @@ function Invoke-GateChildCase {
     $saved = @{}
     foreach ($name in $Environment.Keys) {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-        [Environment]::SetEnvironmentVariable($name, $Environment[$name], 'Process')
+        Set-ProcessEnvironmentVariable -Name $name -Value $Environment[$name]
     }
     try {
         $run = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -PassThru -NoNewWindow `
             -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
     } finally {
-        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        foreach ($name in $saved.Keys) { Set-ProcessEnvironmentVariable -Name $name -Value $saved[$name] }
     }
     return Get-GateCaseVerdict -ExitCode $run.ExitCode -Log $Log -Witness $Witness
+}
+
+# $null removes the variable. PowerShell hands a .NET string parameter '' for $null, and
+# .NET (pwsh 7) keeps a variable set to '' where .NET Framework (5.1) removed it, so a removal
+# has to pass [NullString]::Value; otherwise pwsh leaves every removed variable behind, empty.
+function Set-ProcessEnvironmentVariable {
+    param([Parameter(Mandatory = $true)][string]$Name, $Value)
+    if ($null -eq $Value) { [Environment]::SetEnvironmentVariable($Name, [NullString]::Value, 'Process') }
+    else { [Environment]::SetEnvironmentVariable($Name, [string]$Value, 'Process') }
+}
+
+# A regression case whose correct outcome IS the cannot-verify exit. uc3d-calibration.py with
+# the WebGPU adapter hidden exited 1, a product failure, while README promised unverified
+# coverage (AUD-59). So exit 2 with the witness passes, any other exit fails, and a
+# Forbidden line (a WebGPU pass with no adapter) fails too.
+function Get-ExpectedCannotVerifyVerdict {
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][string]$Log,
+        [Parameter(Mandatory = $true)][string]$Witness,
+        [string]$Forbidden
+    )
+    $text = ''
+    foreach ($path in @($Log, "$Log.err")) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) { $text += [IO.File]::ReadAllText($path) + "`n" }
+    }
+    $where = "see $Log and $Log.err"
+    if ($ExitCode -ne 2) {
+        return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "expected the cannot-verify exit 2, observed exit $ExitCode; $where" }
+    }
+    $m = [regex]::Match($text, $Witness)
+    if (-not $m.Success) {
+        return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "exit 2 without the witness '$Witness'; $where" }
+    }
+    if ($Forbidden) {
+        $bad = [regex]::Match($text, $Forbidden)
+        if ($bad.Success) {
+            return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "printed '$((($text.Substring($bad.Index)) -split "`r?`n")[0].Trim())' as well; $where" }
+        }
+    }
+    return [pscustomobject]@{ Outcome = 'ok'; ExitCode = $ExitCode; Detail = (($text.Substring($m.Index)) -split "`r?`n")[0].Trim() }
+}
+
+# One tier-1 Python case: Arguments, optional Environment (for the child only) and optional
+# ExpectCannotVerify/Forbidden, which switch the verdict to Get-ExpectedCannotVerifyVerdict.
+function Invoke-GatePythonCase {
+    param(
+        [Parameter(Mandatory = $true)][string]$Python,
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][hashtable]$Case,
+        [Parameter(Mandatory = $true)][string]$Log
+    )
+    $arguments = '"' + $ScriptPath + '"'
+    if ($Case.ContainsKey('Arguments')) { $arguments += $Case.Arguments }
+    $environment = if ($Case.ContainsKey('Environment')) { $Case.Environment } else { @{} }
+    $verdict = Invoke-GateChildCase -FilePath $Python -ArgumentList $arguments -Log $Log -Environment $environment
+    if (-not $Case.ContainsKey('ExpectCannotVerify')) { return $verdict }
+    $forbidden = if ($Case.ContainsKey('Forbidden')) { $Case.Forbidden } else { '' }
+    return Get-ExpectedCannotVerifyVerdict -ExitCode $verdict.ExitCode -Log $Log -Witness $Case.ExpectCannotVerify -Forbidden $forbidden
 }

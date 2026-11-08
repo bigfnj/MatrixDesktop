@@ -675,6 +675,7 @@ try {
         Test-Unchecked 'screensaver foreground wait and ownership' 'Python is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D original WebGL calibration' 'Python with Playwright is unavailable'
+        Test-Unchecked 'UC3D calibration reports a hidden WebGPU adapter as unverified' 'Python with Playwright is unavailable'
         Test-Unchecked 'ZMatrix WebGL smoke' 'Python with Playwright is unavailable'
         Test-Unchecked 'ZMatrix configurator controls and imports' 'Python with Playwright is unavailable'
         Test-Unchecked 'original Matrix host playback' 'Python with Playwright is unavailable'
@@ -686,6 +687,10 @@ try {
             @{ Name = 'screensaver foreground wait and ownership'; Script = 'tests\screensaver-focus.test.py'; Arguments = '' },
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' },
+            # AUD-59: with no WebGPU adapter the calibration must report unverified coverage
+            # (exit 2 and its witness), as README says, not a product failure (exit 1).
+            @{ Name = 'UC3D calibration reports a hidden WebGPU adapter as unverified'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer webgpu --only amount-500'
+                Environment = @{ MD_UC3D_HIDE_WEBGPU_ADAPTER = '1' }; ExpectCannotVerify = '(?m)^\s*CANNOT VERIFY WebGPU'; Forbidden = '(?m)^\s*PASS webgpu' },
             @{ Name = 'ZMatrix WebGL smoke'; Script = 'tests\zmatrix-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'ZMatrix configurator controls and imports'; Script = 'tests\zmatrix-configurator.py'; Arguments = '' },
             @{ Name = 'UC3D real browser audio pause'; Script = 'tests\uc3d-audio-browser.py'; Arguments = '' },
@@ -698,8 +703,9 @@ try {
                 continue
             }
             # Exit 2 is UNCHECKED only with a printed cannot-verify witness: argparse usage
-            # errors and a missing script also exit 2, and those are harness failures.
-            $verdict = Invoke-GateChildCase -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Log $log
+            # errors and a missing script also exit 2, and those are harness failures. A case
+            # with ExpectCannotVerify passes only on that exit (Invoke-GatePythonCase).
+            $verdict = Invoke-GatePythonCase -Python $py -ScriptPath $path -Case $case -Log $log
             if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
             elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
             else {
