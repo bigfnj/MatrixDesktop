@@ -24,4 +24,16 @@ internal static class HostPermissionPolicy
     // The same three host kinds the bridge's bootstrap marks interactive: false.
     private static bool CannotPrompt(NativeHostKind host) =>
         host is NativeHostKind.Wallpaper or NativeHostKind.Screensaver or NativeHostKind.ScreensaverPreview;
+
+    // R2-52. WebView2 saves a Block from its camera prompt in the profile every host shares, and
+    // nothing could undo it: one Block switched the Mirror camera off everywhere, for good. The
+    // Camera setting is the consent, so MainForm clears a saved camera denial for this app's
+    // origin at every start, and the next launch that asks prompts again. A saved Allow stays:
+    // it is the only way a host that cannot prompt gets the camera.
+    internal static bool ForgetsSavedState(CoreWebView2PermissionKind kind, CoreWebView2PermissionState state, string? origin, string appOrigin) =>
+        kind == CoreWebView2PermissionKind.Camera && state == CoreWebView2PermissionState.Deny && SameOrigin(origin, appOrigin);
+
+    private static bool SameOrigin(string? origin, string appOrigin) =>
+        Uri.TryCreate(origin, UriKind.Absolute, out var left) && Uri.TryCreate(appOrigin, UriKind.Absolute, out var right)
+        && Uri.Compare(left, right, UriComponents.SchemeAndServer, UriFormat.UriEscaped, StringComparison.OrdinalIgnoreCase) == 0;
 }

@@ -778,6 +778,8 @@ public sealed class MainForm : Form
             catch (Exception error) { Shared.Logger.Warn($"Could not answer a {request.PermissionKind} request: {error.Message}"); }
         };
         _webView.CoreWebView2.PermissionRequested += _permissionRequestedHandler;
+        await ForgetSavedCameraDenialAsync(_webView.CoreWebView2);
+        if (_isShuttingDown || IsDisposed) return;
 
         string webRoot;
         try
@@ -836,6 +838,29 @@ public sealed class MainForm : Form
         if (_rendererTarget is null) return true;
         try { _webView.CoreWebView2.Navigate(_rendererTarget); return true; }
         catch (Exception error) { Shared.Logger.Warn($"Could not reload the renderer: {error.Message}"); return false; }
+    }
+
+    // R2-52: one Block on WebView2's camera prompt was saved in the profile every host shares and
+    // switched the Mirror camera off for good. Before each navigation, a saved camera denial for
+    // this app is cleared (HostPermissionPolicy decides which), so the Camera setting decides again
+    // and the next interactive launch that asks shows the prompt. A saved Allow is kept.
+    private static async Task ForgetSavedCameraDenialAsync(CoreWebView2 core)
+    {
+        try
+        {
+            var profile = core.Profile;
+            foreach (var setting in await profile.GetNonDefaultPermissionSettingsAsync())
+            {
+                if (!HostPermissionPolicy.ForgetsSavedState(setting.PermissionKind, setting.PermissionState, setting.PermissionOrigin, HostOriginPrefix)) continue;
+                await profile.SetPermissionStateAsync(setting.PermissionKind, setting.PermissionOrigin, CoreWebView2PermissionState.Default);
+                Shared.Logger.Info($"Cleared a saved {setting.PermissionKind} denial for {setting.PermissionOrigin}; the next request asks again.");
+            }
+        }
+        catch (Exception error)
+        {
+            // A runtime without permission management, or a browser process that went away.
+            Shared.Logger.Warn($"Could not clear a saved camera denial: {error.Message}");
+        }
     }
 
     private async Task RetryWebViewInitializationAfterCatastrophicFailureAsync(COMException firstException)

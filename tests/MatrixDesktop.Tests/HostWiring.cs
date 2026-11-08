@@ -111,6 +111,24 @@ internal static class HostWiring
             foreach (var setter in new[] { "set_State", "set_SavesInProfile", "set_Handled" })
                 Check.True(body.Any(call => call.Callee == request + setter && call.Offset > asked.Offset), $"the handler must apply the policy's answer through {setter}");
         });
+        // R2-52. HostPermissionPolicy.ForgetsSavedState has its own native test; this proves each
+        // WebView2 initialisation clears what it picks, to the Default state, before navigating.
+        failures += Run($"MainForm clears a saved camera denial before it navigates: {path}", () =>
+        {
+            const string profile = "Microsoft.Web.WebView2.Core.CoreWebView2Profile::";
+            const string forget = "MatrixDesktop.MainForm::ForgetSavedCameraDenialAsync";
+            var init = calls.Where(call => call.Caller.StartsWith("MatrixDesktop.MainForm/<InitializeCurrentWebViewAsync>", StringComparison.Ordinal)).ToList();
+            var navigate = init.FirstOrDefault(call => call.Callee == "Microsoft.Web.WebView2.Core.CoreWebView2::Navigate");
+            Check.True(navigate is not null, "witness: the scan must see InitializeCurrentWebViewAsync navigate");
+            var cleared = init.FirstOrDefault(call => call.Callee == forget);
+            Check.True(cleared is not null && cleared.Offset < navigate!.Offset, "InitializeCurrentWebViewAsync must clear a saved camera denial before it navigates");
+            var helper = calls.Where(call => call.Caller.StartsWith("MatrixDesktop.MainForm/<ForgetSavedCameraDenialAsync>", StringComparison.Ordinal)).ToList();
+            var read = helper.FirstOrDefault(call => call.Callee == profile + "GetNonDefaultPermissionSettingsAsync");
+            var decided = helper.FirstOrDefault(call => call.Callee == "MatrixDesktop.HostPermissionPolicy::ForgetsSavedState");
+            Check.True(read is not null && decided is not null && decided.Offset > read.Offset, "the helper must read the saved settings and ask HostPermissionPolicy which to clear");
+            Check.True(helper.Any(call => call.Callee == profile + "SetPermissionStateAsync" && call.PreviousOpcode == OpCodes.Ldc_I4_0.Value && call.Offset > decided!.Offset),
+                "the helper must reset what the policy picks to CoreWebView2PermissionState.Default (0), which erases the saved state");
+        });
         failures += Run($"SystemEvents session and power subscriptions have one owner: {path}", () =>
         {
             foreach (var subscribe in new[] { "Microsoft.Win32.SystemEvents::add_SessionSwitch", "Microsoft.Win32.SystemEvents::add_PowerModeChanged" })
