@@ -438,3 +438,46 @@ function Invoke-GatePythonCase {
     $forbidden = if ($Case.ContainsKey('Forbidden')) { $Case.Forbidden } else { '' }
     return Get-ExpectedCannotVerifyVerdict -ExitCode $verdict.ExitCode -Log $Log -Witness $Case.ExpectCannotVerify -Forbidden $forbidden
 }
+
+# ---------------------------------------------------------------- build, then run what was built
+
+# Builds a project and runs the program it produced, the way the gate runs the native suite,
+# whose project is not in MatrixDesktopApp.sln. The build uses the call operator in a child
+# scope, like the solution build in run-gate.ps1, never Start-Process -Wait: -Wait also waits
+# for every descendant, and a build that compiles anything starts the compiler server
+# (VBCSCompiler), which stays alive until it idles out minutes later. 'dotnet run' under -Wait
+# held the gate that long after any native-only edit (R2-30). Only the built program runs
+# under Start-Process, redirected and classified like every gate case. A failed build is a
+# FAIL naming its log, "$Log.build".
+function Invoke-GateBuildAndRun {
+    param(
+        [Parameter(Mandatory = $true)][string]$Dotnet,
+        [Parameter(Mandatory = $true)][string]$Project,
+        [Parameter(Mandatory = $true)][string]$Program,
+        [Parameter(Mandatory = $true)][string]$Log,
+        [string]$Witness
+    )
+    $buildLog = "$Log.build"
+    # A run log left by an earlier run must not be read as this one's.
+    Remove-Item -LiteralPath $Log, "$Log.err" -Force -ErrorAction SilentlyContinue
+    $global:LASTEXITCODE = -1
+    & { $ErrorActionPreference = 'Continue'
+        & $Dotnet build $Project -c Release --nologo -v:minimal *>&1 | Out-File -LiteralPath $buildLog -Encoding utf8 }
+    $buildExit = $global:LASTEXITCODE
+    if ($buildExit -ne 0) {
+        return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $buildExit; Detail = "dotnet build exited $buildExit; see $buildLog" }
+    }
+    if (-not (Test-Path -LiteralPath $Program -PathType Leaf)) {
+        return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $buildExit; Detail = "the build passed but did not produce $Program; see $buildLog" }
+    }
+    # 'dotnet run' gives the apphost DOTNET_ROOT when it is unset, so the program finds the
+    # runtime of the dotnet that built it; do the same.
+    $savedRoot = [Environment]::GetEnvironmentVariable('DOTNET_ROOT', 'Process')
+    if (-not $savedRoot) { Set-ProcessEnvironmentVariable -Name 'DOTNET_ROOT' -Value (Split-Path -Parent $Dotnet) }
+    try {
+        $run = Start-Process -FilePath $Program -Wait -PassThru -NoNewWindow -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
+    } finally {
+        Set-ProcessEnvironmentVariable -Name 'DOTNET_ROOT' -Value $savedRoot
+    }
+    return Get-GateCaseVerdict -ExitCode $run.ExitCode -Log $Log -Witness $Witness
+}

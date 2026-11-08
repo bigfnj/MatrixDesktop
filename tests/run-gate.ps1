@@ -488,13 +488,21 @@ try {
     if (-not (Test-Path -LiteralPath $nativeProject -PathType Leaf)) {
         Test-Fail 'native GDI font rendering' "missing: $nativeProject"
     } else {
-        $nativeFontRun = Start-Process -FilePath (Get-Command dotnet).Source -ArgumentList ('run --project "' + $nativeProject + '" -c Release --no-launch-profile') `
-            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeFontLog -RedirectStandardError "$nativeFontLog.err"
-        $nativeFontOutput = Get-Content -LiteralPath $nativeFontLog, "$nativeFontLog.err" | Out-String
-        if ($nativeFontRun.ExitCode -ne 0 -or $nativeFontOutput -notmatch '(?m)^PASS Native GDI resolves bundled and special fonts with real metrics') {
-            Test-Fail 'native GDI font rendering' "exit $($nativeFontRun.ExitCode) or missing execution witness; see $nativeFontLog"
-            Write-Host $nativeFontOutput
-        } else { Test-Ok 'native GDI font rendering and handle cleanup' }
+        # Built on every run, -SkipBuild included, because the solution does not contain it.
+        # Invoke-GateBuildAndRun (gate-lib.ps1) builds with the call operator and runs only the
+        # built exe under Start-Process: 'dotnet run' under -Wait also waited for the compiler
+        # server its build started, about ten minutes after a native-only edit (R2-30).
+        $nativeProgram = Join-Path (Split-Path -Parent $nativeProject) 'bin\Release\net10.0-windows\MatrixDesktop.Native.Tests.exe'
+        $nativeVerdict = Invoke-GateBuildAndRun -Dotnet (Get-Command dotnet).Source -Project $nativeProject -Program $nativeProgram `
+            -Log $nativeFontLog -Witness '(?m)^PASS Native GDI resolves bundled and special fonts with real metrics'
+        if ($nativeVerdict.Outcome -eq 'ok') { Test-Ok 'native GDI font rendering and handle cleanup' }
+        elseif ($nativeVerdict.Outcome -eq 'unchecked') { Test-Unchecked 'native GDI font rendering' $nativeVerdict.Detail }
+        else {
+            Test-Fail 'native GDI font rendering' $nativeVerdict.Detail
+            # The run log exists only when the build passed and the suite ran.
+            $nativeShown = if (Test-Path -LiteralPath $nativeFontLog) { @($nativeFontLog, "$nativeFontLog.err") } else { @("$nativeFontLog.build") }
+            Get-Content -LiteralPath $nativeShown -ErrorAction SilentlyContinue | Select-Object -Last 80 | ForEach-Object { Write-Host $_ }
+        }
     }
 
     # Web asset integrity complements the behavior and browser checks below.

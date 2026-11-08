@@ -563,6 +563,81 @@ try {
         Assert-Equal 1 $verdict.ExitCode 'no repository or commit to ask about'
         if (([IO.File]::ReadAllText($log)) -notmatch '(?m)^FAIL CI result: ') { throw "no FAIL CI result line ($([IO.File]::ReadAllText($log)))" }
     }
+
+    # ------------------------------------------------------------ R2-30 build, then run what was built
+
+    # Processes serving one private compiler-server pipe, found by the pipe in their command line.
+    function Get-PipeProcesses {
+        param([string]$Pipe)
+        return @(Get-CimInstance Win32_Process -Filter "Name='VBCSCompiler.exe' OR Name='dotnet.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Pipe*" })
+    }
+
+    Invoke-TestCase 'R2-30 the build-and-run launcher returns while the compiler server its build started is still alive' {
+        $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+        if (-not $dotnetCmd) { return 'CANNOT VERIFY R2-30: dotnet is not on PATH' }
+        $fixture = Join-Path $scratch 'build-fixture'
+        New-Item -ItemType Directory -Path $fixture | Out-Null
+        $project = New-StubFile 'build-fixture\GateFixture.csproj' ("<Project Sdk=`"Microsoft.NET.Sdk`">`n  <PropertyGroup>`n" +
+            "    <OutputType>Exe</OutputType>`n    <TargetFramework>net10.0</TargetFramework>`n  </PropertyGroup>`n</Project>`n")
+        [void](New-StubFile 'build-fixture\Program.cs' "System.Console.WriteLine(`"PASS gate fixture ran`");`n")
+        $driver = New-StubFile 'build-fixture-driver.ps1' (@(
+            'param([string]$GateLib, [string]$Pipe, [string]$Dotnet, [string]$Project, [string]$Program, [string]$Log, [string]$Result)'
+            '$ErrorActionPreference = ''Stop'''
+            'Set-StrictMode -Version Latest'
+            '. $GateLib'
+            '$env:SharedCompilationId = $Pipe'
+            '$env:MSBUILDDISABLENODEREUSE = ''1'''
+            '$env:DOTNET_CLI_TELEMETRY_OPTOUT = ''1'''
+            '$env:DOTNET_NOLOGO = ''1'''
+            '$verdict = Invoke-GateBuildAndRun -Dotnet $Dotnet -Project $Project -Program $Program -Log $Log -Witness ''(?m)^PASS gate fixture ran'''
+            '[IO.File]::WriteAllText($Result, $verdict.Outcome + ''|'' + $verdict.Detail)'
+        ) -join "`n")
+        # A private compiler-server pipe: the fixture's build starts its own server, and no other
+        # session's server can serve it or be touched. Without node reuse the MSBuild nodes exit
+        # with the build, so only the compiler server outlives it.
+        $pipe = 'mdgatelib' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
+        $result = Join-Path $scratch 'r2-30-result.txt'
+        $values = [ordered]@{ GateLib = (Join-Path $here 'gate-lib.ps1'); Pipe = $pipe; Dotnet = $dotnetCmd.Source; Project = $project
+            Program = (Join-Path $fixture 'bin\Release\net10.0\GateFixture.exe'); Log = (New-LogPath 'r2-30-fixture'); Result = $result }
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $shellExe
+        $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $driver + '"' + (@($values.Keys | ForEach-Object { " -$_ `"$($values[$_])`"" }) -join '')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $child = [Diagnostics.Process]::Start($psi)
+        try {
+            # Process.WaitForExit with a timeout waits for this one process, not its descendants.
+            $returned = $child.WaitForExit(90000)
+            $servers = @(Get-PipeProcesses $pipe | Where-Object { $_.CommandLine -like '*VBCSCompiler*' })
+            if (-not $returned) { throw "the launcher was still waiting 90 s after it started, with $($servers.Count) private compiler server(s) alive" }
+            if (-not (Test-Path -LiteralPath $result -PathType Leaf)) { throw "the driver exited $($child.ExitCode) without writing a result" }
+            $outcome = [IO.File]::ReadAllText($result)
+            if ($outcome -notlike 'ok|*') { throw "the fixture did not build and run: $outcome" }
+            if ($servers.Count -eq 0) { return "CANNOT VERIFY R2-30: the fixture build started no compiler server on pipe $pipe, so the wait was not exercised" }
+            Write-Host ("  R2-30 witness: the launcher returned after {0:N1} s with private compiler server pid {1} still alive" -f $clock.Elapsed.TotalSeconds, $servers[0].ProcessId)
+        } finally {
+            foreach ($p in @(Get-PipeProcesses $pipe)) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+            if (-not $child.HasExited -and -not $child.WaitForExit(20000)) { $child.Kill() }
+        }
+    }
+
+    Invoke-TestCase 'R2-30 (b) a project that does not build is a FAIL naming the build log, and an earlier run log is not read' {
+        $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+        if (-not $dotnetCmd) { return 'CANNOT VERIFY R2-30 (b): dotnet is not on PATH' }
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'broken-fixture') | Out-Null
+        # An unknown framework fails at restore, before anything compiles or starts a server.
+        $project = New-StubFile 'broken-fixture\Broken.csproj' ("<Project Sdk=`"Microsoft.NET.Sdk`">`n  <PropertyGroup>`n" +
+            "    <OutputType>Exe</OutputType>`n    <TargetFramework>net0.0-gatefixture</TargetFramework>`n  </PropertyGroup>`n</Project>`n")
+        $log = New-LogPath 'r2-30-broken'
+        [IO.File]::WriteAllText($log, "PASS gate fixture ran`n")
+        $verdict = Invoke-GateBuildAndRun -Dotnet $dotnetCmd.Source -Project $project -Program (Join-Path $scratch 'broken-fixture\bin\Broken.exe') -Log $log -Witness '(?m)^PASS gate fixture ran'
+        Assert-Equal 'fail' $verdict.Outcome "a failed build ($($verdict.Detail))"
+        if ($verdict.Detail -notlike "dotnet build exited *; see $log.build") { throw "the failure does not name the build log ($($verdict.Detail))" }
+        if (-not (Test-Path -LiteralPath "$log.build" -PathType Leaf)) { throw "no build log at $log.build" }
+        if (Test-Path -LiteralPath $log) { throw "the earlier run log is still at $log, where it reads as this run's" }
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
