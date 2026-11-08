@@ -5,6 +5,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -58,6 +59,21 @@ internal sealed class NativeMediaBridge : IDisposable
     private AtlasEntry? _normalAtlas, _specialAtlas;
     private int _environment;
 
+    // 2026-11-08 (AUD-09): native work an edit or a refresh built on the thread pool, held with
+    // the inputs it was built from until Prepare takes it. A failed build is kept and rethrown
+    // there, so a fault never escapes as an unobserved task (fatal in CrashDumpWriter).
+    private readonly record struct Built<T>(T? Value, ExceptionDispatchInfo? Error) where T : class
+    {
+        internal static Built<T> Of(Func<T> build)
+        {
+            try { return new(build(), null); }
+            catch (Exception error) { return new(null, ExceptionDispatchInfo.Capture(error)); }
+        }
+        internal T Result { get { Error?.Throw(); return Value!; } }
+    }
+    private (Rectangle Bounds, int Epoch, Built<WallpaperBackground.Capture> Capture)? _builtWallpaper;
+    private (AtlasKey Key, bool Special, Built<GdiGlyphAtlas.Atlas> Atlas)[] _builtAtlases = [];
+
     internal NativeMediaBridge(bool preview, NativeHostKind hostKind = NativeHostKind.Interactive)
     {
         _preview = preview;
@@ -98,7 +114,7 @@ internal sealed class NativeMediaBridge : IDisposable
 
     internal void Prepare(string query, Rectangle captureBounds, int atlasDpi = 96)
     {
-        if (_disposed || (query == _configuration && captureBounds == _captureBounds && atlasDpi == _atlasDpi)) return;
+        if (_disposed || Unchanged(query, captureBounds, atlasDpi)) return;
         _configuration = query;
         _captureBounds = captureBounds;
         _atlasDpi = atlasDpi;
@@ -109,7 +125,7 @@ internal sealed class NativeMediaBridge : IDisposable
         _zmatrixFonts = null;
         _generation++;
         var options = ParseQuery(query);
-        Refreshable = options.TryGetValue("scene", out var selectedScene) && selectedScene.Equals("zmatrix", StringComparison.OrdinalIgnoreCase);
+        Refreshable = IsZMatrix(options);
         if (Refreshable)
         {
             _desktop = null;
@@ -177,9 +193,7 @@ internal sealed class NativeMediaBridge : IDisposable
 
     private void PrepareZMatrix(Dictionary<string, string> options, Rectangle bounds, int dpi)
     {
-        // The page decodes the wallpaper only in bitmap mode (zmatrix/runtime.js), and its
-        // choice parser lowercases without trimming, so colour mode skips the capture.
-        if (!string.Equals(options.GetValueOrDefault("zmBackgroundMode"), "color", StringComparison.OrdinalIgnoreCase))
+        if (WantsWallpaper(options))
         {
             try
             {
@@ -190,26 +204,81 @@ internal sealed class NativeMediaBridge : IDisposable
         }
         try
         {
-            var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray(), phrases: false);
-            var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"], phrases: true);
-            var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal).ToArray();
-            var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
-            var raster = RasterEnvironment();
-            // Each role has its own inputs, so an edit to one font rebuilds only that atlas.
-            var regular = Atlas(ref _normalAtlas, new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmFont")), string.Concat(characters)), characters, false);
-            var specialAtlas = Atlas(ref _specialAtlas, new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special, true);
+            var (normal, special) = AtlasInputs(options, dpi);
+            var regular = Atlas(ref _normalAtlas, normal.Key, normal.Repertoire, false);
+            var specialAtlas = Atlas(ref _specialAtlas, special.Key, special.Repertoire, true);
             foreach (var (id, bytes) in regular.Atlas.Resources.Concat(specialAtlas.Atlas.Resources)) _nativeResources.Add(id, bytes);
             _zmatrixFonts = (regular, specialAtlas);
         }
         catch (Exception error) { _warnings.Add($"Native ZMatrix fonts unavailable: {error.Message}"); }
     }
 
+    private static bool IsZMatrix(Dictionary<string, string> options) =>
+        options.TryGetValue("scene", out var scene) && scene.Equals("zmatrix", StringComparison.OrdinalIgnoreCase);
+
+    // The page decodes the wallpaper only in bitmap mode (zmatrix/runtime.js), and its
+    // choice parser lowercases without trimming, so colour mode skips the capture.
+    private static bool WantsWallpaper(Dictionary<string, string> options) =>
+        !string.Equals(options.GetValueOrDefault("zmBackgroundMode"), "color", StringComparison.OrdinalIgnoreCase);
+
+    // Both atlas roles with everything GDI rasterises them from. Each role has its own
+    // inputs, so an edit to one font rebuilds only that atlas.
+    private ((AtlasKey Key, string[] Repertoire) Normal, (AtlasKey Key, string[] Repertoire) Special) AtlasInputs(Dictionary<string, string> options, int dpi)
+    {
+        var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray(), phrases: false);
+        var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"], phrases: true);
+        var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal).ToArray();
+        var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
+        var raster = RasterEnvironment();
+        return ((new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmFont")), string.Concat(characters)), characters),
+            (new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special));
+    }
+
+    private bool Unchanged(string query, Rectangle bounds, int dpi) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi;
+
+    // 2026-11-08 (AUD-09): the wallpaper capture with its PNG encode and both GDI atlases take
+    // most of a second on a large virtual screen. An edit or a refresh therefore builds what the
+    // next Prepare would miss on the thread pool and applies nothing there; Prepare then runs on
+    // the caller's (UI) thread and takes these results instead of building them itself. Prepare
+    // follows with exactly one generation step, so atlas ids minted here carry its generation.
+    private async Task BuildAheadAsync(string query, Rectangle bounds, int dpi)
+    {
+        var options = ParseQuery(query);
+        if (_disposed || Unchanged(query, bounds, dpi) || !IsZMatrix(options)) return;
+        var epoch = Volatile.Read(ref _environment);
+        var wallpaper = WantsWallpaper(options) && CachedWallpaper(bounds, epoch) is null
+            ? Task.Run(() => Built<WallpaperBackground.Capture>.Of(() => WallpaperCapture(bounds))) : null;
+        var roles = new List<(AtlasKey Key, string[] Repertoire, bool Special)>();
+        try
+        {
+            var (normal, special) = AtlasInputs(options, dpi);
+            if (_normalAtlas?.Key != normal.Key) roles.Add((normal.Key, normal.Repertoire, false));
+            if (_specialAtlas?.Key != special.Key) roles.Add((special.Key, special.Repertoire, true));
+        }
+        catch (Exception) { } // Prepare meets the same malformed input and reports it.
+        var generation = _generation + 1;
+        // The roles build in order on one thread, as Prepare would build them.
+        var atlases = roles.Count == 0 ? null : Task.Run(() => roles.Select(role => (role.Key, role.Special, Built<GdiGlyphAtlas.Atlas>.Of(() =>
+            AtlasFactory(role.Key.Font, role.Repertoire, role.Special, role.Key.Dpi, role.Key.Asset, AtlasPrefix(generation, role.Special), ResourceUrl)))).ToArray());
+        if (wallpaper is not null) _builtWallpaper = (bounds, epoch, await wallpaper);
+        if (atlases is not null) _builtAtlases = await atlases;
+    }
+
+    private void DropBuilt()
+    {
+        _builtWallpaper = null;
+        _builtAtlases = [];
+    }
+
+    private WallpaperEntry? CachedWallpaper(Rectangle bounds, int epoch) =>
+        _wallpaperCache is { } cached && cached.Bounds == bounds && cached.Epoch == epoch ? cached : null;
+
     private WallpaperEntry Wallpaper(Rectangle bounds)
     {
         var epoch = Volatile.Read(ref _environment);
+        if (CachedWallpaper(bounds, epoch) is { } hit) return hit;
         var cached = _wallpaperCache;
-        if (cached is not null && cached.Bounds == bounds && cached.Epoch == epoch) return cached;
-        var capture = WallpaperCapture(bounds);
+        var capture = _builtWallpaper is { } built && built.Bounds == bounds && built.Epoch == epoch ? built.Capture.Result : WallpaperCapture(bounds);
         _wallpaperCache = cached is not null && cached.Bounds == bounds && SameCapture(cached.Capture, capture)
             ? cached with { Epoch = epoch }
             : new WallpaperEntry(bounds, epoch, _generation, capture);
@@ -224,10 +293,13 @@ internal sealed class NativeMediaBridge : IDisposable
     private AtlasEntry Atlas(ref AtlasEntry? cache, AtlasKey key, string[] repertoire, bool special)
     {
         if (cache is not null && cache.Key == key) return cache;
-        cache = new AtlasEntry(key, AtlasFactory(key.Font, repertoire, special, key.Dpi, key.Asset,
-            $"font-{_generation}-{(special ? "special" : "normal")}", ResourceUrl));
+        var built = Array.FindIndex(_builtAtlases, entry => entry.Key == key && entry.Special == special);
+        cache = new AtlasEntry(key, built >= 0 ? _builtAtlases[built].Atlas.Result
+            : AtlasFactory(key.Font, repertoire, special, key.Dpi, key.Asset, AtlasPrefix(_generation, special), ResourceUrl));
         return cache;
     }
+
+    private static string AtlasPrefix(int generation, bool special) => $"font-{generation}-{(special ? "special" : "normal")}";
 
     // GDI rasterises DEFAULT_QUALITY text with the current smoothing settings
     // (GdiGlyphAtlas quality 0), so they are an atlas input.
@@ -296,10 +368,11 @@ internal sealed class NativeMediaBridge : IDisposable
         try
         {
             if (_disposed) return;
+            await BuildAheadAsync(query, bounds, 96);
             Prepare(query, bounds);
             await PublishBootstrapAsync();
         }
-        finally { _updateLock.Release(); }
+        finally { DropBuilt(); _updateLock.Release(); }
     }
 
     // A refresh re-reads every input and publishes only a change: the ZMatrix page discards
@@ -315,6 +388,9 @@ internal sealed class NativeMediaBridge : IDisposable
             var before = BootstrapJson(0);
             var desktop = _desktop;
             _configuration = "";
+            // The published resources stay served while the work builds; only Prepare replaces them.
+            await BuildAheadAsync(query, bounds, atlasDpi);
+            if (_disposed) return false;
             // A wallpaper-sourced desktop is re-read so a wallpaper change reaches a later UC3D load.
             if (UsesWallpaperDesktop) _desktop = null;
             Prepare(query, bounds, atlasDpi);
@@ -328,7 +404,7 @@ internal sealed class NativeMediaBridge : IDisposable
             await PublishBootstrapAsync();
             return true;
         }
-        finally { _updateLock.Release(); }
+        finally { DropBuilt(); _updateLock.Release(); }
     }
 
     private async Task PublishBootstrapAsync()
@@ -457,6 +533,7 @@ internal sealed class NativeMediaBridge : IDisposable
         _wallpaper = null;
         _wallpaperCache = null;
         _normalAtlas = _specialAtlas = null;
+        DropBuilt();
         // An in-flight UI request may still be returning from its awaited WebView2 call.
         // Let the semaphore be collected rather than disposing under that request.
     }

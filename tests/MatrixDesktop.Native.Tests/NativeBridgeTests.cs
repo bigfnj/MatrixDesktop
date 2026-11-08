@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Drawing;
 using System.Text;
 using System.Text.Json;
@@ -22,6 +23,8 @@ internal static class NativeBridgeTests
         ("Native bridge refresh keeps the generation when nothing changed", UnchangedRefreshKeepsGeneration),
         ("Native bridge refresh publishes a changed wallpaper", ChangedWallpaperRefreshPublishes),
         ("Native bridge refresh rebuilds the atlases when font smoothing changes", SmoothingRefreshRebuildsAtlases),
+        ("Native bridge builds edit and refresh work off the UI thread", NativeWorkRunsOffTheUiThread),
+        ("Native bridge keeps atlas roles apart when their inputs match", BuiltAtlasRolesStayApart),
     ];
 
     // MainForm's startup order: the constructor runs the before-show step, then
@@ -52,6 +55,34 @@ internal static class NativeBridgeTests
         MediaHostKind.For(new HostLaunchPlan([], launch), wallpaperWindowMode);
 
     private static JsonElement Bootstrap(NativeMediaBridge bridge) => JsonDocument.Parse(bridge.BootstrapJson()).RootElement.Clone();
+
+    // A stand-in for the WinForms UI thread: continuations posted here run on the thread that
+    // pumps it, the test thread. Every asynchronous bridge call goes through it, because the
+    // HostLifecycleTests controls leave a WindowsFormsSynchronizationContext on this thread that
+    // nothing pumps, and blocking under that context would never resume a pool continuation.
+    private sealed class UiThread : SynchronizationContext
+    {
+        private readonly BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = new();
+        public override void Post(SendOrPostCallback d, object? state) => _queue.Add((d, state));
+        public override void Send(SendOrPostCallback d, object? state) => throw new NotSupportedException();
+
+        internal static T Run<T>(Func<Task<T>> start)
+        {
+            var context = new UiThread();
+            var previous = Current;
+            SetSynchronizationContext(context);
+            try
+            {
+                var task = start();
+                task.ContinueWith(_ => context._queue.CompleteAdding(), TaskScheduler.Default);
+                foreach (var (callback, state) in context._queue.GetConsumingEnumerable()) callback(state);
+                return task.GetAwaiter().GetResult();
+            }
+            finally { SetSynchronizationContext(previous); }
+        }
+    }
+
+    private static bool Refresh(NativeMediaBridge bridge, string query) => UiThread.Run(() => bridge.RefreshAsync(query, Virtual, 96));
 
     private static HashSet<string> Glyphs(JsonElement bootstrap, string role)
     {
@@ -111,7 +142,7 @@ internal static class NativeBridgeTests
         using (var bridge = Bridge(NativeHostKind.Wallpaper, wallpaper))
         {
             bridge.Prepare(query, Virtual);
-            bridge.RefreshAsync(query, Virtual, 96).GetAwaiter().GetResult();
+            Refresh(bridge, query);
             Require(wallpaper.Wallpaper + wallpaper.Screen == 2, $"A wallpaper host's refresh must re-read its desktop: {wallpaper.Wallpaper + wallpaper.Screen} reads.");
         }
         // Control: a screen copy is only clean before this window covers the screen, so it is kept.
@@ -119,7 +150,7 @@ internal static class NativeBridgeTests
         using (var bridge = Bridge(NativeHostKind.Interactive, screen))
         {
             bridge.Prepare(query, Virtual);
-            bridge.RefreshAsync(query, Virtual, 96).GetAwaiter().GetResult();
+            Refresh(bridge, query);
             Require(screen.Screen + screen.Wallpaper == 1, $"A refresh must keep a screen snapshot: {screen.Screen + screen.Wallpaper} reads.");
         }
     }
@@ -182,23 +213,28 @@ internal static class NativeBridgeTests
         internal byte Fill = 4;
         internal string Raster = "smoothing-a";
         internal int Atlases => Normal + Special;
+        // The thread each builder and each raster-settings read ran on.
+        internal readonly ConcurrentQueue<(string Step, int Thread)> Threads = new();
+        internal void Ran(string step) => Threads.Enqueue((step, Environment.CurrentManagedThreadId));
     }
 
     private static NativeMediaBridge ZMatrixBridge(Work work) => new(false, NativeHostKind.Wallpaper)
     {
         WallpaperCapture = bounds =>
         {
-            work.Wallpaper++;
+            work.Ran("wallpaper capture");
+            Interlocked.Increment(ref work.Wallpaper);
             return new WallpaperBackground.Capture([work.Fill, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]);
         },
         AtlasFactory = (font, repertoire, special, dpi, path, prefix, url) =>
         {
-            if (special) work.Special++; else work.Normal++;
+            work.Ran(special ? "special atlas" : "normal atlas");
+            if (special) Interlocked.Increment(ref work.Special); else Interlocked.Increment(ref work.Normal);
             var id = prefix + "-0";
             return new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi },
                 new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{font}|{string.Concat(repertoire)}") });
         },
-        RasterEnvironment = () => work.Raster,
+        RasterEnvironment = () => { work.Ran("raster settings read"); return work.Raster; },
     };
 
     private static int Generation(NativeMediaBridge bridge) => Bootstrap(bridge).GetProperty("nativeGeneration").GetInt32();
@@ -263,7 +299,7 @@ internal static class NativeBridgeTests
         var work = new Work();
         using var bridge = ZMatrixBridge(work);
         bridge.Prepare("scene=zmatrix", Virtual);
-        var published = bridge.RefreshAsync("scene=zmatrix", Virtual, 96).GetAwaiter().GetResult();
+        var published = Refresh(bridge, "scene=zmatrix");
         Require(work.Wallpaper == 2, $"A refresh must re-read the wallpaper: {work.Wallpaper} reads.");
         Require(!published && Generation(bridge) == 1,
             $"A refresh that changes nothing must keep generation 1 and not publish, or the page discards its raster: published={published}, generation={Generation(bridge)}.");
@@ -276,7 +312,7 @@ internal static class NativeBridgeTests
         bridge.Prepare("scene=zmatrix", Virtual);
         var before = Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!;
         work.Fill = 9;
-        var published = bridge.RefreshAsync("scene=zmatrix", Virtual, 96).GetAwaiter().GetResult();
+        var published = Refresh(bridge, "scene=zmatrix");
         var after = Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!;
         Require(published && Generation(bridge) == 2, $"A changed wallpaper must be published as generation 2: published={published}, generation={Generation(bridge)}.");
         Require(after != before && Served(bridge, after) is [9, ..], "The changed wallpaper must be served under a new id.");
@@ -288,11 +324,59 @@ internal static class NativeBridgeTests
         using var bridge = ZMatrixBridge(work);
         bridge.Prepare("scene=zmatrix", Virtual);
         work.Raster = "smoothing-b";
-        var published = bridge.RefreshAsync("scene=zmatrix", Virtual, 96).GetAwaiter().GetResult();
+        var published = Refresh(bridge, "scene=zmatrix");
         Require(work.Atlases == 4 && published && Generation(bridge) == 2,
             $"A font-smoothing change must rebuild and publish both atlases: atlases={work.Atlases}, published={published}, generation={Generation(bridge)}.");
         var fonts = Served(bridge).Where(pair => pair.Key.Contains("/font-", StringComparison.Ordinal)).ToArray();
         Require(fonts.Length == 2 && fonts.All(pair => pair.Value is not null && Encoding.UTF8.GetString(pair.Value).StartsWith("smoothing-b|", StringComparison.Ordinal)),
             "The published atlases must be the rasters built under the new smoothing settings.");
+    }
+
+    // AUD-09: an edit and a refresh build the wallpaper and both atlases on the thread pool and
+    // apply them on the UI thread, which only reads the raster settings to key that work.
+    private static void NativeWorkRunsOffTheUiThread()
+    {
+        var ui = Environment.CurrentManagedThreadId;
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        var font = "&zmFont=" + Uri.EscapeDataString("{\"height\":-12}");
+        foreach (var (name, step) in new (string, Action)[]
+        {
+            ("The first edit", () => Update(bridge, "scene=zmatrix")),
+            ("A regular-font edit", () => Update(bridge, "scene=zmatrix" + font)),
+            ("A refresh after a wallpaper change", () => { work.Fill = 9; Refresh(bridge, "scene=zmatrix" + font); }),
+        })
+        {
+            var start = work.Threads.Count;
+            step();
+            var builds = work.Threads.Skip(start).Where(entry => entry.Step != "raster settings read").ToArray();
+            var inline = builds.Where(entry => entry.Thread == ui).Select(entry => entry.Step).ToArray();
+            Require(builds.Length > 0 && inline.Length == 0, $"{name} must build its native work off the UI thread: {builds.Length} builds, on it [{string.Join(", ", inline)}].");
+        }
+        var reads = work.Threads.Where(entry => entry.Step == "raster settings read").ToArray();
+        Require(reads.Length > 0 && reads.All(entry => entry.Thread == ui),
+            $"Keys are read and results applied on the UI thread: {reads.Count(entry => entry.Thread != ui)} of {reads.Length} raster settings reads ran elsewhere.");
+        // Built ahead of its Prepare, the regular atlas still carries the generation that built it.
+        var normal = Bootstrap(bridge).GetProperty("zmatrixFonts").GetProperty("normal").GetProperty("pages")[0].GetProperty("url").GetString()!;
+        Require(normal.Contains("/font-2-normal", StringComparison.Ordinal), $"The edited regular atlas must carry generation 2 in its ids: {normal}.");
+    }
+
+    private static void Update(NativeMediaBridge bridge, string query) =>
+        UiThread.Run(async () => { await bridge.UpdateAsync(query, Virtual); return true; });
+
+    // A regular repertoire equal to the default phrase's characters gives both roles the same
+    // key, but GDI still rasterises the special role with its own default face.
+    private static void BuiltAtlasRolesStayApart()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        var characters = JsonSerializer.Serialize("The matrix has you".Select(c => c.ToString()).Distinct().ToArray());
+        Update(bridge, "scene=zmatrix&zmCharacters=" + Uri.EscapeDataString(characters));
+        var bootstrap = Bootstrap(bridge);
+        var fonts = bootstrap.GetProperty("zmatrixFonts");
+        var special = fonts.ValueKind == JsonValueKind.Object ? fonts.GetProperty("special").GetProperty("pages")[0].GetProperty("url").GetString()!
+            : $"none published (warnings: {bootstrap.GetProperty("warnings")})";
+        Require(work.Normal == 1 && work.Special == 1 && special.Contains("-special", StringComparison.Ordinal),
+            $"Each role must publish its own atlas: normal={work.Normal}, special={work.Special}, special page {special}.");
     }
 }
