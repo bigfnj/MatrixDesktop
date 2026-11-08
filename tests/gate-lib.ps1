@@ -124,12 +124,14 @@ function Get-DumpsForPid {
 
 # ---------------------------------------------------------------- release version and CI
 
-# A release states its version in three files: both csproj <Version> elements and the guide
-# header that --help-full and the configurator's ? button show. At tags v1.0.3 and v1.0.4 all
-# three said 1.0.2 while release.yml stamped the binaries from the tag, and a check that only
-# compared the files with each other passed at both. With -Tag (one leading 'v' stripped) each
-# file must equal the tag; without it the files must agree with each other. Problems name the
-# file, so an empty Problems list means consistent.
+# A release states its version in four files: both csproj <Version> elements, the guide
+# header that --help-full and the configurator's ? button show, and README's 'Current source
+# version' line, which every release zip ships. At tags v1.0.3 and v1.0.4 all four said 1.0.2
+# while release.yml stamped the binaries from the tag, and a check that only compared the files
+# with each other passed at both. With -Tag (one leading 'v' stripped) each file must equal the
+# tag; without it the files must agree with each other. Problems name the file, so an empty
+# Problems list means consistent. README's 'source' is optional: it read 'Current version'
+# before 1.2.0.
 function Get-ReleaseVersionReport {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -139,6 +141,7 @@ function Get-ReleaseVersionReport {
         'MatrixDesktop\MatrixDesktop.csproj'                         = '<Version>([^<]+)</Version>'
         'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj' = '<Version>([^<]+)</Version>'
         'MatrixDesktop_Argument_Guide.txt'                           = 'ARGUMENT GUIDE \(desktop wrapper v([0-9][^)]*)\)'
+        'README.md'                                                  = 'Current (?:source )?version: \*\*([0-9][^*]*)\*\*'
     }
     $versions = [ordered]@{}
     $problems = @()

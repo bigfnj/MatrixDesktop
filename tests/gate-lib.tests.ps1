@@ -227,13 +227,15 @@ try {
     $versionScript = Join-Path $here 'check-release-version.ps1'
 
     function New-VersionTree {
-        param([string]$Name, [string]$Matrix, [string]$Configurator, [string]$Guide)
+        param([string]$Name, [string]$Matrix, [string]$Configurator, [string]$Guide, [string]$Readme)
+        if (-not $Readme) { $Readme = $Matrix }
         foreach ($dir in 'MatrixDesktop', 'MatrixDesktopConfigurator') {
             New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $scratch $Name) $dir) | Out-Null
         }
         [void](New-StubFile "$Name\MatrixDesktop\MatrixDesktop.csproj" "<Project>`n  <PropertyGroup>`n    <Version>$Matrix</Version>`n  </PropertyGroup>`n</Project>`n")
         [void](New-StubFile "$Name\MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj" "<Project>`n  <PropertyGroup>`n    <Version>$Configurator</Version>`n  </PropertyGroup>`n</Project>`n")
         [void](New-StubFile "$Name\MatrixDesktop_Argument_Guide.txt" "MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v$Guide)`n=====`n")
+        [void](New-StubFile "$Name\README.md" "# MatrixDesktop`n`nCurrent source version: **$Readme**. Tagged releases are listed on the releases page.`n")
         return (Join-Path $scratch $Name)
     }
 
@@ -270,7 +272,7 @@ try {
         Assert-Equal 'ok' $files.Outcome "the files agree with each other, all the old check asked ($($files.Text))"
         $tagged = Invoke-VersionCheck -Root $root -Tag 'v1.0.4' -Label 'b-tag'
         Assert-Equal 1 $tagged.ExitCode "the release tag v1.0.4 does not match 1.0.2 ($($tagged.Text))"
-        Assert-Equal 3 ([regex]::Matches($tagged.Text, '(?m)^FAIL release version: .+: says 1\.0\.2, the tag v1\.0\.4 says 1\.0\.4')).Count "each of the three files is named ($($tagged.Text))"
+        Assert-Equal 4 ([regex]::Matches($tagged.Text, '(?m)^FAIL release version: .+: says 1\.0\.2, the tag v1\.0\.4 says 1\.0\.4')).Count "each of the four files is named ($($tagged.Text))"
     }
 
     Invoke-TestCase 'AUD-28 (c) branch and pull-request runs compare the files only; a tag run compares the tag' {
@@ -290,6 +292,23 @@ try {
         $result = Invoke-VersionCheck -Root $root -Label 'd'
         Assert-Equal 1 $result.ExitCode "the guide lags the csproj files ($($result.Text))"
         if ($result.Text -notmatch 'MatrixDesktop_Argument_Guide\.txt says 1\.1\.0') { throw "the guide's version is not named ($($result.Text))" }
+    }
+
+    # README ships in every release zip, and at v1.0.3 and v1.0.4 it said 1.0.2 as well (R2-34).
+    Invoke-TestCase 'AUD-28 (i) a README left behind fails the tag check' {
+        $root = New-VersionTree 'version-i' '1.3.0' '1.3.0' '1.3.0' -Readme '1.2.0'
+        $tagged = Invoke-VersionCheck -Root $root -Tag 'v1.3.0' -Label 'i-tag'
+        Assert-Equal 1 $tagged.ExitCode "README still says 1.2.0 ($($tagged.Text))"
+        $fails = @([regex]::Matches($tagged.Text, '(?m)^FAIL release version: .*$') | ForEach-Object { $_.Value.Trim() })
+        Assert-Equal 1 $fails.Count "only README is behind the tag ($($tagged.Text))"
+        if ($fails[0] -notmatch '^FAIL release version: README\.md: says 1\.2\.0, the tag v1\.3\.0 says 1\.3\.0') { throw "the failure does not name README.md ($($fails[0]))" }
+        $files = Invoke-VersionCheck -Root $root -Label 'i-files'
+        Assert-Equal 1 $files.ExitCode "without a tag the files disagree ($($files.Text))"
+        if ($files.Text -notmatch 'README\.md says 1\.2\.0') { throw "the disagreement does not name README.md ($($files.Text))" }
+        # Before 1.2.0 the line read 'Current version: **x**', so an old tree still parses.
+        [void](New-StubFile 'version-i\README.md' "# MatrixDesktop`n`nCurrent version: **1.3.0** - see the release notes.`n")
+        $old = Invoke-VersionCheck -Root $root -Tag 'v1.3.0' -Label 'i-old-wording'
+        Assert-Equal 'ok' $old.Outcome "the wording without 'source' parses ($($old.Text))"
     }
 
     Invoke-TestCase 'AUD-28 (e) release.yml must run both checks, the version one with -Tag, before its first publish' {

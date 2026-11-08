@@ -915,8 +915,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     # Asserts the two values are EQUAL, not that a version line exists: a regex that merely
     # matched "v1.0.something" would have passed happily on the stale 1.0.2.
     #
-    # Agreement between the files was not enough either: at v1.0.3 and v1.0.4 all three said
-    # 1.0.2 and this check passed, while release.yml stamped the binaries from the tag. The
+    # Agreement between the files was not enough either: at v1.0.3 and v1.0.4 both csproj files,
+    # the guide and README said 1.0.2 and this check passed, while release.yml stamped the
+    # binaries from the tag (gate-lib.ps1, Get-ReleaseVersionReport, lists the files). The
     # comparison now lives in tests\check-release-version.ps1, which release.yml runs with
     # -Tag before it builds; the gate runs the same script, in a child of this same shell, with
     # no tag. Only a tag run (GITHUB_REF_TYPE=tag) reads the ref name, so main pushes and pull
