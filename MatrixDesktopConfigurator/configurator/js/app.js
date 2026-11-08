@@ -164,8 +164,9 @@ const rememberDraftEdits = (explicitKeys = []) => {
 	for (const key of explicitKeys) if (key !== "scene") editedSceneFields.add(key);
 };
 const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "transPride"]);
-// The choices effectiveDefaultsFor reads; switching one re-targets untouched fields.
-const defaultContextFields = new Set(["scene", "version", "effect"]);
+// The choices effectiveDefaultsFor reads; switching one re-targets untouched fields. uc3dControls
+// is one: legacy UC3D draws the catalog bloom (R2-15).
+const defaultContextFields = new Set(["scene", "version", "effect", "uc3dControls"]);
 
 // Fields whose value changes which *other* fields are gated (see
 // getDisabledReason). Editing one of these must re-render the whole group so
@@ -261,7 +262,7 @@ const updateCommand = async () => {
 const updateDraftValue = (field, value) => {
 	// A picker opened before a scene change can finish after its field is disabled.
 	if (getDisabledReason(field)) return;
-	// A scene, version or effect switch moves each untouched field from what the old choice
+	// A scene, version, effect or controls switch moves each untouched field from what the old choice
 	// draws to what the new one draws (AUD-13), so the editors keep showing the render.
 	if (defaultContextFields.has(field.id) && value !== state.draft[field.id]) {
 		const previous = effectiveDefaultsFor(state.draft);

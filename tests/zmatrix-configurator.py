@@ -1223,6 +1223,44 @@ def check_el_lookups(page, _fixture):
     assert not unknown, "app.js reads el keys the literal does not look up: " + ", ".join(unknown)
 
 
+def check_controls_switch_bloom(page, _fixture):
+    # R2-15: legacy UC3D draws the catalog bloom (0.7) and Original draws 0 (effectiveDefaultsFor,
+    # EffectiveDefault), so a Control units switch moves an untouched Bloom strength as a scene,
+    # version or effect switch does, and the real C# builder leaves it out in both modes.
+    bloom = field(page, "bloomStrength").locator('input[type="number"]')
+    controls = field(page, "uc3dControls").locator("select")
+
+    def now():
+        page.wait_for_timeout(400)  # past the save debounce, so the snapshot cancels no pending save
+        draft = page.evaluate("configHost.snapshotDraft().draft")
+        command = run_host({"type": "buildCommand", "payload": {"draft": draft, "includeDefaults": False, "forTest": False}})["command"]
+        return {"bloom": draft["bloomStrength"], "editor": bloom.input_value(), "command": command}
+
+    def expect(label, value, sent=None):
+        state = now()
+        token = "--bloomStrength" in state["command"]
+        assert state["bloom"] == value and state["editor"] == str(value) and token == (sent is not None), \
+            label + ": Bloom strength should be " + str(value) + (", sent" if sent else ", left out") + ": " + str(state)
+        if sent:
+            assert "--bloomStrength " + sent in state["command"], label + ": " + state["command"]
+
+    apply_import(page, "MatrixDesktop.exe --scene uc3d --uc3dControls legacy")
+    expect("witness: the legacy UC3D import", 0.7)
+    for mode, value in (("original", 0), ("legacy", 0.7)):
+        controls.select_option(mode)
+        expect("an imported legacy draft switched to " + mode, value)
+    page.locator("#newPresetButton").click()
+    field(page, "scene").locator("select").select_option("uc3d")
+    expect("witness: a new Matrix draft switched to UC3D", 0)
+    controls.select_option("legacy")
+    expect("a new draft on UC3D switched to legacy", 0.7)
+    # Control: a Bloom strength the user chose stays chosen across the switch, and is sent.
+    bloom.fill("0.3")
+    bloom.blur()
+    controls.select_option("original")
+    expect("control: a chosen Bloom strength switched to original", 0.3, sent="0.3")
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1256,6 +1294,7 @@ CHECKS = [
     ("Test status shows the command the host launched", check_test_status),
     ("Preview button says why it is disabled without web assets", check_preview_unavailable),
     ("Every element app.js looks up has a reader", check_el_lookups),
+    ("A Control units switch keeps an untouched Bloom strength on what renders", check_controls_switch_bloom),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
