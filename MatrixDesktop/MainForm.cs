@@ -1111,21 +1111,8 @@ public sealed class MainForm : Form
 
     private static string GetWritableAppDataFolder(string childFolder)
     {
-        foreach (var basePath in GetAppDataBasePaths())
-        {
-            if (string.IsNullOrWhiteSpace(basePath))
-            {
-                continue;
-            }
-
-            var path = Path.Combine(basePath, "MatrixDesktop", childFolder);
-            if (TryEnsureWritableFolder(path))
-            {
-                return path;
-            }
-        }
-
-        throw new IOException("No writable AppData or temp folder was available.");
+        return HostStorage.SelectWritableFolder(GetAppDataBasePaths(), childFolder, Shared.Logger.Warn)
+            ?? throw new IOException("No writable AppData or temp folder was available.");
     }
 
     private static string[] GetAppDataBasePaths()
@@ -1241,21 +1228,5 @@ public sealed class MainForm : Form
         var normalizedLeft = Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
         var normalizedRight = Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
         return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool TryEnsureWritableFolder(string path)
-    {
-        try
-        {
-            Directory.CreateDirectory(path);
-            var probe = Path.Combine(path, ".write_test");
-            File.WriteAllText(probe, "ok");
-            File.Delete(probe);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }
