@@ -468,15 +468,19 @@ internal sealed partial class CommandBuilder
     // A copied command may be pasted into cmd.exe or PowerShell, where these
     // characters are shell-significant (an unquoted '&' in an image URL, for
     // instance, would truncate the command). Double quotes keep whitespace, '&',
-    // '|', '<', '>', '^' and parentheses literal in both shells, but not '%'
-    // (cmd and batch files expand it), '!' (delayed expansion), '$' or a
-    // backtick (PowerShell expands both). Text values holding those travel as
-    // json64 instead (AddWebTokens), as structured values always do.
+    // '|', '<', '>', '^' and parentheses literal in both shells, and in PowerShell
+    // an apostrophe (which pairs with the next one across arguments), ';' (which
+    // ends the statement), braces (a script block), '@' (splatting) and '#' (a
+    // comment) (R2-12). They do not keep '%' (cmd and batch files expand it), '!'
+    // (delayed expansion), '$' or a backtick (PowerShell expands both). Text values
+    // holding those travel as json64 instead (AddWebTokens), as structured values
+    // always do.
     private static bool NeedsQuoting(string token)
     {
         foreach (var c in token)
         {
-            if (char.IsWhiteSpace(c) || c is '"' or '&' or '|' or '<' or '>' or '^' or '(' or ')' or '%' or '!')
+            if (char.IsWhiteSpace(c) || c is '"' or '&' or '|' or '<' or '>' or '^' or '(' or ')' or '%' or '!'
+                or '\'' or ';' or '{' or '}' or '@' or '#')
             {
                 return true;
             }

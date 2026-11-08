@@ -25,6 +25,9 @@ internal static class PowerShellExportTests
     // Killing mutations: narrow the encode condition back to font, characters and phrases
     // (transport fails for batch A and PowerShell B and D); remove the MatrixArgs decode
     // (only the renderer case fails); remove the importer decode (only the import case fails).
+    // R2-12: removing the apostrophe, ';', the braces or '#' from CommandBuilder.NeedsQuoting
+    // fails only draft F, G, H or I under both PowerShells; removing '@' fails J under
+    // PowerShell 7 and makes Windows PowerShell refuse the whole script.
     private static readonly string[] Shells = ["cmd.exe", "powershell.exe", "pwsh.exe"];
     private static readonly Lazy<Dictionary<string, string[]>> TextCaptures = new(CaptureCopiedTextCommands);
 
@@ -46,7 +49,30 @@ internal static class PowerShellExportTests
         var e = builder.CreateDefaultDraft();
         e["effect"] = "image";
         e["url"] = "https://example.test/wow!.png";
-        return [("A", a, "url"), ("B", b, "pictureDirectory"), ("C", c, "url"), ("D", d, "musicFile"), ("E", e, "url")];
+        // R2-12: bare, PowerShell pairs these two apostrophes into one argument, ends the
+        // statement at ';', swallows braces as a script block, reads a leading '#' as a comment
+        // and a leading '@' as splatting. A lone apostrophe or brace (and, in Windows
+        // PowerShell, that '@') refuses the whole shared script, so F and H keep theirs paired.
+        var f = builder.CreateSceneDefaultDraft("uc3d");
+        f["showPictures"] = true;
+        f["pictureSource"] = "custom";
+        f["pictureDirectory"] = @"C:\Users\O'Neil\Pictures";
+        f["sound"] = "music";
+        f["musicFile"] = @"C:\Users\O'Neil\Music\a.mp3";
+        var g = builder.CreateDefaultDraft();
+        g["effect"] = "image";
+        g["url"] = "https://example.test/a;b.png";
+        var h = builder.CreateDefaultDraft();
+        h["effect"] = "image";
+        h["url"] = "https://example.test/{id}.png";
+        var i = builder.CreateSceneDefaultDraft("uc3d");
+        i["sound"] = "music";
+        i["musicFile"] = "#1.mp3";
+        var j = builder.CreateDefaultDraft();
+        j["effect"] = "image";
+        j["url"] = "@home.png";
+        return [("A", a, "url"), ("B", b, "pictureDirectory"), ("C", c, "url"), ("D", d, "musicFile"), ("E", e, "url"),
+            ("F", f, "musicFile"), ("G", g, "url"), ("H", h, "url"), ("I", i, "musicFile"), ("J", j, "url")];
     }
 
     private static void CopiedTextTransport()
