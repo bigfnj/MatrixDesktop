@@ -515,6 +515,14 @@ const renderField = (field) => {
 		color: renderColorField, rgb8: renderRgb8Field, font: renderFontField, characters: renderCharacterField,
 		phrases: renderPhraseField, palette: renderPaletteField, stripes: renderStripesField };
 	const shell = (renderers[field.kind] || renderTextField)(field);
+	// A compound editor holds several controls under one visible label, so the label names
+	// the editor as a group; single-control renderers bind it to their control (bindLabel).
+	const label = shell.querySelector(":scope > label");
+	if (label && !label.htmlFor) {
+		label.id = `label-${field.id}`;
+		shell.setAttribute("role", "group");
+		shell.setAttribute("aria-labelledby", label.id);
+	}
 	// Compound editors contain several native controls. Disable every descendant,
 	// including swatches and palette actions, rather than only styling the shell.
 	if (getDisabledReason(field)) {
@@ -599,10 +607,18 @@ const createFieldShell = (field, extraClass = "") => {
 	return shell;
 };
 
+// The visible label names a single-control field for assistive technology and operates it:
+// a click toggles the checkbox or focuses the control.
+const bindLabel = (shell, control, field) => {
+	control.id = `field-${field.id}`;
+	shell.querySelector(":scope > label").htmlFor = control.id;
+};
+
 const renderBoolField = (field) => {
 	const shell = createFieldShell(field, "checkbox-field");
 	const input = document.createElement("input");
 	input.type = "checkbox";
+	bindLabel(shell, input, field);
 	input.disabled = Boolean(getDisabledReason(field));
 	input.checked = Boolean(state.draft[field.id]);
 	input.addEventListener("change", () => {
@@ -618,6 +634,7 @@ const renderBoolField = (field) => {
 const renderSelectField = (field) => {
 	const shell = createFieldShell(field);
 	const select = document.createElement("select");
+	bindLabel(shell, select, field);
 	for (const option of field.options || []) {
 		select.add(new Option(option.label, option.value));
 	}
@@ -640,6 +657,7 @@ const renderNumberField = (definition) => {
 	const input = document.createElement("input");
 	input.type = "number";
 	input.setAttribute("aria-label", `${field.label} value`);
+	bindLabel(shell, input, field);
 	if (field.min != null) input.min = field.min;
 	if (field.max != null) input.max = field.max;
 	if (field.step != null) input.step = field.step;
@@ -746,6 +764,7 @@ const renderTextField = (field) => {
 	const shell = createFieldShell(field);
 	const input = document.createElement("input");
 	input.type = "text";
+	bindLabel(shell, input, field);
 	input.disabled = Boolean(getDisabledReason(field));
 	input.value = state.draft[field.id] ?? "";
 	input.addEventListener("input", () => updateDraftValue(field, input.value));
@@ -754,6 +773,7 @@ const renderTextField = (field) => {
         const browse = document.createElement("button");
         browse.type = "button";
         browse.textContent = "Browse...";
+        browse.setAttribute("aria-label", `Browse for ${field.label}`);
         browse.disabled = input.disabled;
         browse.addEventListener("click", async () => {
             try {
@@ -775,6 +795,7 @@ const renderCharacterField = (field) => {
 	const input = document.createElement("textarea");
 	input.rows = 2;
 	input.setAttribute("aria-label", field.label);
+	bindLabel(shell, input, field);
 	input.value = (state.draft[field.id] ?? field.defaultValue ?? []).join("");
 	const hint = document.createElement("div"); hint.className = "field-help";
 	const validate = () => {
@@ -1016,9 +1037,9 @@ const renderPaletteRow = (field, stops, stop, index) => {
 	at.step = "0.01";
 	at.setAttribute("aria-label", `${name} position`);
 	at.value = format01(value.at);
-	const up = miniButton("↑");
-	const down = miniButton("↓");
-	const remove = miniButton("×");
+	const up = miniButton("↑", `Move ${name} up`);
+	const down = miniButton("↓", `Move ${name} down`);
+	const remove = miniButton("×", `Remove ${name}`);
 
 	// Color/hex/at edits update in place (no renderFields → no focus loss).
 	const persist = () => {
@@ -1101,9 +1122,9 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 	hex.setAttribute("aria-label", `${name} hex`);
 	hex.value = colorToHex(value);
 	hex.disabled = disabled;
-	const up = miniButton("↑");
-	const down = miniButton("↓");
-	const remove = miniButton("×");
+	const up = miniButton("↑", `Move ${name} up`);
+	const down = miniButton("↓", `Move ${name} down`);
+	const remove = miniButton("×", `Remove ${name}`);
 
 	const persist = () => {
 		colors[index] = { ...value };
@@ -1147,10 +1168,12 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 	return row;
 };
 
-const miniButton = (text) => {
+// The glyph is the visible face; label is what assistive technology announces.
+const miniButton = (text, label) => {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.textContent = text;
+	button.setAttribute("aria-label", label);
 	return button;
 };
 

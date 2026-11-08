@@ -8,10 +8,12 @@ import functools
 import hashlib
 import http.server
 import json
+import re
 import subprocess
 import sys
 import threading
 import traceback
+from collections import Counter
 from urllib.parse import quote
 from pathlib import Path
 
@@ -358,6 +360,74 @@ def check_focus_rerender(page, _fixture):
     assert (now["field"], now["row"], now["rows"], now["text"]) == ("zmPhrases", 0, 1, "Remove"), "removing the last phrase did not land on the new last row's remove: " + str(now)
 
 
+CONTROL_ROLES = {"checkbox", "combobox", "textbox", "searchbox", "spinbutton", "slider", "button", "listbox"}
+COMPOUND_KINDS = {"color", "rgb8", "font", "phrases", "palette", "stripes"}
+
+
+def ax_snapshot(page):
+    """Chromium's computed accessibility tree, each live node joined to its DOM element."""
+    cdp = page.context.new_cdp_session(page)
+    try:
+        root = cdp.send("DOM.getDocument", {"depth": -1})["root"]
+        nodes = cdp.send("Accessibility.getFullAXTree")["nodes"]
+    finally:
+        cdp.detach()
+    elements = {}
+    stack = [(root, ())]
+    while stack:
+        node, ancestors = stack.pop()
+        flat = node.get("attributes", [])
+        chain = ancestors + ((node.get("localName", ""), dict(zip(flat[::2], flat[1::2]))),)
+        elements[node["backendNodeId"]] = chain
+        stack.extend((child, chain) for child in node.get("children", []))
+    live = []
+    for node in nodes:
+        chain = elements.get(node.get("backendDOMNodeId"))
+        if node.get("ignored") or not chain:
+            continue
+        live.append({"role": node.get("role", {}).get("value", ""), "name": str(node.get("name", {}).get("value", "")).strip(),
+                     "tag": chain[-1][0], "attrs": chain[-1][1],
+                     "field": next((attrs["data-field"] for _, attrs in reversed(chain) if "data-field" in attrs), None),
+                     "surface": any(attrs.get("id") == "fieldSurface" for _, attrs in chain)})
+    return live
+
+
+def describe(node):
+    where = "#" + node["attrs"]["id"] if node["attrs"].get("id") else "[" + str(node["field"]) + "]"
+    return node["role"] + " " + node["tag"] + where
+
+
+def check_accessible_names(page, fixture):
+    page.locator("#importButton").click()  # #importInput is only in the tree while its panel is open
+    page.wait_for_function("!document.querySelector('#importPanel').hidden")
+    live = ax_snapshot(page)
+    roles = Counter(node["role"] for node in live)
+    for role in ("checkbox", "combobox", "textbox", "spinbutton", "slider", "button"):
+        assert roles[role], "witness: the accessibility tree has no live " + role + ": " + str(dict(roles))
+    controls = [node for node in live if node["role"] in CONTROL_ROLES]
+    unnamed = [describe(node) for node in controls if not node["name"]]
+    assert not unnamed, str(len(unnamed)) + " controls have no accessible name: " + ", ".join(unnamed[:10])
+    glyphs = [describe(node) + " " + repr(node["name"]) for node in controls if node["surface"] and not re.search("[A-Za-z]", node["name"])]
+    assert not glyphs, str(len(glyphs)) + " field buttons are named only by a glyph: " + ", ".join(glyphs[:6])
+    compound = sorted(entry["id"] for group in fixture["metadata"]["groups"] for entry in group["fields"] if entry["kind"] in COMPOUND_KINDS)
+    labels = dict(page.evaluate("ids => ids.map(id => [id, document.querySelector(`[data-field='${id}'] > label`).textContent])", compound))
+    # Chromium names from rendered text, so the label's text-transform: uppercase shows in the name.
+    groups = {node["attrs"]["data-field"]: node["name"].casefold() for node in live if node["role"] == "group" and "data-field" in node["attrs"]}
+    wrong = [key + "=" + repr(groups.get(key)) for key in compound if groups.get(key) != labels[key].casefold()]
+    assert not wrong, str(len(wrong)) + " compound editors are not a group named by their label: " + ", ".join(wrong)
+    page.locator("#cancelImportButton").click()
+    # The visible label operates the control it names: a click toggles the box or focuses the control.
+    key = page.locator(".checkbox-field:not(.disabled-field)").first.get_attribute("data-field")
+    before = field(page, key).locator("input").is_checked()
+    field(page, key).locator(":scope > label").click()
+    assert field(page, key).locator("input").is_checked() != before, "clicking the " + key + " label did not toggle its checkbox"
+    for control in ("select", "input[type=number]"):
+        key = page.locator(".field:not(.disabled-field):has(> " + control + ")").first.get_attribute("data-field")
+        field(page, key).locator(":scope > label").click()
+        assert page.evaluate("([key, control]) => document.activeElement === document.querySelector(`[data-field='${key}'] > ${control}`)", [key, control]), \
+            "clicking the " + key + " label did not focus its " + control
+
+
 def check_close_snapshot(page, _fixture):
     choose_zmatrix(page)
     saved(page)
@@ -463,6 +533,7 @@ CHECKS = [
     ("Late picker callbacks preserve disabled palette and stripe saved values", check_late_picker),
     ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
     ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
+    ("Field controls have accessible names and their labels operate them", check_accessible_names),
     ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
@@ -471,6 +542,10 @@ CHECKS = [
 
 
 def main():
+    # A failure message can quote a glyph (a button named only by an arrow). A redirected cp1252
+    # stream must escape it rather than crash the harness and skip the remaining checks.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", default="")
     parser.add_argument("--app-js", type=Path)

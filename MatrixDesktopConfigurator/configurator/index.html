@@ -47,11 +47,11 @@
 
 			<footer class="command-panel">
 				<div class="command-header">
-					<span>Generated command</span>
+					<span id="commandLabel">Generated command</span>
 					<span id="saveState" class="save-state"></span>
 				</div>
 				<div class="command-row">
-					<textarea id="commandOutput" spellcheck="false" readonly></textarea>
+					<textarea id="commandOutput" spellcheck="false" readonly aria-labelledby="commandLabel"></textarea>
 					<div class="command-actions">
 						<select id="randomizeScope" aria-label="Randomize scope">
 							<option value="visual">Visual preset</option>
@@ -69,8 +69,8 @@
 					</div>
 				</div>
 				<div id="importPanel" class="import-panel" hidden>
-					<div class="import-header">Paste a command, arguments or ZMatrix .cfg</div>
-					<textarea id="importInput" spellcheck="false"></textarea>
+					<div id="importLabel" class="import-header">Paste a command, arguments or ZMatrix .cfg</div>
+					<textarea id="importInput" spellcheck="false" aria-labelledby="importLabel"></textarea>
 					<div class="import-actions">
 						<button id="applyImportButton" type="button">Apply Import</button>
 						<button id="importFileButton" type="button">Choose .cfg file</button>
