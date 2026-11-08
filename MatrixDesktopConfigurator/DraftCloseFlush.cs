@@ -11,6 +11,11 @@ internal sealed class DraftCloseFlush
     private Task? _pending;
     public bool Completed { get; private set; }
 
+    // Whether this close request is cancelled while the snapshot is taken. Never for
+    // WM_QUERYENDSESSION: WinForms answers that query with !e.Cancel, and a refusal lists the
+    // configurator as blocking shutdown.
+    public static bool DefersClose(bool sessionEndQuery, bool completed) => !sessionEndQuery && !completed;
+
     public Task FlushAsync(Func<Task<string>> capture, Action<JsonElement> save, Action<string> warn, int timeoutMilliseconds = 1500)
         => _pending ??= RunAsync(capture, save, warn, timeoutMilliseconds);
 

@@ -42,6 +42,7 @@ public sealed class ConfiguratorForm : Form
     private bool _isShuttingDown;
     private readonly DraftCloseFlush _closeFlush = new();
     private bool _closeFlushStarted;
+    private bool _sessionEndQuery;
     private MatrixDesktop.Shared.AppWindowIcon? _windowIcon;
 
     // Cached embedded argument-guide text for the "?" help modal.
@@ -138,9 +139,31 @@ public sealed class ConfiguratorForm : Form
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr RemoveProp(IntPtr hwnd, string name);
 
+    // WinForms raises FormClosing for WM_QUERYENDSESSION. The flag marks only that dispatch:
+    // e.CloseReason cannot, because it stays WindowsShutDown after a cancelled shutdown and a
+    // later ordinary close still reports it.
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg != 0x0011) // WM_QUERYENDSESSION
+        {
+            base.WndProc(ref m);
+            return;
+        }
+
+        _sessionEndQuery = true;
+        try
+        {
+            base.WndProc(ref m);
+        }
+        finally
+        {
+            _sessionEndQuery = false;
+        }
+    }
+
     protected override async void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!_closeFlush.Completed)
+        if (DraftCloseFlush.DefersClose(_sessionEndQuery, _closeFlush.Completed))
         {
             e.Cancel = true;
             base.OnFormClosing(e);
@@ -156,18 +179,34 @@ public sealed class ConfiguratorForm : Form
             return;
         }
 
+        if (_sessionEndQuery)
+        {
+            // Answer yes at once (e.Cancel stays false) and keep running: the shutdown can
+            // still be cancelled. WM_ENDSESSION(TRUE) raises FormClosed, which tears down.
+            TrySaveState();
+            base.OnFormClosing(e);
+            return;
+        }
+
+        ShutDown();
+        base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        // Already done for an ordinary close; this is the WM_ENDSESSION(TRUE) path.
+        ShutDown();
+        DisposeWindowIcons();
+        base.OnFormClosed(e);
+    }
+
+    private void ShutDown()
+    {
+        if (_isShuttingDown) return;
         _isShuttingDown = true;
         _mediaBridge.Dispose();
         StopTestProcess();
-
-        try
-        {
-            _storage.Save(_state);
-        }
-        catch
-        {
-            // Ignore last-moment save failures; normal save paths report errors to the UI.
-        }
+        TrySaveState();
 
         try
         {
@@ -177,14 +216,18 @@ public sealed class ConfiguratorForm : Form
         {
             // Ignore.
         }
-
-        base.OnFormClosing(e);
     }
 
-    protected override void OnFormClosed(FormClosedEventArgs e)
+    private void TrySaveState()
     {
-        DisposeWindowIcons();
-        base.OnFormClosed(e);
+        try
+        {
+            _storage.Save(_state);
+        }
+        catch
+        {
+            // Ignore last-moment save failures; normal save paths report errors to the UI.
+        }
     }
 
     private void DisposeWindowIcons()
