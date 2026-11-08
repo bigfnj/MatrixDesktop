@@ -20,7 +20,11 @@ export function createOverlays(config, warnings = []) {
   layer.append(clock, caption, status); document.body.append(layer);
   let lastSecond = -1;
   return {
-    addWarning(message) { warnings.push(message); status.textContent = [...new Set(warnings)].join(" "); status.hidden = false; },
+    addWarning(message) {
+      // A failed picture is revisited on every slideshow cycle; keep one entry, bounded as ZMatrix is.
+      if (warnings.includes(message) || warnings.length >= 32) return;
+      warnings.push(message); status.textContent = [...new Set(warnings)].join(" "); status.hidden = false;
+    },
     update(state, picture, date = new Date()) {
       if (config.showClock && Math.floor(date.getTime() / 1000) !== lastSecond) {
         clock.textContent = formatClock(date, config.clock12Hour); lastSecond = Math.floor(date.getTime() / 1000);

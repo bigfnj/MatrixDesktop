@@ -3,6 +3,7 @@ import { createScene } from "./scene.js";
 import { createSurface, fitSurface, MAX_SURFACE_PIXELS } from "./surface.js";
 import { loadFonts, decodeImage } from "./fonts.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { showRenderFailure } from "../renderFailure.js";
 
 // Every asynchronous generation has one owner. Obsolete loads must dispose
 // their result even when a decoder does not implement AbortSignal itself.
@@ -52,7 +53,8 @@ async function loadResources(config, bootstrap, signal) {
   } catch (error) { fonts.normal.dispose(); fonts.special.dispose(); wallpaper?.close(); throw error; }
 }
 export async function createRuntime(canvas, options, backend, maximumDimension = 8192) {
-  const warnings = [], config = { ...options, ...normalizeZMatrixSettings(options, warnings) };
+  // config.js already replaced every rejected value with its default, silently as documented.
+  const config = { ...options, ...normalizeZMatrixSettings(options) };
   let bootstrap = window.matrixHostBootstrap ?? {}, resources = null, surface = null, imageData = null, upload = null, uploadContext = null, pendingRefresh = null;
   let dead = false, lastTime = null, cssWidth = 0, cssHeight = 0, backgroundDirty = true, lastRatio = 0;
   const slot = createResourceSlot();
@@ -72,7 +74,6 @@ export async function createRuntime(canvas, options, backend, maximumDimension =
     console.warn(`ZMatrix: ${message}`);
     if (!config.suppressWarnings && !dead) { warningBox.textContent = diagnostics.warnings.join("\n"); warningBox.style.display = "block"; }
   };
-  warnings.forEach(warn);
   const refresh = next => pendingRefresh = slot.replace(signal => loadResources(config, next, signal), value => {
     resources = value; backgroundDirty = true; lastRatio = 0;
     diagnostics.resourceGeneration = value.generation;
@@ -171,11 +172,14 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
   };
   const present = state => {
     if (!state || dead) return;
-    draw(state); runtime.diagnostics.frames++; runtime.diagnostics.lastPresentedRevision = state.revision; runtime.diagnostics.ready = true;
+    // A draw that returns false presented nothing: a lost context waits for its event.
+    if (draw(state) === false) { runtime.diagnostics.ready = false; return; }
+    runtime.diagnostics.frames++; runtime.diagnostics.lastPresentedRevision = state.revision; runtime.diagnostics.ready = true;
   };
   const fail = error => {
     if (runtime.diagnostics.errors.length < 32) runtime.diagnostics.errors.push(error.message);
-    runtime.warn(`Rendering failed: ${error.message}`); console.error("ZMatrix render failed", error); dispose();
+    // dispose() removes the warning box, so the failure gets an element that outlives it.
+    showRenderFailure("ZMatrix", error); console.error("ZMatrix render failed", error); dispose();
   };
   runtime.diagnostics.dispose = dispose;
   runtime.diagnostics.step = count => {

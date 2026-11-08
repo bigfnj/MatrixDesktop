@@ -16,7 +16,7 @@ export function streamColor(rgb, wait, variance, gains, offsets) {
     Math.trunc((channel - Math.floor(wait * channel / (variance + 1))) * gains[i] + offsets[i]))));
 }
 export function cleanupCell(stream, distance, normalHeight, specialHeight, phraseLength, columnWidth) {
-  let normal = 0, special = 0, height = normalHeight;
+  let normal, special = 0, height = normalHeight;
   if (stream.phraseIndex < 0) normal = distance;
   else if (stream.phraseIndex <= phraseLength) {
     special = Math.min(distance, stream.phraseIndex);

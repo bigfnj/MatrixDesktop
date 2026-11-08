@@ -1,7 +1,7 @@
 import { subscribeHostPlayback } from "../hostPlayback.js";
 
 // Original synthesized sounds. No music or sound effects from the donor are bundled.
-export function createAudio(config, bootstrap, canvas, { subscribe = subscribeHostPlayback } = {}) {
+export function createAudio(config, bootstrap, { subscribe = subscribeHostPlayback, gestureGraceMs = 1500 } = {}) {
   let context = null, element = null, disposed = false, button = null, master = null, hostPaused = false, operation = 0;
   let requested = !bootstrap.preview, unsubscribe = () => {};
   const nodes = [];
@@ -19,6 +19,20 @@ export function createAudio(config, bootstrap, canvas, { subscribe = subscribeHo
     if (button) button.disabled = blocked();
     if (blocked()) { operation++; silence(); if (requested) state.status = "paused"; }
     else if (requested) start();
+  };
+  // Blocked autoplay leaves resume() pending until a gesture, so offer the button after a
+  // grace period. If that pending resume completes later, it still promotes this attempt.
+  const resumeWithin = async token => {
+    const resumed = context.resume();
+    let timer = 0;
+    try {
+      if (await Promise.race([resumed.then(() => true), new Promise(resolve => { timer = setTimeout(resolve, gestureGraceMs, false); })])) return;
+    } finally { clearTimeout(timer); }
+    resumed.then(() => {
+      if (disposed || blocked()) { silence(); return; }
+      if (token !== operation || context.state !== "running") return;
+      state.status = "playing"; button?.remove(); button = null;
+    }, () => {});
   };
   const start = async () => {
     if (disposed || state.mode === "off" || blocked()) return;
@@ -53,7 +67,7 @@ export function createAudio(config, bootstrap, canvas, { subscribe = subscribeHo
           }
         }
         master.gain.value = volume * (state.mode === "effects" ? 0.3 : 0.12);
-        await context.resume();
+        await resumeWithin(token);
         if (context.state !== "running") throw new Error("Sound needs a user gesture");
       }
       if (disposed || blocked()) { silence(); return; }

@@ -58,7 +58,7 @@ def main():
                     page.evaluate("""async () => {
                         const {createAudio}=await import('/js/uc3d/audio.js');
                         document.querySelector('#start').onclick=()=>window.testAudio=createAudio(
-                            {sound:'effects',soundVolume:0},{preview:false},document.querySelector('canvas'));
+                            {sound:'effects',soundVolume:0},{preview:false});
                     }""")
                     witnesses = {}
                     for relative in ("js/uc3d/audio.js", "js/hostPlayback.js", "js/hostPointer.js"):

@@ -40,8 +40,7 @@ export function createMedia(images = [], options = {}) {
     return task;
   };
   return {
-    images, load,
-    get failedCount() { return failures.size; },
+    load,
     dispose() { disposed = true; for (const image of pending) image.src = ""; pending.clear(); cache.clear(); },
   };
 }

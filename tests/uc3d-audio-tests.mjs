@@ -17,9 +17,11 @@ async function test(name, run) {
   try { await run(); passed++; console.log(`PASS ${name}`); }
   catch (error) { failures++; console.error(`FAIL ${name}: ${error.stack}`); }
 }
-function fixture({ paused = false, preview = false, local = false, defer = false, sound = "effects" } = {}) {
+function fixture({ paused = false, preview = false, local = false, defer = false, sound = "effects", gesture = false, grace } = {}) {
   const saved = { window: globalThis.window, document: globalThis.document, Audio: globalThis.Audio };
   const contexts = [], elements = [], buttons = [], listeners = new Set(), pending = [];
+  // gesture: autoplay is blocked, so resume() stays pending until the page has user activation.
+  let activated = false;
   const document = new EventTarget(); document.hidden = false;
   document.createElement = () => {
     const button = new EventTarget(); button.style = {}; button.remove = () => { button.removed = true; };
@@ -37,6 +39,7 @@ function fixture({ paused = false, preview = false, local = false, defer = false
       if (defer) { defer = false; return new Promise((resolve, reject) => {
         const finish = () => { if (this.state !== "closed") this.state = "running"; resolve(); }; finish.reject = reject; pending.push(finish);
       }); }
+      if (gesture && !activated) return new Promise(resolve => pending.push(() => { if (this.state !== "closed") this.state = "running"; resolve(); }));
       this.state = "running"; return Promise.resolve();
     }
     suspend() { this.suspends++; if (this.state !== "closed") this.state = "suspended"; return Promise.resolve(); }
@@ -52,10 +55,10 @@ function fixture({ paused = false, preview = false, local = false, defer = false
     pause() { this.paused = true; } load() {} removeAttribute() {}
   }
   globalThis.window = { AudioContext: Context }; globalThis.document = document; globalThis.Audio = Element;
-  const audio = createAudio({ sound, soundVolume: .5 }, { preview, effectsUrl: local ? "fixture.wav" : null }, {}, {
-    subscribe(listener) { listeners.add(listener); listener(paused); return () => listeners.delete(listener); },
+  const audio = createAudio({ sound, soundVolume: .5 }, { preview, effectsUrl: local ? "fixture.wav" : null }, {
+    subscribe(listener) { listeners.add(listener); listener(paused); return () => listeners.delete(listener); }, gestureGraceMs: grace,
   });
-  return { audio, contexts, elements, buttons, pending, listeners,
+  return { audio, contexts, elements, buttons, pending, listeners, activate() { activated = true; },
     pause(value) { paused = value; for (const listener of listeners) listener(value); },
     hidden(value) { document.hidden = value; document.dispatchEvent(new Event("visibilitychange")); },
     restore() { audio.dispose(); Object.assign(globalThis, saved); },
@@ -149,6 +152,21 @@ await test("off mode subscribes to no audio lifecycle and allocates no resources
   const f = fixture({ sound: "off" });
   try { await flush(); assert.equal(f.listeners.size, 0); assert.equal(f.contexts.length, 0); assert.equal(f.elements.length, 0); assert.equal(f.audio.state.status, "off"); }
   finally { f.restore(); }
+});
+const graceElapsed = () => new Promise(resolve => setTimeout(resolve, 40));
+await test("blocked autoplay offers Enable sound after the grace; a click or a late resume starts playback", async () => {
+  for (const leg of ["click", "late resume"]) {
+    const f = fixture({ gesture: true, grace: 5 });
+    try {
+      await graceElapsed(); assert.equal(f.contexts[0].resumes, 1, "witness: the blocked resume must have been requested");
+      assert.equal(f.audio.state.status, "waiting-for-gesture", `${leg}: a pending resume left the status ${f.audio.state.status}`);
+      const button = f.buttons.at(-1); assert.equal(button?.textContent, "Enable sound");
+      if (leg === "click") { f.activate(); button.dispatchEvent(new Event("click")); }
+      else f.pending.shift()();
+      await flush();
+      assert.equal(f.audio.state.status, "playing", `${leg}: status ${f.audio.state.status} after the resume`); assert.equal(button.removed, true);
+    } finally { f.restore(); }
+  }
 });
 if (!passed && !failures) { console.error("No matching UC3D audio tests ran"); failures++; }
 console.log(`UC3D audio tests: ${passed} passed, ${failures} failed`);

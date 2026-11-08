@@ -4,6 +4,8 @@ import { createOverlays } from "./overlays.js";
 import { createAudio } from "./audio.js";
 import colorToRGB from "../colorToRGB.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { fitSurface } from "../zmatrix/surface.js";
+import { showRenderFailure } from "../renderFailure.js";
 
 export async function loadImage(url) {
   if (!url) return null;
@@ -36,7 +38,7 @@ export async function createRuntime(canvas, options, backend) {
   const media = createMedia(images, { original: config.uc3dControls !== "legacy" });
   const scene = createScene(config, images.length);
   const overlays = createOverlays(config, warnings);
-  const audio = createAudio(config, bootstrap, canvas);
+  const audio = createAudio(config, bootstrap);
   let currentTime = 0, currentIndex = -1, photo = null, grid = null, dirty = true, dead = false;
   let aspect = 1;
   const detachMouse = attachMouse(canvas, scene, () => currentTime);
@@ -77,29 +79,36 @@ export async function createRuntime(canvas, options, backend) {
   if (dead) throw new Error("UC3D initialization was canceled by navigation");
   return {
     config, diagnostics, desktop, background,
+    warn: message => overlays.addWarning(message),
     update(seconds, width, height) {
       if (dead) return null;
       currentTime = seconds;
       const nextAspect = Math.max(1, width) / Math.max(1, height);
       if (Math.abs(nextAspect - aspect) > 0.0001) { aspect = nextAspect; dirty = true; }
       scene.viewport?.(aspect);
-      const state = scene.update(seconds);
+      let state = scene.update(seconds);
       if (state.pictureIndex !== currentIndex) requestPhoto(state.pictureIndex);
       if (diagnostics.pictureStatus !== "ready") state.pictureWeight = 0;
       // A forming picture returns to a front-facing pose, as manual movement already
       // suppresses the picture. Keep the relief visible without shearing its silhouette.
       if (!scene.grid) {
         state.yaw *= 1 - state.pictureWeight; state.pitch *= 1 - state.pictureWeight; state.roll *= 1 - state.pictureWeight;
-        if (config.volumetric && config.isometric) { state.yaw += Math.PI / 4 * (1 - state.pictureWeight); state.pitch += Math.PI / 8 * (1 - state.pictureWeight); }
+        // The scene seeds a mouse gesture from its own state, so the fixed isometric
+        // view offset belongs to this derived view only, never to the scene's object.
+        if (config.volumetric && config.isometric) state = { ...state, yaw: state.yaw + Math.PI / 4 * (1 - state.pictureWeight), pitch: state.pitch + Math.PI / 8 * (1 - state.pictureWeight) };
       }
       const changed = dirty || Boolean(scene.grid);
       if (changed) { grid = scene.grid ? scene.grid(aspect, photo) : createGrid(config, aspect, photo); dirty = false; }
       const uniforms = new Float32Array(56);
+      // Days of active time do not fit a float32 uniform, so reduce exactly here. Legacy stream
+      // speeds are multiples of 0.1: 500 s moves every head whole 50-unit wraps. The glyph term
+      // needs only its cycle count modulo the sequence length, and travel only its fraction.
+      const sequence = config.glyphSequenceLength ?? 57, cycle = Math.floor(state.time * (config.cycleSpeed ?? 0.03) * 30);
       uniforms.set(viewProjection(aspect, config, state, backend === "webgpu"), 0);
       uniforms.set([aspect, grid.rows, grid.columns, grid.baseColumns], 16);
-      uniforms.set([state.time, state.forwardPhase, state.yaw, state.pitch], 20);
+      uniforms.set([state.time - 500 * Math.floor(state.time / 500), state.forwardPhase - Math.floor(state.forwardPhase), state.yaw, state.pitch], 20);
       uniforms.set([state.roll, state.sidewaysOffset, state.pictureWeight, config.volumetric ? 1 : 0], 24);
-      uniforms.set([config.fallSpeed ?? 0.3, config.cycleSpeed ?? 0.03, config.glyphSequenceLength ?? 57, config.shadedLines ? 1 : 0], 28);
+      uniforms.set([config.fallSpeed ?? 0.3, sequence > 0 ? cycle - sequence * Math.floor(cycle / sequence) : cycle, sequence, config.shadedLines ? 1 : 0], 28);
       uniforms.set([config.pictureDepth, config.pictureMonochrome ? 1 : 0, config.glyphIntensity ?? 1, config.cursorIntensity ?? 2], 32);
       uniforms.set([...(config.glyphTextureGridSize ?? [8, 8]), config.glyphFlip ? 1 : 0, (config.glyphRotation ?? 0) * Math.PI / 180], 36);
       uniforms.set([config.raindropLength ?? 0.75, config.glyphHeightToWidth ?? 1, config.glyphVerticalSpacing ?? 1, config.glyphEdgeCrop ?? 0], 40);
@@ -107,7 +116,6 @@ export async function createRuntime(canvas, options, backend) {
       uniforms[52] = config.bitmapGlyphs ? 1 : 0;
       uniforms[53] = grid.nativeMode ? 1 : 0;
       uniforms[54] = grid.glyphHalfSize ?? 0;
-      uniforms[55] = grid.worldWidth ?? grid.baseColumns * (grid.glyphHalfSize ?? 0) * 2;
       overlays.update(state, photo);
       diagnostics.frames++; diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
       diagnostics.controls = config.uc3dControls ?? "legacy";
@@ -125,9 +133,10 @@ export async function createRuntime(canvas, options, backend) {
 
 // Both backends use one lifecycle and throttling implementation. No rendering callback
 // can survive pagehide, explicit teardown, or an initialization/runtime failure.
-export function startLoop(canvas, runtime, draw, cleanup) {
+// maximumDimension is the backend's texture/viewport limit for the canvas and render target.
+export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity) {
   const clock = createPlaybackClock();
-  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null;
+  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
   const requestedFps = Number(runtime.config.fps ?? 60);
   const fps = Number.isFinite(requestedFps) ? Math.max(0, Math.min(120, requestedFps)) : 60;
   const dispose = () => {
@@ -142,8 +151,10 @@ export function startLoop(canvas, runtime, draw, cleanup) {
     if (start === null) start = now;
     if (fps === 0 || now - previous >= 1000 / fps - 0.5 || runtime.config.once) {
       const ratio = window.devicePixelRatio || 1;
-      const width = Math.max(1, Math.ceil(canvas.clientWidth * ratio * (runtime.config.resolution ?? 0.75)));
-      const height = Math.max(1, Math.ceil(canvas.clientHeight * ratio * (runtime.config.resolution ?? 0.75)));
+      // One aspect-preserving factor keeps a wide virtual screen inside the GPU limit.
+      const { width, height, factor } = fitSurface(canvas.clientWidth * ratio * (runtime.config.resolution ?? 0.75),
+        canvas.clientHeight * ratio * (runtime.config.resolution ?? 0.75), maximumDimension, Infinity);
+      if (factor < 1 && !reduced) { reduced = true; runtime.warn?.("Render resolution was reduced to fit the GPU texture limit."); }
       if (runtime.config.uc3dControls === "original") {
         // Do not simulate an entire sleep/lock interval on the first resumed frame.
         // Dropped time is intentional; active simulation resumes without catch-up debt.
@@ -151,8 +162,9 @@ export function startLoop(canvas, runtime, draw, cleanup) {
         else if (runtime.config.once || fps === 0) elapsed = 10;
       } else elapsed = (now - start) / 1000;
       lastDraw = now;
-      try { draw(runtime.update(elapsed, width, height), width, height); runtime.diagnostics.ready = true; }
-      catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); dispose(); return; }
+      // A draw that returns false presented nothing: a lost context waits for its event.
+      try { runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false; }
+      catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); showRenderFailure("UC3D", error); dispose(); return; }
       previous = now;
       // Keep the single frame and overlays visible. Resources are released on pagehide
       // or explicit teardown, just as for the animated path, without scheduling a loop.

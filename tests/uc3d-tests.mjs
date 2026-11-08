@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
 import resolveConfig from "../MatrixDesktop/web/js/config.js";
 import { createScene as createConfiguredScene, createGrid, projection, viewProjection, attachMouse } from "../MatrixDesktop/web/js/uc3d/scene.js";
 import { createNativeRandom, nativeSettings, nativeFallSpeed, nativePictureGrid, wrapNative } from "../MatrixDesktop/web/js/uc3d/native.js";
 import { selectImages, createMedia } from "../MatrixDesktop/web/js/uc3d/media.js";
-import { formatClock } from "../MatrixDesktop/web/js/uc3d/overlays.js";
+import { formatClock, createOverlays } from "../MatrixDesktop/web/js/uc3d/overlays.js";
 import { createAudio } from "../MatrixDesktop/web/js/uc3d/audio.js";
-import { startLoop } from "../MatrixDesktop/web/js/uc3d/runtime.js";
-import { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
+import { startLoop, createRuntime } from "../MatrixDesktop/web/js/uc3d/runtime.js";
+import startREGL from "../MatrixDesktop/web/js/regl/uc3dPass.js";
+import { createProgram } from "../MatrixDesktop/web/js/webglProgram.js";
 import startWebGPU from "../MatrixDesktop/web/js/webgpu/uc3dPass.js";
 import "./uc3d-config-tests.mjs";
 
@@ -226,10 +228,10 @@ test("WebGL program initialization releases shaders and failed programs on every
       deleteProgram(program) { assert.ok(!deletedPrograms.has(program)); deletedPrograms.add(program); },
     };
     if (outcome === "success") {
-      const result = createProgram(gl, "vertex source", "fragment source");
+      const result = createProgram(gl, "vertex source", "fragment source", "UC3D");
       assert.ok(programs.has(result)); assert.equal(deletedPrograms.size, 0);
     } else {
-      assert.throws(() => createProgram(gl, "vertex source", "fragment source"), new RegExp(`UC3D (?:shader|program): ${outcome}`));
+      assert.throws(() => createProgram(gl, "vertex source", "fragment source", "UC3D"), new RegExp(`UC3D (?:shader|program): ${outcome}`));
       assert.deepEqual(deletedPrograms, programs, `${outcome} leaked a program`);
     }
     assert.deepEqual(deletedShaders, shaders, `${outcome} leaked a shader`);
@@ -372,11 +374,11 @@ globalThis.document = {
 try {
   test("sound off creates no visibility callback or media element", () => {
     globalThis.Audio = class { constructor() { throw new Error("off mode opened audio"); } };
-    const audio = createAudio({ sound: "off" }, {}, {});
+    const audio = createAudio({ sound: "off" }, {});
     assert.equal(listeners.size, 0); audio.dispose(); assert.equal(audio.state.status, "disposed");
   });
   globalThis.Audio = class { async play() { throw new DOMException("Unsupported test source", "NotSupportedError"); } pause() {} removeAttribute() {} load() {} };
-  const failedAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:invalid" }, {});
+  const failedAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:invalid" });
   await new Promise(resolve => setImmediate(resolve));
   test("bad local audio reports a failed source instead of asking for a gesture", () => {
     assert.equal(failedAudio.state.status, "failed"); assert.equal(buttons.at(-1).textContent, "Retry sound");
@@ -384,7 +386,7 @@ try {
   });
   let completePlay, pauses = 0;
   globalThis.Audio = class { play() { return new Promise(resolve => { completePlay = resolve; }); } pause() { pauses++; } removeAttribute() {} load() {} };
-  const lateAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:late" }, {});
+  const lateAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:late" });
   lateAudio.dispose(); completePlay(); await new Promise(resolve => setImmediate(resolve));
   test("late play completion cannot reactivate audio after preview disposal", () => {
     assert.equal(lateAudio.state.status, "disposed"); assert.ok(pauses >= 2); assert.equal(listeners.size, 0);
@@ -435,6 +437,7 @@ await asyncTest("WebGPU initialization rejects missing contexts and preserves er
       globalThis.window = { addEventListener() {}, removeEventListener() {} };
       const resource = () => { resources++; return { createView: () => ({}), destroy() { released++; } }; };
       const device = {
+        limits: { maxTextureDimension2D: 8192 },
         destroy() { destroyed++; }, queue: { copyExternalImageToTexture() {}, writeBuffer() {} },
         createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
         createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
@@ -442,7 +445,7 @@ await asyncTest("WebGPU initialization rejects missing contexts and preserves er
         addEventListener() {}, lost: new Promise(() => {}),
       };
       Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: {
-        requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "rgba8unorm",
+        requestAdapter: async () => ({ limits: { maxTextureDimension2D: 8192 }, requestDevice: async () => device }), getPreferredCanvasFormat: () => "rgba8unorm",
       } } });
       const originalError = new Error("controlled configure failure");
       const context = {
@@ -473,6 +476,420 @@ await asyncTest("WebGPU initialization rejects missing contexts and preserves er
       if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
     }
   }
+});
+// A minimal page for the real createRuntime: overlays, pictures and pointer listeners.
+function runtimeDom(bootstrap = {}) {
+  const names = ["window", "document", "Image"];
+  const saved = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() {},
+    getContext: () => ({ drawImage() {}, getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }) }) });
+  globalThis.window = { matrixHostBootstrap: bootstrap, devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+  globalThis.document = { createElement: element, body: { append() {} }, addEventListener() {}, removeEventListener() {} };
+  globalThis.Image = class { naturalWidth = 4; naturalHeight = 4; async decode() {} };
+  const listeners = new Map();
+  const canvas = { dataset: {}, clientWidth: 200, clientHeight: 100,
+    addEventListener: (name, listener) => listeners.set(name, listener), removeEventListener: name => listeners.delete(name) };
+  return { canvas, listeners,
+    move: (x, y) => listeners.get("pointermove")({ clientX: x, clientY: y }),
+    restore() { for (const [name, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; } } };
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+await asyncTest("legacy isometric mouse rotation starts from the displayed pose without a 45-degree snap", async () => {
+  const dom = runtimeDom();
+  try {
+    const config = resolveConfig({ scene: "uc3d", isometric: "true", mouseRotation: "true" });
+    assert.equal(config.uc3dControls, "legacy"); assert.equal(config.volumetric, true); assert.equal(config.isometric, true);
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      const before = runtime.update(1, 200, 100).uniforms.slice(22, 24);
+      dom.move(50, 50); dom.move(50, 50);
+      const after = runtime.update(1 + 1/60, 200, 100);
+      assert.equal(after.state.mouseActive, true, "the zero-delta touch must enter manual control");
+      for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
+        const jump = after.uniforms[22 + index] - before[index];
+        assert.ok(Math.abs(jump) < 1e-4, `first touch moved ${name} by ${jump.toFixed(3)} rad`);
+      }
+    } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
+});
+await asyncTest("legacy first touch during a forming picture keeps the flattened pose continuous", async () => {
+  const dom = runtimeDom({ images: [{ url: "synthetic:picture", group: "custom" }] });
+  try {
+    const config = resolveConfig({ scene: "uc3d", isometric: "false", mouseRotation: "true", showPictures: "true", pictureDelay: "1", pictureDuration: "8" });
+    assert.equal(config.uc3dControls, "legacy"); assert.equal(config.isometric, false); assert.equal(config.codeRotation, true);
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      runtime.update(0, 200, 100); await settle();
+      assert.equal(runtime.diagnostics.pictureStatus, "ready");
+      const forming = runtime.update(2.85, 200, 100);
+      assert.ok(forming.state.pictureWeight > .2 && forming.state.pictureWeight < .8, `witness: picture weight ${forming.state.pictureWeight} is not forming`);
+      const before = forming.uniforms.slice(22, 24);
+      assert.ok(Math.abs(before[0]) + Math.abs(before[1]) > .01, "witness: automatic rotation must be visible before the touch");
+      dom.move(50, 50); dom.move(50, 50);
+      const after = runtime.update(2.85 + 1/60, 200, 100);
+      assert.equal(after.state.mouseActive, true); near(after.state.pictureWeight, 0);
+      for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
+        const jump = after.uniforms[22 + index] - before[index];
+        assert.ok(Math.abs(jump) < 1e-4, `first touch during a forming picture moved ${name} by ${jump.toFixed(3)} rad`);
+      }
+    } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
+});
+await asyncTest("a failed slideshow picture warns once however often the slideshow revisits it", async () => {
+  const dom = runtimeDom({ images: [{ url: "synthetic:broken-a", group: "custom" }, { url: "synthetic:broken-b", group: "custom" }] });
+  const previousWarn = console.warn; console.warn = () => {};
+  globalThis.Image = class { async decode() { throw new Error("synthetic decode failure"); } };
+  try {
+    const config = resolveConfig({ scene: "uc3d", isometric: "false", showPictures: "true", pictureDelay: "1", pictureDuration: "1" });
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      const visited = [];
+      for (let i = 0; i < 20; i++) {
+        const index = runtime.update(i * 1.1, 200, 100).state.pictureIndex;
+        if (visited.at(-1) !== index) visited.push(index);
+        await settle();
+      }
+      assert.ok(visited.length >= 6, `witness: the slideshow revisited only ${visited.length} pictures`);
+      const decoded = runtime.diagnostics.warnings.filter(message => message.startsWith("A picture could not be decoded"));
+      assert.equal(decoded.length, 1, `the failure warning was pushed ${decoded.length} times`);
+    } finally { runtime.dispose(); }
+  } finally { console.warn = previousWarn; dom.restore(); }
+});
+// Page globals for driving a whole backend pass with a manual animation frame.
+async function withPassEnvironment(bootstrap, run) {
+  const names = ["navigator", "window", "document", "Image", "fetch", "GPUBufferUsage", "GPUTextureUsage", "requestAnimationFrame", "cancelAnimationFrame", "createImageBitmap"];
+  const descriptors = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const previous = { warn: console.warn, error: console.error }, callbacks = [], appended = [];
+  try {
+    console.warn = () => {}; console.error = () => {};
+    const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() { this.removed = true; } });
+    globalThis.document = { createElement: element, body: { append: (...nodes) => appended.push(...nodes) }, addEventListener() {}, removeEventListener() {} };
+    globalThis.window = { matrixHostBootstrap: bootstrap, devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+    globalThis.Image = class { naturalWidth = 32; naturalHeight = 32; async decode() {}
+      set src(url) { const size = /(\d+)x(\d+)/.exec(url ?? ""); if (size) { this.naturalWidth = Number(size[1]); this.naturalHeight = Number(size[2]); } } };
+    globalThis.fetch = async () => ({ ok: true, text: async () => "synthetic shader source" });
+    globalThis.GPUBufferUsage = { UNIFORM: 1, COPY_DST: 2, VERTEX: 4 };
+    globalThis.GPUTextureUsage = { TEXTURE_BINDING: 1, COPY_DST: 2, RENDER_ATTACHMENT: 4 };
+    globalThis.requestAnimationFrame = callback => { callbacks.push(callback); return callbacks.length; };
+    globalThis.cancelAnimationFrame = () => {};
+    // A stopped loop's last scheduled frame stays queued; running every pending callback keeps it a no-op.
+    await run({ tick: now => { for (const callback of callbacks.splice(0)) callback(now); }, diagnostics: () => globalThis.window.matrixRuntimeDiagnostics,
+      // Text of the page elements still attached (an element's remove() detaches it).
+      visible: () => appended.filter(node => !node.removed && node.textContent).map(node => node.textContent) });
+  } finally {
+    console.warn = previous.warn; console.error = previous.error;
+    for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; }
+  }
+}
+// WebGL double: allocations above MAX_TEXTURE_SIZE raise INVALID_VALUE (1281), as a real context does.
+function fakeGL(maxTexture) {
+  const allocations = [], constants = { NO_ERROR: 0, FRAMEBUFFER_COMPLETE: 0x8cd5, MAX_TEXTURE_SIZE: 0x0d33, MAX_RENDERBUFFER_SIZE: 0x84e8, MAX_VIEWPORT_DIMS: 0x0d3a };
+  let pending = 0, lost = false;
+  const target = { ...constants, allocations,
+    lose() { lost = true; },
+    fault(code) { pending = code; },
+    isContextLost: () => lost,
+    getParameter: name => name === constants.MAX_VIEWPORT_DIMS ? new Int32Array([maxTexture, maxTexture]) : [constants.MAX_TEXTURE_SIZE, constants.MAX_RENDERBUFFER_SIZE].includes(name) ? maxTexture : 0,
+    getExtension: () => ({ vertexAttribDivisorANGLE() {}, drawArraysInstancedANGLE() {} }),
+    texImage2D(...args) {
+      if (args.length !== 9) return;
+      allocations.push([args[3], args[4]]);
+      if (args[3] > maxTexture || args[4] > maxTexture) pending ||= 1281;
+    },
+    checkFramebufferStatus: () => lost ? 0 : constants.FRAMEBUFFER_COMPLETE,
+    getError() { const error = lost ? 0x9242 : pending; pending = 0; return error; },
+    getShaderParameter: () => true, getProgramParameter: () => true,
+    createShader: () => ({}), createProgram: () => ({}), createTexture: () => ({}), createBuffer: () => ({}), createFramebuffer: () => ({}),
+    getUniformLocation: () => ({}), getAttribLocation: () => 0,
+  };
+  return new Proxy(target, { get: (object, key) => key in object ? object[key] : typeof key === "string" && /^[A-Z0-9_]+$/.test(key) ? key : () => {} });
+}
+const passCanvas = (context, clientWidth, clientHeight) => {
+  const listeners = new Map();
+  return { dataset: {}, clientWidth, clientHeight, width: 300, height: 150, listeners, getContext: () => context,
+    addEventListener: (name, listener) => listeners.set(name, listener), removeEventListener: name => listeners.delete(name) };
+};
+await asyncTest("REGL UC3D fits its render target to the WebGL texture limit with the aspect kept", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    // 8000x4000 exceeds ZMatrix's 16.7 Mpx budget; UC3D has none, so it stays unchanged.
+    for (const [clientWidth, clientHeight] of [[16400, 100], [1200, 100], [8000, 4000]]) {
+      const gl = fakeGL(16384), canvas = passCanvas(gl, clientWidth, clientHeight);
+      const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        tick(0);
+        assert.deepEqual(diagnostics().errors, [], `canvas ${clientWidth}x${clientHeight} failed: ${diagnostics().errors.join("; ")}`); assert.equal(diagnostics().ready, true);
+        const target = gl.allocations.at(-1);
+        assert.ok(target[0] <= 16384 && target[1] <= 16384, `render target ${target} exceeds 16384`);
+        assert.deepEqual([canvas.width, canvas.height], target);
+        const reducedWarnings = diagnostics().warnings.filter(message => message.startsWith("Render resolution was reduced")).length;
+        if (clientWidth <= 16384) assert.deepEqual(target, [clientWidth, clientHeight], "an ordinary size must be unchanged");
+        else assert.ok(Math.abs(target[0] / target[1] - clientWidth / clientHeight) < 2, `aspect ${target[0] / target[1]} was not kept`);
+        assert.equal(reducedWarnings, clientWidth > 16384 ? 1 : 0, "a reduced render resolution must warn once");
+      } finally { stop(); }
+    }
+  });
+});
+function fakeGPU(adapterLimit, defaultLimit) {
+  const textures = [], copies = [], resource = () => ({ createView: () => ({}), destroy() {} }), listeners = new Map();
+  let resolveLost;
+  const lost = new Promise(resolve => { resolveLost = resolve; });
+  const device = {
+    // As a real device does, destroy() settles lost with the reason "destroyed".
+    limits: { maxTextureDimension2D: defaultLimit }, destroy() { resolveLost({ reason: "destroyed", message: "Device was destroyed." }); },
+    queue: { copyExternalImageToTexture: (source, destination, size) => copies.push({ source: source.source, size }), writeBuffer() {}, submit() {} },
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
+    createBuffer: resource, createTexture: descriptor => { textures.push(descriptor.size); return resource(); },
+    createSampler: () => ({}), createBindGroup: () => ({}),
+    createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline() {}, setBindGroup() {}, setVertexBuffer() {}, draw() {}, end() {} }), finish: () => ({}) }),
+    addEventListener: (name, listener) => listeners.set(name, listener), lost,
+  };
+  const adapter = { limits: { maxTextureDimension2D: adapterLimit }, requestDevice: async descriptor => {
+    // Model the default limit: a device only receives the adapter maximum when it asks for it.
+    device.limits.maxTextureDimension2D = Math.min(adapterLimit, descriptor?.requiredLimits?.maxTextureDimension2D ?? defaultLimit); return device; } };
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: { requestAdapter: async () => adapter, getPreferredCanvasFormat: () => "rgba8unorm" } } });
+  const context = { configure() {}, unconfigure() {}, getCurrentTexture: () => resource() };
+  return { device, textures, copies, context, lose: info => resolveLost(info), fire: (name, event) => listeners.get(name)?.(event) };
+}
+await asyncTest("WebGPU UC3D requests the adapter texture limit and fits the canvas and render target to it", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    for (const [clientWidth, clientHeight] of [[200, 50], [40, 10]]) {
+      const gpu = fakeGPU(64, 32), canvas = passCanvas(gpu.context, clientWidth, clientHeight);
+      const stop = await startWebGPU(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        tick(0);
+        assert.deepEqual(diagnostics().errors, []); assert.equal(diagnostics().ready, true);
+        const target = gpu.textures.at(-1);
+        assert.ok(gpu.textures.every(([w, h]) => w <= 64 && h <= 64), `texture sizes ${JSON.stringify(gpu.textures)} exceed 64; render target ${JSON.stringify(target)}`);
+        assert.deepEqual([canvas.width, canvas.height], target);
+        if (clientWidth > 64) assert.deepEqual(target, [64, 16], "the fit must use the requested adapter limit and keep 4:1");
+        else assert.deepEqual(target, [clientWidth, clientHeight], "an ordinary size must be unchanged");
+      } finally { stop(); }
+    }
+  });
+});
+await asyncTest("WebGPU UC3D downscales a desktop snapshot wider than the texture limit before upload", async () => {
+  for (const [width, height] of [[9000, 600], [4000, 600]]) {
+    await withPassEnvironment({ desktopUrl: `synthetic:desktop-${width}x${height}` }, async ({ tick, diagnostics }) => {
+      const resized = [];
+      globalThis.createImageBitmap = async (source, options) => {
+        const bitmap = { width: options.resizeWidth, height: options.resizeHeight, closed: false, close() { this.closed = true; } };
+        resized.push({ source, bitmap }); return bitmap;
+      };
+      const gpu = fakeGPU(8192, 8192), canvas = passCanvas(gpu.context, 200, 50);
+      const stop = await startWebGPU(canvas, resolveConfig({ scene: "uc3d", resolution: "1", desktopBackground: "true" }));
+      try {
+        tick(0);
+        assert.deepEqual(diagnostics().errors, []); assert.equal(diagnostics().ready, true);
+        // The glyph atlas uploads first; the desktop snapshot is the last external upload.
+        const upload = gpu.copies.at(-1), [w, h] = upload.size;
+        assert.equal(gpu.copies.length, 2, "witness: the atlas and the desktop snapshot must both upload");
+        assert.ok(gpu.textures.every(([tw, th]) => tw <= 8192 && th <= 8192), `${width}x${height} snapshot: texture sizes ${JSON.stringify(gpu.textures)} exceed 8192`);
+        assert.deepEqual(gpu.textures[1], upload.size, "the desktop texture must match its upload");
+        if (width > 8192) {
+          assert.ok(w >= 8191 && Math.abs(h - w * height / width) <= 1, `snapshot ${w}x${h} did not keep ${width}x${height}`);
+          assert.equal(resized.length, 1); assert.equal(resized[0].source.naturalWidth, width, "the resize must read the captured image");
+          assert.equal(upload.source, resized[0].bitmap); assert.equal(resized[0].bitmap.closed, true, "the resized bitmap must be released after upload");
+        } else {
+          assert.deepEqual([w, h], [width, height], "a snapshot within the limit must upload unchanged");
+          assert.equal(resized.length, 0, "a snapshot within the limit must not be resized");
+        }
+      } finally { stop(); }
+    });
+  }
+});
+test("UC3D overlay warnings are capped at 32 distinct entries", () => {
+  const dom = runtimeDom();
+  try {
+    const warnings = [], overlays = createOverlays({}, warnings);
+    for (let i = 0; i < 40; i++) overlays.addWarning(`distinct warning ${i}`);
+    assert.equal(warnings.length, 32, `${warnings.length} distinct warnings were retained`); assert.equal(warnings.at(-1), "distinct warning 31");
+    overlays.dispose();
+  } finally { dom.restore(); }
+});
+// Population, glyph rows and weighted geometry sums of an original scene at one time.
+function startupPrint(scene, time) {
+  const state = scene.update(time), grid = scene.grid(2), streams = scene.inspect();
+  const sum = key => streams.reduce((total, stream) => total + stream[key], 0);
+  let data = 0; for (let i = 0; i < grid.data.length; i++) data += grid.data[i] * (i % 16 + 1);
+  return [state.activeStreams, grid.instanceCount, sum("renderY"), sum("x"), sum("z"), data];
+}
+const startupOptions = { uc3dAmount: 100, codeRotation: true, forwardMovement: true, randomForwardMovement: true, sidewaysMovement: true };
+test("original nonzero animation speeds keep their pinned startup ramp and geometry", () => {
+  // Pinned from the scene before the speed-0 fix (fd2358f), seed 12345, aspect 2.
+  const pinned = {
+    1: [[0, 0, 0, 0, 0, 0, 0], [1, 10, 85, 232, -33.99263667820747, -29.174670991330167, 92691.70666326582],
+      [10, 100, 2312, 686.8, 19.581728178122383, 70.07818261225493, 2290282.6175416857]],
+    0.5: [[0, 0, 0, 0, 0, 0, 0], [1, 5, 24, 120.44, 6.629524185696833, -38.63392451358523, 29240.343511283398],
+      [10, 50, 1099, 798.8, -103.45773526736997, -59.84218094180656, 1175837.2999242917]],
+  };
+  for (const [speed, rows] of Object.entries(pinned)) {
+    const scene = original({ ...startupOptions, animationSpeed: Number(speed) }); scene.viewport(2);
+    for (const [time, ...expected] of rows) {
+      const actual = startupPrint(scene, time), label = `speed ${speed} at ${time} s`;
+      assert.deepEqual(actual.slice(0, 2), expected.slice(0, 2), `${label}: streams and glyphs ${actual.slice(0, 2)} changed from ${expected.slice(0, 2)}`);
+      actual.slice(2).forEach((value, i) => assert.ok(Math.abs(value - expected[i + 2]) <= 1e-9 * Math.max(1, Math.abs(expected[i + 2])), `${label}: geometry ${value} changed from ${expected[i + 2]}`));
+    }
+  }
+});
+await asyncTest("original speed 0 shows a populated frozen field, animated and single-frame", async () => {
+  const scene = original({ ...startupOptions, animationSpeed: 0 }); scene.viewport(2);
+  const first = startupPrint(scene, 0), streams = scene.inspect();
+  assert.equal(first[0], 100, `animated speed 0 admitted ${first[0]} of 100 streams`);
+  assert.ok(first[1] >= 1000, `animated speed 0 drew ${first[1]} glyphs`);
+  assert.ok(streams.filter(stream => stream.renderY < 10).length > 50, "the populated streams must have entered the view");
+  for (const time of [1, 5, 30]) {
+    assert.deepEqual(startupPrint(scene, time), first, `speed 0 moved at ${time} s`);
+    assert.deepEqual(scene.inspect(), streams, `speed 0 streams changed at ${time} s`);
+  }
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
+    const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", animationSpeed: "0", once: "true", resolution: "1" }));
+    try {
+      tick(12345);
+      assert.deepEqual(diagnostics().errors, []); assert.equal(diagnostics().ready, true);
+      assert.equal(diagnostics().controls, "original"); assert.equal(diagnostics().frames, 1, "witness: once draws one frame");
+      assert.ok(diagnostics().activeStreams > 0 && diagnostics().glyphInstances > 0,
+        `single-frame speed 0 drew ${diagnostics().activeStreams} streams and ${diagnostics().glyphInstances} glyphs`);
+    } finally { stop(); }
+  });
+});
+await asyncTest("REGL UC3D waits for the lost-context event instead of failing a frame", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
+    const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+    try {
+      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present");
+      // isContextLost() is true at once; the browser queues the event as a later task.
+      gl.lose(); tick(100);
+      assert.deepEqual(diagnostics().errors, [], `a frame while the context was lost failed: ${diagnostics().errors.join("; ")}`);
+      assert.equal(diagnostics().ready, false, "ready must be false while the context is lost");
+      assert.equal(diagnostics().disposed, false, "the pass must wait for the lost event");
+      let prevented = false;
+      canvas.listeners.get("webglcontextlost")({ preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true, "the lost event must ask the browser to restore the context");
+      assert.deepEqual(diagnostics().errors, ["WebGL context was lost"]); assert.equal(diagnostics().disposed, true);
+    } finally { stop(); }
+  });
+});
+await asyncTest("a UC3D render failure stays visible after the scene disposes its overlays", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics, visible }) => {
+    const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
+    const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1", suppressWarnings: "true" }));
+    try {
+      gl.fault(1282); tick(0);
+      assert.deepEqual(diagnostics().errors, ["UC3D WebGL error 1282"], "witness: the frame must fail");
+      assert.equal(diagnostics().disposed, true, "witness: a failed frame disposes the scene");
+      assert.ok(visible().includes("UC3D rendering failed: UC3D WebGL error 1282"), `no visible failure; the page shows ${JSON.stringify(visible())}`);
+    } finally { stop(); }
+  });
+});
+await asyncTest("WebGPU UC3D hands a lost device to the page and shows a validation failure", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics, visible }) => {
+    for (const leg of ["unknown", "destroyed", "no-hook", "validation"]) {
+      const calls = [];
+      globalThis.window.matrixRendererLost = leg === "no-hook" ? undefined : reason => calls.push(reason);
+      const gpu = fakeGPU(8192, 8192), canvas = passCanvas(gpu.context, 200, 50);
+      const stop = await startWebGPU(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        tick(0); assert.equal(diagnostics().ready, true, `${leg}: witness: the first frame must present`);
+        if (leg === "validation") gpu.fire("uncapturederror", { error: { message: "synthetic validation" } });
+        else gpu.lose({ reason: leg === "no-hook" ? "unknown" : leg, message: "synthetic reset" });
+        await settle();
+        assert.equal(diagnostics().disposed, true, `${leg}: the pass must stop`);
+        if (leg === "validation") {
+          assert.deepEqual(diagnostics().errors, ["synthetic validation"]); assert.deepEqual(calls, [], "a validation failure is not a device loss");
+          assert.ok(visible().includes("UC3D rendering failed: synthetic validation"), `validation: no visible failure; the page shows ${JSON.stringify(visible())}`);
+        } else {
+          assert.deepEqual(diagnostics().errors, ["WebGPU device lost: synthetic reset"]);
+          if (leg === "unknown") assert.deepEqual(calls, ["WebGPU device lost (unknown)"], "a lost device must be handed to the page once");
+          if (leg === "destroyed") assert.deepEqual(calls, [], "reason 'destroyed' is a teardown, not a loss to recover from");
+        }
+      } finally { stop(); }
+    }
+  });
+});
+// Float32 emulation of the legacy vertex shader's time terms (uc3d.vert.glsl, uc3d.wgsl):
+// every operation rounds to float32, and mod(x, y) is x - y*floor(x/y) as in GLSL.
+const f32 = Math.fround, mod32 = (x, y) => f32(x - f32(y * Math.floor(f32(x / y))));
+// A head or depth one ulp across the 50-unit wrap is not an error, so compare along the track.
+const onTrack = (a, b) => { const d = Math.abs(a - b) % 50; return Math.min(d, 50 - d); };
+// 1.2 s past whole days gives an odd glyph cycle at cycleSpeed 0.03, which float32 cannot
+// multiply exactly once the product passes 2^24 (30 days).
+const legacyTimes = [3, 7, 30].map(days => [days, days * 86400 + 1.2]);
+async function legacyFrame(seconds) {
+  const dom = runtimeDom();
+  try {
+    // Constant forward travel: the random travel integral drifts too slowly to stress float32.
+    const config = resolveConfig({ scene: "uc3d", uc3dControls: "legacy", volumetric: "true", fallSpeed: "0.3",
+      forwardSpeed: "-0.675", randomForwardMovement: "false", sidewaysMovement: "false" });
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      const frame = runtime.update(seconds, 200, 100);
+      assert.equal(runtime.diagnostics.simulationTime, seconds, "witness: the scene must run the whole active time");
+      assert.ok(frame.grid.count / 6 > 1000, `witness: only ${frame.grid.count / 6} cells`);
+      return { config, ...frame };
+    } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
+}
+await asyncTest("legacy stream heads stay where exact math puts them after days of active time", async () => {
+  for (const [days, seconds] of legacyTimes) {
+    const { uniforms, grid, state } = await legacyFrame(seconds);
+    const fall = uniforms[28], nativeFall = f32(f32(Math.abs(fall) * 40) / f32(0.3));
+    let worst = 0;
+    for (let i = 0; i < grid.data.length; i += 60) {
+      const seed = grid.data[i + 2], wave = f32(seed * f32(19.31));
+      const step = Math.floor(f32(f32(wave - Math.floor(wave)) * f32(nativeFall + 30)));
+      const speed = f32(f32(2 + f32(step * f32(0.1))) * Math.sign(fall));
+      const head = f32(25 - mod32(f32(f32(uniforms[20] * speed) + f32(seed * 50)), 50));
+      const exact = state.time * (20 + step) / 10 * Math.sign(fall) + seed * 50;
+      worst = Math.max(worst, onTrack(head, 25 - (exact - 50 * Math.floor(exact / 50))));
+    }
+    assert.ok(worst <= 0.05, `${days} days: a stream head is ${worst.toFixed(3)} world units from exact math (limit 0.05, 1e-3 of the screen)`);
+  }
+});
+await asyncTest("legacy glyph cycling stays exact after days of active time", async () => {
+  for (const [path, reduced] of [["glsl/uc3d.vert.glsl", /float cycle = scene3\.y;/], ["wgsl/uc3d.wgsl", /let cycle = scene\.scene3\.y;/]])
+    assert.match(readFileSync(new URL(`../MatrixDesktop/web/shaders/${path}`, import.meta.url), "utf8"), reduced, `${path} must read the reduced glyph cycle`);
+  for (const [days, seconds] of legacyTimes) {
+    const { config, uniforms, grid, state } = await legacyFrame(seconds);
+    const length = uniforms[30], cycle = Math.floor(state.time * config.cycleSpeed * 30);
+    assert.equal(cycle % 2, 1, `witness: cycle ${cycle} must be odd`);
+    let wrong = 0, cells = 0;
+    for (let i = 0; i < grid.data.length; i += 60, cells++) {
+      const seed = grid.data[i + 2], row = grid.data[i + 1];
+      const first = Math.floor(f32(seed * length)), rate = f32(1 + Math.floor(f32(seed * 13)));
+      const symbol = mod32(f32(f32(first + f32(row * 7)) + f32(uniforms[29] * rate)), length);
+      if (symbol !== (first + row * 7 + cycle * rate) % length) wrong++;
+    }
+    assert.equal(wrong, 0, `${days} days: ${wrong} of ${cells} glyphs differ from exact math`);
+  }
+});
+await asyncTest("legacy forward travel depth stays exact after days of active time", async () => {
+  for (const [days, seconds] of legacyTimes) {
+    const { uniforms, grid, state } = await legacyFrame(seconds);
+    assert.ok(Math.abs(state.forwardPhase) > 20000, `witness: forward phase ${state.forwardPhase} is too small to stress float32`);
+    let worst = 0;
+    for (let i = 0; i < grid.data.length; i += 60) {
+      const seed = grid.data[i + 2], travel = f32(f32(seed * f32(13.71)) + uniforms[21]);
+      const depth = f32(-25 + f32(f32(travel - Math.floor(travel)) * 50));
+      const exact = seed * 13.71 + state.forwardPhase;
+      worst = Math.max(worst, onTrack(depth, -25 + (exact - Math.floor(exact)) * 50));
+    }
+    assert.ok(worst <= 0.05, `${days} days: a forward depth is ${worst.toFixed(3)} world units from exact math (limit 0.05)`);
+  }
+});
+await asyncTest("REGL UC3D builds its programs only through the shared createProgram", async () => {
+  // A second builder, renamed or not, has to call createShader itself.
+  const js = new URL("../MatrixDesktop/web/js/", import.meta.url);
+  for (const file of ["regl/uc3dPass.js", ...readdirSync(new URL("uc3d/", js)).map(name => `uc3d/${name}`)])
+    assert.doesNotMatch(readFileSync(new URL(file, js), "utf8"), /createShader\s*\(/, `${file} builds WebGL programs itself`);
+  await withPassEnvironment({}, async () => {
+    const gl = fakeGL(4096), released = [];
+    gl.getShaderParameter = () => false; gl.getShaderInfoLog = () => "sentinel compile log"; gl.deleteShader = shader => released.push(shader);
+    await assert.rejects(startREGL(passCanvas(gl, 200, 100), resolveConfig({ scene: "uc3d", resolution: "1" })), /UC3D shader: sentinel compile log/);
+    assert.equal(released.length, 1, "the live path must release the failed shader");
+  });
 });
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;

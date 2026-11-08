@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 const root = process.env.ZMATRIX_TEST_ROOT ? pathToFileURL(path.resolve(process.env.ZMATRIX_TEST_ROOT) + path.sep)
   : new URL("../MatrixDesktop/web/js/zmatrix/", import.meta.url);
@@ -10,9 +10,11 @@ const { createRandom, createScene, streamColor, cleanupCell } = await import(new
 const { createSurface, fitSurface, rasterOperation } = await import(new URL("surface.js", root));
 const { validateNativeFont, decodeImage, loadNativeFont } = await import(new URL("fonts.js", root));
 const { createResourceSlot, createRuntime, startLoop } = await import(new URL("runtime.js", root));
-const { createProgram } = await import(new URL("gpu.js", root));
+const { createProgram } = await import(new URL("../webglProgram.js", root));
+const { default: startZMatrixREGL } = await import(new URL("../regl/zmatrixPass.js", root));
+const { default: startZMatrixWebGPU } = await import(new URL("../webgpu/zmatrixPass.js", root));
 console.log(`SOURCE ${new URL("scene.js", root).pathname}`);
-for (const file of ["settings.js", "scene.js", "surface.js", "fonts.js", "runtime.js", "gpu.js"])
+for (const file of ["settings.js", "scene.js", "surface.js", "fonts.js", "runtime.js", "../webglProgram.js", "../regl/zmatrixPass.js", "../webgpu/zmatrixPass.js", "../renderFailure.js"])
   console.log(`WITNESS ${file} ${createHash("sha256").update(readFileSync(new URL(file, root))).digest("hex")}`);
 const only = process.argv.indexOf("--only");
 const filter = only >= 0 ? new RegExp(process.argv[only + 1]) : null;
@@ -312,10 +314,119 @@ await test("explicit teardown cancels pending RAF and prevents future scheduling
   } finally { loop.restore(); }
 });
 await test("render failure stops RAF and releases runtime GPU and clock owners", () => {
-  const oldError = console.error, loop = mockLoop({}, () => { throw new Error("synthetic render fault"); }); console.error = () => {};
+  const oldError = console.error, oldDocument = globalThis.document, loop = mockLoop({}, () => { throw new Error("synthetic render fault"); }); console.error = () => {};
+  globalThis.document = { createElement: () => ({ style: {}, setAttribute() {} }), body: { append() {} } };
   try { loop.run(0); assert.equal(loop.callbacks.size, 0); assert.deepEqual(loop.runtime.diagnostics.errors, ["synthetic render fault"]);
     assert.deepEqual(loop.counts(), { disposed: 1, cleaned: 1, clockDisposed: 1 });
-  } finally { console.error = oldError; loop.restore(); }
+  } finally { console.error = oldError; globalThis.document = oldDocument; loop.restore(); }
+});
+// Page globals for the real runtime and both passes: one native glyph, a Canvas2D upload and manual frames.
+async function withZMatrixPage(run) {
+  const names = ["window", "document", "navigator", "fetch", "createImageBitmap", "ImageData", "GPUTextureUsage", "requestAnimationFrame", "cancelAnimationFrame"];
+  const descriptors = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const previous = { warn: console.warn, error: console.error }, callbacks = [], appended = [];
+  const font = glyphs => ({ atlasDpi: 96, pages: [{ url: "font", width: 1, height: 1 }], metrics: { height: 10, maxCharWidth: 5 },
+    glyphs: glyphs ? [{ text: "A", page: 0, x: 0, y: 0, width: 1, height: 1, offsetX: 0, offsetY: 0 }] : [] });
+  try {
+    console.warn = () => {}; console.error = () => {};
+    const page = Object.assign(new EventTarget(), { devicePixelRatio: 1,
+      matrixHostBootstrap: { zmatrixFonts: { generation: 1, normal: font(true), special: font(false) } } });
+    const context = { drawImage() {}, putImageData() {}, clearRect() {}, getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }) };
+    const element = () => ({ style: {}, dataset: {}, getContext: () => context, setAttribute() {}, remove() { this.removed = true; } });
+    Object.assign(globalThis, { window: page, document: { createElement: element, body: { append: node => appended.push(node), appendChild: node => appended.push(node) } },
+      fetch: async () => ({ ok: true, blob: async () => ({}) }), createImageBitmap: async () => ({ width: 1, height: 1, close() {} }),
+      ImageData: class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } },
+      GPUTextureUsage: { COPY_DST: 1, TEXTURE_BINDING: 2, RENDER_ATTACHMENT: 4 },
+      requestAnimationFrame: callback => { callbacks.push(callback); return callbacks.length; }, cancelAnimationFrame: () => {} });
+    await run({ tick: now => { for (const callback of callbacks.splice(0)) callback(now); }, diagnostics: () => page.matrixRuntimeDiagnostics,
+      // Text of the page elements still attached (an element's remove() detaches it).
+      visible: () => appended.filter(node => !node.removed && node.textContent).map(node => node.textContent) });
+  } finally {
+    console.warn = previous.warn; console.error = previous.error;
+    for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; }
+  }
+}
+const passConfig = { zmCharacters: ["A"], zmPhrases: [], zmBackgroundMode: "color", resolution: 1 };
+const passCanvas = context => {
+  const listeners = new Map();
+  return { dataset: {}, clientWidth: 40, clientHeight: 20, width: 300, height: 150, listeners, getContext: () => context,
+    addEventListener: (name, listener) => listeners.set(name, listener), removeEventListener: name => listeners.delete(name) };
+};
+// WebGL double: lose() makes isContextLost() true and getError() CONTEXT_LOST_WEBGL; fault() queues one error.
+function fakeGL() {
+  let lost = false, pending = 0;
+  const target = { NO_ERROR: 0, lose() { lost = true; }, fault(code) { pending = code; }, isContextLost: () => lost, getParameter: () => 4096,
+    getError() { const error = lost ? 0x9242 : pending; pending = 0; return error; }, getShaderParameter: () => true, getProgramParameter: () => true,
+    createShader: () => ({}), createProgram: () => ({}), createTexture: () => ({}), createBuffer: () => ({}), getUniformLocation: () => ({}), getAttribLocation: () => 0 };
+  return new Proxy(target, { get: (object, key) => key in object ? object[key] : typeof key === "string" && /^[A-Z0-9_]+$/.test(key) ? key : () => {} });
+}
+// WebGPU double: as a real device does, destroy() settles lost with the reason "destroyed".
+function fakeGPU() {
+  const listeners = new Map(), resource = () => ({ createView: () => ({}), destroy() {} });
+  let resolveLost;
+  const device = { limits: { maxTextureDimension2D: 8192 }, lost: new Promise(resolve => { resolveLost = resolve; }),
+    destroy() { resolveLost({ reason: "destroyed", message: "Device was destroyed." }); },
+    addEventListener: (name, listener) => listeners.set(name, listener), removeEventListener: name => listeners.delete(name),
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }), createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
+    createSampler: () => ({}), createTexture: resource, createBindGroup: () => ({}), queue: { copyExternalImageToTexture() {}, submit() {} },
+    createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline() {}, setBindGroup() {}, draw() {}, end() {} }), finish: () => ({}) }) };
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: {
+    requestAdapter: async () => ({ requestDevice: async () => device }), getPreferredCanvasFormat: () => "rgba8unorm" } } });
+  return { context: { configure() {}, unconfigure() {}, getCurrentTexture: resource }, lose: info => resolveLost(info), fire: (name, event) => listeners.get(name)?.(event) };
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+await test("REGL ZMatrix waits for the lost-context event instead of failing a frame", async () => {
+  await withZMatrixPage(async ({ tick, diagnostics }) => {
+    const gl = fakeGL(), canvas = passCanvas(gl), stop = await startZMatrixREGL(canvas, passConfig);
+    try {
+      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present"); assert.equal(diagnostics().frames, 1);
+      // isContextLost() is true at once; the browser queues the event as a later task.
+      gl.lose(); tick(100);
+      assert.deepEqual(diagnostics().errors, [], `a frame while the context was lost failed: ${diagnostics().errors.join("; ")}`);
+      assert.equal(diagnostics().ready, false, "ready must be false while the context is lost");
+      assert.equal(diagnostics().frames, 1, "a frame that drew nothing must not count");
+      assert.equal(diagnostics().disposed, false, "the pass must wait for the lost event");
+      let prevented = false;
+      canvas.listeners.get("webglcontextlost")({ preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true, "the lost event must ask the browser to restore the context");
+      assert.deepEqual(diagnostics().errors, ["ZMatrix WebGL context was lost"]); assert.equal(diagnostics().disposed, true);
+    } finally { stop(); }
+  });
+});
+await test("a ZMatrix render failure stays visible after the runtime removes its warning box", async () => {
+  await withZMatrixPage(async ({ tick, diagnostics, visible }) => {
+    const gl = fakeGL(), stop = await startZMatrixREGL(passCanvas(gl), passConfig);
+    try {
+      gl.fault(1282); tick(0);
+      assert.deepEqual(diagnostics().errors, ["ZMatrix WebGL error 1282"], "witness: the frame must fail");
+      assert.equal(diagnostics().disposed, true, "witness: a failed frame disposes the runtime");
+      assert.ok(visible().includes("ZMatrix rendering failed: ZMatrix WebGL error 1282"), `no visible failure; the page shows ${JSON.stringify(visible())}`);
+    } finally { stop(); }
+  });
+});
+await test("WebGPU ZMatrix hands a lost device to the page and shows a validation failure", async () => {
+  await withZMatrixPage(async ({ tick, diagnostics, visible }) => {
+    for (const leg of ["unknown", "destroyed", "no-hook", "validation"]) {
+      const calls = [];
+      window.matrixRendererLost = leg === "no-hook" ? undefined : reason => calls.push(reason);
+      const gpu = fakeGPU(), stop = await startZMatrixWebGPU(passCanvas(gpu.context), passConfig);
+      try {
+        tick(0); assert.equal(diagnostics().ready, true, `${leg}: witness: the first frame must present`);
+        if (leg === "validation") gpu.fire("uncapturederror", { error: { message: "synthetic validation" } });
+        else gpu.lose({ reason: leg === "no-hook" ? "unknown" : leg, message: "synthetic reset" });
+        await settle();
+        assert.equal(diagnostics().disposed, true, `${leg}: the pass must stop`);
+        if (leg === "validation") {
+          assert.deepEqual(diagnostics().errors, ["synthetic validation"]); assert.deepEqual(calls, [], "a validation failure is not a device loss");
+          assert.ok(visible().includes("ZMatrix rendering failed: synthetic validation"), `validation: no visible failure; the page shows ${JSON.stringify(visible())}`);
+        } else {
+          assert.deepEqual(diagnostics().errors, ["WebGPU device lost: synthetic reset"]);
+          if (leg === "unknown") assert.deepEqual(calls, ["WebGPU device lost (unknown)"], "a lost device must be handed to the page once");
+          if (leg === "destroyed") assert.deepEqual(calls, [], "reason 'destroyed' is a teardown, not a loss to recover from");
+        }
+      } finally { stop(); }
+    }
+  });
 });
 await test("WebGL shader compile link and allocation failures release owned objects", () => {
   for (const fault of ["vertex", "fragment", "link", "allocation", null]) {
@@ -325,10 +436,30 @@ await test("WebGL shader compile link and allocation failures release owned obje
       getShaderParameter: shader => !(fault === "vertex" && shader.type === 1 || fault === "fragment" && shader.type === 2),
       getShaderInfoLog: () => "synthetic shader fault", attachShader() {}, linkProgram() {}, getProgramParameter: () => fault !== "link",
       getProgramInfoLog: () => "synthetic link fault", deleteShader: shader => deletedShaders.push(shader), deleteProgram: program => deletedPrograms.push(program) };
-    if (fault) assert.throws(() => createProgram(gl, "vertex", "fragment"), /ZMatrix/); else assert.ok(createProgram(gl, "vertex", "fragment"));
+    if (fault) assert.throws(() => createProgram(gl, "vertex", "fragment", "ZMatrix"), /ZMatrix/); else assert.ok(createProgram(gl, "vertex", "fragment", "ZMatrix"));
     assert.equal(deletedShaders.length, fault === "allocation" ? 0 : fault === "vertex" ? 1 : 2);
     assert.equal(deletedPrograms.length, !fault || fault === "allocation" ? 0 : 1);
   }
+});
+await test("rejected ZMatrix settings reach the runtime as defaults, so its re-normalization has nothing to warn about", async () => {
+  const { default: resolveConfig } = await import(new URL("../config.js", root));
+  const raw = { scene: "zmatrix", zmMaxStream: "Infinity", zmCharacters: "[]", zmRedGain: "NaN", zmPhrases: JSON.stringify(["a" + String.fromCharCode(7) + "b"]) };
+  const direct = [], resolved = [];
+  normalizeZMatrixSettings(raw, direct);
+  assert.equal(direct.length, 4, `witness: every raw value must be rejected, got ${JSON.stringify(direct)}`);
+  normalizeZMatrixSettings(resolveConfig(raw), resolved);
+  assert.deepEqual(resolved, [], "config.js must hand the runtime only accepted values");
+});
+await test("REGL ZMatrix builds its program only through the shared createProgram", async () => {
+  // A second builder, renamed or not, has to call createShader itself.
+  for (const file of [...readdirSync(root).filter(name => name.endsWith(".js")), "../regl/zmatrixPass.js"])
+    assert.doesNotMatch(readFileSync(new URL(file, root), "utf8"), /createShader\s*\(/, `${file} builds WebGL programs itself`);
+  await withZMatrixPage(async () => {
+    const gl = fakeGL(), released = [];
+    gl.getShaderParameter = () => false; gl.getShaderInfoLog = () => "sentinel compile log"; gl.deleteShader = shader => released.push(shader);
+    await assert.rejects(startZMatrixREGL(passCanvas(gl), passConfig), /ZMatrix shader: sentinel compile log/);
+    assert.equal(released.length, 1, "the live path must release the failed shader");
+  });
 });
 if (!passed && !failures) { console.error("No matching ZMatrix tests ran"); failures++; }
 console.log(`ZMatrix tests: ${passed} passed, ${failures} failed`);

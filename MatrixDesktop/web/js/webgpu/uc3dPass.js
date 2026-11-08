@@ -1,9 +1,21 @@
 import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig } from "../uc3d/runtime.js";
+import { fitSurface } from "../zmatrix/surface.js";
+import { showRenderFailure } from "../renderFailure.js";
+
+// The composite samples the desktop snapshot across the whole screen, so a capture wider
+// than the device texture limit is downscaled with its aspect kept instead of failing.
+async function fitImage(image, limit) {
+  if (!image) return null;
+  const fit = fitSurface(image.naturalWidth, image.naturalHeight, limit, Infinity);
+  return fit.factor < 1 ? createImageBitmap(image, { resizeWidth: fit.width, resizeHeight: fit.height, resizeQuality: "high" }) : image;
+}
 
 export default async function startUC3D(canvas, config) {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("UC3D WebGPU: no adapter available");
-  const device = await adapter.requestDevice();
+  // The default limit is 8192; a wide virtual screen needs the adapter's own maximum.
+  const device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D } });
+  const limit = device.limits.maxTextureDimension2D;
   let runtime = null, stop = null, dead = false, geometry = null, target = null, context = null;
   const buffers = [], textures = [];
   const cleanup = () => {
@@ -18,10 +30,12 @@ export default async function startUC3D(canvas, config) {
   };
   const buffer = (size, usage) => { const item = device.createBuffer({ size, usage }); buffers.push(item); return item; };
   const imageTexture = (image, flipY = false) => {
-    const item = device.createTexture({ size: image ? [image.naturalWidth, image.naturalHeight] : [1, 1], format: "rgba8unorm",
+    // An ImageBitmap has no natural size; its width and height are its pixels.
+    const size = image ? [image.naturalWidth ?? image.width, image.naturalHeight ?? image.height] : [1, 1];
+    const item = device.createTexture({ size, format: "rgba8unorm",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
     textures.push(item);
-    if (image) device.queue.copyExternalImageToTexture({ source: image, flipY }, { texture: item }, [image.naturalWidth, image.naturalHeight]);
+    if (image) device.queue.copyExternalImageToTexture({ source: image, flipY }, { texture: item }, size);
     return item;
   };
   const bind = (pipeline, entries) => device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: entries.map((resource, binding) => ({ binding, resource })) });
@@ -70,15 +84,21 @@ export default async function startUC3D(canvas, config) {
     const compositeBuffer = buffer(32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     const sampler = device.createSampler({ minFilter: "linear", magFilter: "linear" });
     const glyphAtlas = imageTexture(atlas, true); atlas.src = "";
-    const desktop = imageTexture(runtime.desktop);
+    const snapshot = await fitImage(runtime.desktop, limit);
+    const desktop = imageTexture(snapshot);
+    if (snapshot !== runtime.desktop) snapshot.close();
     const rainBindGroup = bind(rainPipeline, [{ buffer: sceneBuffer }, sampler, glyphAtlas.createView()]);
     let compositeBindGroup, targetView, geometrySize = 0, width = 0, height = 0;
     device.addEventListener("uncapturederror", event => {
       if (dead) return;
-      runtime.diagnostics.errors.push(event.error.message); console.error("UC3D WebGPU validation:", event.error.message); stop?.();
+      runtime.diagnostics.errors.push(event.error.message); console.error("UC3D WebGPU validation:", event.error.message);
+      showRenderFailure("UC3D", event.error); stop?.();
     });
     device.lost.then(info => {
-      if (!dead) { runtime.diagnostics.errors.push(`WebGPU device lost: ${info.message}`); stop?.(); }
+      if (dead) return;
+      runtime.diagnostics.errors.push(`WebGPU device lost: ${info.message}`); stop?.();
+      // "destroyed" is a teardown; any other loss goes to the page, which owns recovery.
+      if (info.reason !== "destroyed") window.matrixRendererLost?.(`WebGPU device lost (${info.reason})`);
     });
     stop = startLoop(canvas, runtime, (frame, w, h) => {
       if (w !== width || h !== height) {
@@ -105,7 +125,7 @@ export default async function startUC3D(canvas, config) {
       const compositePass = encoder.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
       compositePass.setPipeline(compositePipeline); compositePass.setBindGroup(0, compositeBindGroup); compositePass.draw(3); compositePass.end();
       device.queue.submit([encoder.finish()]);
-    }, cleanup);
+    }, cleanup, limit);
     return stop;
   } catch (error) {
     runtime?.diagnostics.errors.push(error.message);

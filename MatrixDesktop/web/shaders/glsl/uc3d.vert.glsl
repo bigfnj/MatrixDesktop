@@ -85,7 +85,7 @@ void main() {
   vec3 photoColor = scene4.y > 0.5 ? codeColor.rgb * luminance * 1.3 : photo.rgb;
   vec3 rainColor = codeColor.rgb * light * scene4.z + cursorColor.rgb * head * scene4.w * 0.55;
   glyphColor = mix(rainColor, photoColor * scene4.z, weight);
-  float cycle = floor(scene1.x * scene3.y * 30.0);
+  float cycle = scene3.y;
   float symbol = mod(floor(cell.z * scene3.z) + cell.y * 7.0 + cycle * (1.0 + floor(cell.z * 13.0)), scene3.z);
   vec2 local = corner - 0.5;
   if (mod(floor(cell.z * 1000.0) + cell.y * 13.0, 2.0) > 0.5) local.x *= -1.0;

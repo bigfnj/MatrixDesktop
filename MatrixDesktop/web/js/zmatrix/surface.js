@@ -2,11 +2,12 @@ import { normalizeZMatrixSettings } from "./settings.js";
 
 export const MAX_SURFACE_PIXELS = 16777216;
 export const MAX_SURFACE_DIMENSION = 8192;
-export function fitSurface(width, height, maximumDimension = MAX_SURFACE_DIMENSION) {
+// One aspect-preserving factor. UC3D passes maximumPixels Infinity: it has no pixel budget.
+export function fitSurface(width, height, maximumDimension = MAX_SURFACE_DIMENSION, maximumPixels = MAX_SURFACE_PIXELS) {
   width = Math.max(1, Math.ceil(Number.isFinite(width) ? width : 1));
   height = Math.max(1, Math.ceil(Number.isFinite(height) ? height : 1));
   const factor = Math.min(1, maximumDimension / width, maximumDimension / height,
-    Math.sqrt(MAX_SURFACE_PIXELS / width / height));
+    Math.sqrt(maximumPixels / width / height));
   return { width: Math.max(1, Math.floor(width * factor)), height: Math.max(1, Math.floor(height * factor)), factor };
 }
 export function rasterOperation(background, source, operation) {

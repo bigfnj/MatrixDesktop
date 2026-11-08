@@ -1,29 +1,5 @@
 import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig } from "../uc3d/runtime.js";
-
-export function createProgram(gl, vertex, fragment) {
-  const shaders = [];
-  let result = null, linked = false;
-  const compile = (type, code) => {
-    const shader = gl.createShader(type);
-    if (!shader) throw new Error("UC3D could not allocate a shader");
-    shaders.push(shader);
-    gl.shaderSource(shader, code); gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(`UC3D shader: ${gl.getShaderInfoLog(shader)}`);
-    return shader;
-  };
-  try {
-    result = gl.createProgram();
-    if (!result) throw new Error("UC3D could not allocate a program");
-    const vs = compile(gl.VERTEX_SHADER, vertex), fs = compile(gl.FRAGMENT_SHADER, fragment);
-    gl.attachShader(result, vs); gl.attachShader(result, fs); gl.linkProgram(result);
-    if (!gl.getProgramParameter(result, gl.LINK_STATUS)) throw new Error(`UC3D program: ${gl.getProgramInfoLog(result)}`);
-    linked = true;
-    return result;
-  } finally {
-    for (const shader of shaders) gl.deleteShader(shader);
-    if (!linked && result) gl.deleteProgram(result);
-  }
-}
+import { createProgram } from "../webglProgram.js";
 
 // A separate WebGL scene keeps the legacy REGL intensity-channel pipeline intact.
 // It uses the same WebGL API as that backend; no native donor renderer is loaded.
@@ -44,7 +20,7 @@ export default async function startUC3D(canvas, config) {
   };
   const contextLost = (event) => { event.preventDefault(); runtime?.diagnostics.errors.push("WebGL context was lost"); stop?.(); };
   const program = (vertex, fragment) => {
-    const result = createProgram(gl, vertex, fragment);
+    const result = createProgram(gl, vertex, fragment, "UC3D");
     programs.push(result); return result;
   };
   const texture = (image = null, flipped = false) => {
@@ -84,8 +60,15 @@ export default async function startUC3D(canvas, config) {
     const screenPosition = gl.getAttribLocation(compositeProgram, "position");
     const compositeLocations = Object.fromEntries(["rain", "desktop", "composition", "background"].map(name => [name, gl.getUniformLocation(compositeProgram, name)]));
     let width = 0, height = 0, geometrySize = 0;
+    // The render target, its viewport and the drawing buffer must all fit this limit.
+    const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS) ?? [];
+    const limit = Math.min(...[gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), viewport[0], viewport[1]]
+      .map(value => Number(value) > 0 ? Number(value) : Infinity));
     canvas.addEventListener("webglcontextlost", contextLost);
     stop = startLoop(canvas, runtime, (frame, w, h) => {
+      // The lost event is queued after isContextLost() turns true; a frame between them draws
+      // nothing and must not fail, so the event can still preventDefault for the page's restore.
+      if (gl.isContextLost()) return false;
       if (w !== width || h !== height) {
         width = w; height = h; canvas.width = w; canvas.height = h;
         gl.bindTexture(gl.TEXTURE_2D, output); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -133,7 +116,7 @@ export default async function startUC3D(canvas, config) {
       gl.uniform4fv(compositeLocations.background, [...runtime.background, runtime.desktop ? 0.72 : 0]);
       gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disableVertexAttribArray(screenPosition);
       const error = gl.getError(); if (error !== gl.NO_ERROR) throw new Error(`UC3D WebGL error ${error}`);
-    }, cleanup);
+    }, cleanup, limit);
     return stop;
   } catch (error) { runtime?.diagnostics.errors.push(error.message); cleanup(); throw error; }
 }
