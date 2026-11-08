@@ -8,6 +8,9 @@ internal static class CrashDumpTests
         ("Native crash diagnostics never release an unreserved slot", BeforeReservation),
         ("Native crash diagnostics release only failed reserved writes", FailedWrites),
         ("Native crash diagnostics never evict retained dumps on failed writes", FailedWritesKeepRetainedDumps),
+        ("Native crash diagnostics let one thread at a time into the dump writer", SerializedWriters),
+        ("Native crash diagnostics bound the wait for another thread's dump", BoundedWriterWait),
+        ("Native crash diagnostics keep every same-instant dump under its own name", SameInstantNames),
         ("Native diagnostics log rotates on the first write of a short-lived process", FirstWriteRotation),
         ("Native diagnostics log checks rotation again 10 writes after a check", PeriodicRotation),
     ];
@@ -135,6 +138,110 @@ internal static class CrashDumpTests
         var newest = CrashDumpWriter.WriteDumpWithBackend("synthetic success", () => future, path => { File.WriteAllBytes(path, [1]); return true; });
         Require(newest is not null && File.Exists(newest), "Pruning must never delete the dump it was run for, even when older dumps carry later timestamps.");
         Require(DumpNames(future).Length == 10, $"Pruning must still keep exactly 10 dumps, found {DumpNames(future).Length}.");
+    });
+
+    // Two crash handlers on different threads: the first writer holds the native write until
+    // the second thread is seen blocked outside it (or, without the guard, has come in).
+    private static void SerializedWriters() => WithFixture(root =>
+    {
+        var dir = Path.Combine(root, "dumps");
+        var inside = 0;
+        var maxInside = 0;
+        var secondSeenWaiting = false;
+        Thread? second = null;
+        using var firstInside = new ManualResetEventSlim();
+        bool Write(string path, bool first)
+        {
+            var now = Interlocked.Increment(ref inside);
+            lock (firstInside) maxInside = Math.Max(maxInside, now);
+            try
+            {
+                if (first)
+                {
+                    firstInside.Set();
+                    var watch = System.Diagnostics.Stopwatch.StartNew();
+                    while (watch.ElapsedMilliseconds < 5000 && Volatile.Read(ref inside) < 2)
+                    {
+                        if (Volatile.Read(ref second) is { } peer && (peer.ThreadState & ThreadState.WaitSleepJoin) != 0) { secondSeenWaiting = true; break; }
+                        Thread.Sleep(5);
+                    }
+                    Thread.Sleep(50); // Without the guard the second writer would come in now.
+                }
+                File.WriteAllBytes(path, [first ? (byte)1 : (byte)2]);
+                return true;
+            }
+            finally { Interlocked.Decrement(ref inside); }
+        }
+        string? firstPath = null, secondPath = null;
+        var firstThread = new Thread(() => firstPath = CrashDumpWriter.WriteDumpWithBackend("synthetic first handler", () => dir, path => Write(path, true))) { IsBackground = true };
+        firstThread.Start();
+        Require(firstInside.Wait(5000), "The first writer must start.");
+        var secondThread = new Thread(() => secondPath = CrashDumpWriter.WriteDumpWithBackend("synthetic second handler", () => dir, path => Write(path, false))) { IsBackground = true };
+        Volatile.Write(ref second, secondThread);
+        secondThread.Start();
+        Require(firstThread.Join(10000) && secondThread.Join(10000), "Both crash handlers must finish.");
+        Require(maxInside == 1, $"Two threads were inside the native dump writer at once (max {maxInside}).");
+        Require(secondSeenWaiting, "The second handler must have been seen waiting while the first was writing.");
+        Require(firstPath is not null && secondPath is not null && firstPath != secondPath, "Both serialized dumps must be written under their own names.");
+        Require(Count == 2, $"Both successful writes must keep their reservations, count={Count}.");
+    });
+
+    // A writer that hangs must not stop another thread's crash report. Serialization itself is
+    // the previous case's property; this one only requires that no handler waits past its
+    // bound and that a handler which gives up returns its reservation.
+    private static void BoundedWriterWait() => WithFixture(root =>
+    {
+        var dir = Path.Combine(root, "dumps");
+        using var firstInside = new ManualResetEventSlim();
+        using var waiterDone = new ManualResetEventSlim();
+        string? firstPath = null;
+        var firstThread = new Thread(() => firstPath = CrashDumpWriter.WriteDumpWithBackend("synthetic hung writer", () => dir, path =>
+        {
+            firstInside.Set();
+            waiterDone.Wait(5000);
+            File.WriteAllBytes(path, [1]);
+            return true;
+        })) { IsBackground = true };
+        firstThread.Start();
+        Require(firstInside.Wait(5000), "The first writer must start.");
+        var waiterRan = false;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var waiterPath = CrashDumpWriter.WriteDumpWithBackend("synthetic waiting handler", () => dir, _ => { waiterRan = true; return true; },
+            writerWait: TimeSpan.FromMilliseconds(200));
+        var waited = watch.ElapsedMilliseconds;
+        var countAfterGivingUp = Count;
+        waiterDone.Set();
+        Require(firstThread.Join(10000), "The held writer must finish.");
+        Require(waited < 2000, $"A handler must not wait for a hung writer past its bound, waited {waited} ms.");
+        if (waiterPath is null)
+        {
+            Require(!waiterRan && waited >= 150, $"A handler that gives up must do so at its bound, waited {waited} ms.");
+            Require(countAfterGivingUp == 1, $"The handler that gave up must return its reservation, count={countAfterGivingUp}.");
+        }
+        Require(firstPath is not null, "The held writer must still finish its dump.");
+        var later = CrashDumpWriter.WriteDumpWithBackend("synthetic later handler", () => dir, path => { File.WriteAllBytes(path, [2]); return true; },
+            writerWait: TimeSpan.FromMilliseconds(200));
+        Require(later is not null, "The guard must be free again once the writer finishes.");
+    });
+
+    // A fixed clock gives every attempt the same millisecond stamp.
+    private static void SameInstantNames() => WithFixture(root =>
+    {
+        var dir = Path.Combine(root, "dumps");
+        var instant = new DateTime(2026, 1, 2, 3, 4, 5, 678, DateTimeKind.Local);
+        string? Write(string content, bool ok) => CrashDumpWriter.WriteDumpWithBackend("synthetic same instant", () => dir, path =>
+        {
+            File.WriteAllText(path, content);
+            return ok;
+        }, clock: () => instant);
+        var first = Write("first", true);
+        var second = Write("second", true);
+        Require(first is not null && second is not null && first != second, $"Two dumps in the same millisecond must get different names, got '{first}' and '{second}'.");
+        Require(File.ReadAllText(first!) == "first" && File.ReadAllText(second!) == "second", "A dump in the same millisecond must not overwrite the previous one.");
+        Require(Write("third", false) is null, "The failing same-instant attempt must report failure.");
+        Require(File.ReadAllText(first!) == "first" && File.ReadAllText(second!) == "second",
+            "Cleaning up a failed same-instant attempt must leave the other dumps alone.");
+        Require(DumpNames(dir).Length == 2, $"The failed same-instant attempt must delete its own file, found {DumpNames(dir).Length} dumps.");
     });
 
     // A screensaver run writes two or three lines and exits, so the log must check its size on

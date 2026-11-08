@@ -46,6 +46,14 @@ internal static class CrashDumpWriter
 
     private static int _dumpsWritten;
 
+    // DbgHelp is single-threaded and MiniDumpWriteDump callers must serialise it, yet the UI
+    // thread, the finalizer thread (unobserved tasks) and any thread with an unhandled
+    // exception can all reach the writer at once; the reservation counter is a cap, not a
+    // lock. SemaphoreSlim is not reentrant, and the wait is bounded so a writer that hangs
+    // cannot stop another thread's report. Logging and dialogs stay outside it.
+    private static readonly System.Threading.SemaphoreSlim NativeWriteGuard = new(1, 1);
+    private const int NativeWriteWaitMs = 10_000;
+
     private static bool TryReserveDumpSlot()
     {
         if (System.Threading.Interlocked.Increment(ref _dumpsWritten) <= MaxDumpsPerProcess) return true;
@@ -62,16 +70,37 @@ internal static class CrashDumpWriter
 
     // A failed attempt leaves the empty or partial file it created. Left in place it is newer
     // than every retained dump, so the next prune would evict a real one in its favour.
-    private static void DeleteFailedDump(string path)
+    // Returns a warning for the caller to log once the guard is released, or null.
+    private static string? DeleteFailedDump(string path)
     {
         try
         {
             File.Delete(path);
+            return null;
         }
         catch (Exception ex)
         {
-            Logger.Warn($"Could not delete the failed crash dump '{path}': {ex.Message}");
+            return $"Could not delete the failed crash dump '{path}': {ex.Message}";
         }
+    }
+
+    // Milliseconds, not just seconds. Two faults inside the same second produced an
+    // identical filename and the second dump silently overwrote the first, which
+    // was observed while verifying the retention cap. A millisecond can repeat too, so a
+    // name already on disk gets a numeric suffix. Called inside the guard, so no other
+    // attempt in this process can take the name first, and the pid keeps processes apart.
+    private static string ChooseDumpPath(string dumpDir, DateTime now)
+    {
+        const int maxSuffix = 100;
+        var stamp = now.ToString("yyyyMMdd-HHmmss.fff", CultureInfo.InvariantCulture);
+        var stem = Path.Combine(dumpDir, $"{_processLabel}-{stamp}-pid{Environment.ProcessId}");
+        var path = stem + ".dmp";
+        for (var suffix = 2; File.Exists(path); suffix++)
+        {
+            if (suffix > maxSuffix) throw new IOException($"No unused crash dump name for '{stem}'.");
+            path = $"{stem}-{suffix}.dmp";
+        }
+        return path;
     }
 
     // Runs only after a dump is on disk, so a failed attempt can never evict a retained one,
@@ -200,11 +229,11 @@ internal static class CrashDumpWriter
 
     // The backend seam keeps reservation failures testable without writing a
     // process dump or touching a user's diagnostics directory.
-    internal static string? WriteDumpWithBackend(string reason, Func<string> resolveDirectory, Func<string, bool> writeDump)
+    // clock and writerWait exist for tests: same-instant names and a short bounded wait.
+    internal static string? WriteDumpWithBackend(string reason, Func<string> resolveDirectory, Func<string, bool> writeDump,
+        Func<DateTime>? clock = null, TimeSpan? writerWait = null)
     {
         var reserved = false;
-        var written = false;
-        string? path = null;
         try
         {
             var dumpDir = resolveDirectory();
@@ -220,24 +249,50 @@ internal static class CrashDumpWriter
             }
             reserved = true;
 
-            // Milliseconds, not just seconds. Two faults inside the same second produced an
-            // identical filename and the second dump silently overwrote the first, which
-            // was observed while verifying the retention cap.
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss.fff", CultureInfo.InvariantCulture);
-            path = Path.Combine(dumpDir, $"{_processLabel}-{stamp}-pid{Environment.ProcessId}.dmp");
-
-            var ok = writeDump(path);
-
-            if (!ok)
+            if (!NativeWriteGuard.Wait(writerWait ?? TimeSpan.FromMilliseconds(NativeWriteWaitMs)))
             {
-                var err = Marshal.GetLastWin32Error();
-                DeleteFailedDump(path);
                 ReleaseDumpSlot();
                 reserved = false;
-                Logger.Warn($"MiniDumpWriteDump returned false. Win32 error={err}. Reason='{reason}'.");
+                Logger.Warn($"Dump skipped: another thread was still writing a crash dump. Reason='{reason}'.");
                 return null;
             }
-            written = true;
+
+            string path;
+            var ok = false;
+            var err = 0;
+            Exception? writeError = null;
+            string? cleanupWarning = null;
+            try
+            {
+                path = ChooseDumpPath(dumpDir, clock?.Invoke() ?? DateTime.Now);
+                try
+                {
+                    ok = writeDump(path);
+                    if (!ok) err = Marshal.GetLastWin32Error();
+                }
+                catch (Exception ex)
+                {
+                    writeError = ex;
+                }
+
+                // Inside the guard: once it is released, another attempt in the same
+                // millisecond may choose this name again.
+                if (!ok) cleanupWarning = DeleteFailedDump(path);
+            }
+            finally
+            {
+                NativeWriteGuard.Release();
+            }
+
+            if (cleanupWarning is not null) Logger.Warn(cleanupWarning);
+            if (!ok)
+            {
+                ReleaseDumpSlot();
+                reserved = false;
+                if (writeError is null) Logger.Warn($"MiniDumpWriteDump returned false. Win32 error={err}. Reason='{reason}'.");
+                else Logger.Error($"WriteDump exception. Reason='{reason}'.", writeError);
+                return null;
+            }
 
             Logger.Info($"Crash dump written. Path='{path}' Reason='{reason}'.");
             PruneOldDumps(dumpDir, path);
@@ -245,11 +300,7 @@ internal static class CrashDumpWriter
         }
         catch (Exception ex)
         {
-            if (reserved && !written)
-            {
-                ReleaseDumpSlot();
-                if (path is not null) DeleteFailedDump(path);
-            }
+            if (reserved) ReleaseDumpSlot();
             try { Logger.Error($"WriteDump exception. Reason='{reason}'.", ex); }
             catch { /* ignore */ }
             return null;
