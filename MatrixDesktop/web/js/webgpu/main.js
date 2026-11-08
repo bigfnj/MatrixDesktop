@@ -1,5 +1,5 @@
 import createCanvasSize from "../canvasSize.js";
-import { createPlaybackClock } from "../hostPlayback.js";
+import { createPlaybackClock, unseenEpoch } from "../hostPlayback.js";
 import { createShaderTime } from "../shaderTime.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
@@ -245,7 +245,7 @@ export default async (canvas, config) => {
 			device.queue.copyExternalImageToTexture({ source: cameraCanvas }, { texture: cameraTex }, cameraSize);
 		}
 
-		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: shaderTime.frame((now - start) / 1000, wall), frames }));
+		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: shaderTime.frame((now - start) / 1000, wall, unseenEpoch()), frames }));
 		frames++;
 
 		const encoder = device.createCommandEncoder();

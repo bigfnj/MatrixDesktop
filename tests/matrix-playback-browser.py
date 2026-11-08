@@ -227,6 +227,65 @@ def check_regl_time_rebase(context, port):
         page.close()
 
 
+def changed_fraction(a, b, threshold=40):
+    histogram = ImageChops.difference(a.convert("L"), b.convert("L")).histogram()
+    return sum(histogram[threshold + 1:]) / max(1, sum(histogram))
+
+
+def check_regl_visible_pause(context, port):
+    """A visible host pause must resume where it froze; a hidden one may still move shader time (R2-19).
+
+    Manual, fullscreen-app and battery pauses keep the paused frame on screen (AUD-06), so
+    moving the shader time origin on resume would snap the whole rain field to a new pattern.
+    Lock, display off and suspend hide the WebView first, which the page sees as a visibility
+    change; a synthetic visibilitychange stands in for that here. animationSpeed is low, so
+    the rain barely moves between the frozen and resumed screenshots unless time jumps.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(TIME_HOOK)
+    host = "paused => window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: { paused } }))"
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&numColumns=40&animationSpeed=0.05", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 2", timeout=30000)
+        for _ in range(20):  # 1000 s of active time in 50 s steps, so shader time is past the 600 s restart point
+            page.evaluate("window.__clockOffset += 50000")
+            page.wait_for_timeout(60)
+        page.wait_for_timeout(500)
+        results = {}
+        for name, pause_ms, hidden in (("control", 30_000, False), ("visible", 61_000, False), ("hidden", 61_000, True)):
+            page.evaluate(host, True)
+            page.wait_for_timeout(400)
+            frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+            frozen = capture(page)
+            page.evaluate(f"window.__clockOffset += {pause_ms}")
+            if hidden:
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            page.wait_for_timeout(200)
+            assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames, f"the {name} pause kept drawing, so the check proved nothing"
+            before = page.evaluate("window.__shaderUniforms.time.at(-1)")
+            page.evaluate(host, False)
+            page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 2", arg=frames, timeout=10000)
+            page.wait_for_timeout(120)
+            after = page.evaluate("window.__shaderUniforms.time.at(-1)")
+            results[name] = {"changed": changed_fraction(frozen, capture(page)), "before": before, "after": after}
+        control, visible, hidden = results["control"], results["visible"], results["hidden"]
+        assert control["before"] > 900, f"shader time was {control['before']} s before the pauses, below the restart point, so the check proved nothing"
+        assert visible["changed"] <= 3 * control["changed"] + 0.02, (
+            f"a visible 61 s pause changed {visible['changed']:.2%} of pixels on resume against {control['changed']:.2%} after a 30 s pause")
+        assert visible["after"] > visible["before"], f"a visible 61 s pause moved shader time from {visible['before']} s to {visible['after']} s"
+        assert hidden["after"] < 650, f"a hidden 61 s pause kept shader time at {hidden['after']} s instead of restarting it"
+        assert hidden["changed"] > 3 * control["changed"] + 0.02, (
+            f"a hidden 61 s pause changed only {hidden['changed']:.2%} of pixels on resume, so the rebase was not visible to this check")
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+        return results
+    finally:
+        page.close()
+
+
 def check_regl_single_frame(context, port):
     """fps=0 must draw one still frame, as UC3D and ZMatrix do, not a black canvas (AUD-47)."""
     page = context.new_page()
@@ -326,6 +385,9 @@ def main():
                         print("PASS original Matrix regl context loss clears ready and reports once; the restore reloads into a drawing page, and past the reload budget the restored renderer stays not ready under a notice", flush=True)
                         check_regl_time_rebase(context, server.server_port)
                         print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
+                        pauses = check_regl_visible_pause(context, server.server_port)
+                        print("PASS original Matrix regl visible 61 s pause resumes where it froze ({:.2%} of pixels changed, 30 s control {:.2%}); a hidden one still restarts shader time ({:.2%})".format(
+                            pauses["visible"]["changed"], pauses["control"]["changed"], pauses["hidden"]["changed"]), flush=True)
                         check_regl_single_frame(context, server.server_port)
                         print("PASS original Matrix regl fps=0 draws one still frame and an fps=30 control keeps animating", flush=True)
                 finally:

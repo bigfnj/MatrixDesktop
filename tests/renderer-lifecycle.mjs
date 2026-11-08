@@ -426,17 +426,21 @@ await test("shader time stays small over days and moves its origin only when the
 	const { gapMs, briefGapMs, softSeconds, hardSeconds, restartSeconds } = rebaseLimits;
 	const time = createShaderTime(), shifts = [];
 	time.onRebase((shift) => shifts.push(shift));
-	let wall = 1000;
-	const frame = (seconds, gap = 16) => time.frame(seconds, (wall += gap));
+	// hidden: the page reported a visibility change during the gap (js/hostPlayback.js unseenEpoch).
+	let wall = 1000, epoch = 0;
+	const frame = (seconds, gap = 16, hidden = false) => time.frame(seconds, (wall += gap), hidden ? ++epoch : epoch);
 	assert.equal(frame(0), 0);
-	assert.equal(frame(500, 2 * gapMs), 500, "time below the restart point must not move");
-	assert.equal(frame(1800, gapMs - 1000), 1800, "a pause under a minute must keep time continuous");
+	assert.equal(frame(500, 2 * gapMs, true), 500, "time below the restart point must not move");
+	assert.equal(frame(1800, gapMs - 1000, true), 1800, "a pause under a minute must keep time continuous");
 	assert.deepEqual(shifts, []);
-	near(frame(1800.016, gapMs), restartSeconds, "a minute without frames (lock, display off, suspend) must restart shader time");
-	near(frame(1800.032), restartSeconds + 0.016, "time must stay continuous after a move", 1e-9);
-	near(shifts[0], 1200.016, "the shift must be the distance moved");
+	// R2-19: a visible host pause (manual, a fullscreen app, battery) keeps its frame on screen.
+	near(frame(1800.016, 2 * gapMs), 1800.016, "a visible pause of two minutes must keep time continuous", 1e-9);
+	assert.deepEqual(shifts, []);
+	near(frame(1800.032, gapMs, true), restartSeconds, "a minute without frames (lock, display off, suspend) must restart shader time");
+	near(frame(1800.048), restartSeconds + 0.016, "time must stay continuous after a move", 1e-9);
+	near(shifts[0], 1200.032, "the shift must be the distance moved");
 	// Four days of active time with no pause: the hard bound keeps every value under six hours.
-	let seconds = 1800.032, previous = restartSeconds + 0.016, max = 0, moves = shifts.length;
+	let seconds = 1800.048, previous = restartSeconds + 0.016, max = 0, moves = shifts.length;
 	for (let step = 0; step < 4 * 24 * 60; step++) {
 		seconds += 60;
 		const value = frame(seconds);
@@ -445,13 +449,14 @@ await test("shader time stays small over days and moves its origin only when the
 	}
 	assert(max < hardSeconds + 60, `shader time reached ${max} s during a 4-day run`);
 	assert(shifts.length >= 15, `a 4-day run without pauses moved the origin ${shifts.length} time(s)`);
-	near(frame(seconds, 5 * gapMs), restartSeconds, "a long pause after four days must restart shader time");
-	// Past an hour, any pause of a second or more is unseen enough; frame jitter is not.
+	near(frame(seconds, 5 * gapMs, true), restartSeconds, "a long pause after four days must restart shader time");
+	// Past an hour, any hidden pause of a second or more is unseen enough; frame jitter is not.
 	const soft = createShaderTime();
-	soft.frame(softSeconds - 10, (wall += 16));
-	near(soft.frame(softSeconds - 9, (wall += briefGapMs)), softSeconds - 9, "a brief pause before an hour must keep time continuous");
-	near(soft.frame(softSeconds + 1, (wall += briefGapMs - 1)), softSeconds + 1, "jitter under a second must keep time continuous");
-	near(soft.frame(softSeconds + 2, (wall += briefGapMs)), restartSeconds, "a brief pause past an hour must restart shader time");
+	soft.frame(softSeconds - 10, (wall += 16), ++epoch);
+	near(soft.frame(softSeconds - 9, (wall += briefGapMs), ++epoch), softSeconds - 9, "a brief pause before an hour must keep time continuous");
+	near(soft.frame(softSeconds + 1, (wall += briefGapMs - 1), ++epoch), softSeconds + 1, "jitter under a second must keep time continuous");
+	near(soft.frame(softSeconds + 2, (wall += 2 * briefGapMs), epoch), softSeconds + 2, "a visible brief pause past an hour must keep time continuous");
+	near(soft.frame(softSeconds + 3, (wall += briefGapMs), ++epoch), restartSeconds, "a brief pause past an hour must restart shader time");
 	// Click stamps move with the origin: a ripple in flight keeps its age, unused slots stay unused.
 	const canvas = new Events(); canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 });
 	const ripples = createClickRipples(canvas, true), stamped = createShaderTime();
@@ -459,7 +464,7 @@ await test("shader time stays small over days and moves its origin only when the
 	ripples.syncTime(stamped.frame(5000, (wall += 16)));
 	for (const fn of canvas.listeners.get("click")) fn({ clientX: 50, clientY: 50 });
 	ripples.markClean();
-	const now = stamped.frame(5000.5, (wall += gapMs));
+	const now = stamped.frame(5000.5, (wall += gapMs), ++epoch);
 	near(now, restartSeconds, "the stamped clock must have moved");
 	near(now - ripples.clicks[2], 0.5, "a ripple in flight must keep its age across a move");
 	near(now - ripples.touches[0][2], 0.5, "a ripple in flight must keep its age across a move (WebGPU layout)");
@@ -579,13 +584,16 @@ const makeMatrixDevice = (maxTextureDimension2D) => {
 	});
 };
 let pendingFrame = null, lastFrame = null;
+// One document for every fake page: js/hostPlayback.js listens for visibilitychange on the
+// document it finds when first imported.
+const pageDocument = new Events();
 const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution, params = {} }) => {
 	const run = {};
 	const borrowed = { createView: () => ({}), destroy() { throw new Error("canvas texture destroyed"); } };
 	globalThis.requestAnimationFrame = (fn) => { pendingFrame = lastFrame = fn; return 1; };
 	globalThis.cancelAnimationFrame = () => { pendingFrame = null; };
-	globalThis.document = { fullscreenEnabled: false, body: { appendChild: (tag) => queueMicrotask(() => tag.onload?.()) },
-		createElement: () => ({ getContext: () => ({ drawImage() {} }) }) };
+	globalThis.document = Object.assign(pageDocument, { fullscreenEnabled: false, body: { appendChild: (tag) => queueMicrotask(() => tag.onload?.()) },
+		createElement: () => ({ getContext: () => ({ drawImage() {} }) }) });
 	Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: { gpu: {
 		getPreferredCanvasFormat: () => "rgba8unorm",
 		requestAdapter: async () => ({ limits: { maxTextureDimension2D: adapterLimit }, requestDevice: async (descriptor) => {
@@ -722,6 +730,19 @@ await test("WebGPU Matrix renderer feeds the shaders a small time after four day
 		near(moved.seconds, rebaseLimits.restartSeconds, `the time uniform after four days was ${moved.seconds} s`, 1);
 		near(next.seconds - moved.seconds, 0.017, "time must stay continuous after the move", 1e-3);
 		assert.deepEqual([first, second, moved, next].map(({ frames }) => frames), [0, 1, 2, 3], "the frame counter must keep counting through a move");
+	} finally { run.dispose(); }
+});
+
+await test("WebGPU Matrix renderer moves shader time only across a gap the page spent hidden (R2-19)", async () => {
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	try {
+		const seconds = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0]).map(([, data]) => new Float32Array(data)[0]).at(-1);
+		run.frame(16); run.frame(33);
+		run.frame(1_800_000);
+		near(seconds(), 1800, "a 30-minute gap with no visibility change (a visible host pause) must keep shader time continuous", 1);
+		pageDocument.fire("visibilitychange");
+		run.frame(1_861_000);
+		near(seconds(), rebaseLimits.restartSeconds, "a minute the page spent hidden must restart shader time", 1e-3);
 	} finally { run.dispose(); }
 });
 

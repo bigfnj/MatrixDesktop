@@ -23,11 +23,21 @@ const hostPointerMessage = (event) => {
 };
 const bridge = globalThis.window?.chrome?.webview;
 const hostEvent = (event) => notify(event.detail?.paused);
+// R2-19: a host pause for lock, display off or suspend hides the WebView before suspending
+// it, and a hidden or occluded page stops drawing, so nobody saw its last frame; a manual,
+// fullscreen-app or battery pause keeps the frame on screen. Every visibility change moves
+// this epoch, so a hidden-then-visible pair still counts if both arrive at once, and
+// js/shaderTime.js moves its origin only across a gap the epoch moved in.
+let unseen = 0;
+const visibilityChange = () => { unseen++; };
+export const unseenEpoch = () => unseen;
+globalThis.document?.addEventListener?.("visibilitychange", visibilityChange);
 bridge?.addEventListener("message", hostPointerMessage);
 globalThis.window?.addEventListener("matrix-host-state", hostEvent);
 globalThis.window?.addEventListener("pagehide", () => {
   bridge?.removeEventListener("message", hostPointerMessage);
   globalThis.window?.removeEventListener("matrix-host-state", hostEvent);
+  globalThis.document?.removeEventListener?.("visibilitychange", visibilityChange);
   listeners.clear();
   pointerCanvas = null; forwardPointer = null;
 }, { once: true });
