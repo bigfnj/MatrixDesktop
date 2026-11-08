@@ -9,7 +9,25 @@ internal static class PlaybackPolicyTests
         ("Wallpaper playback keeps independent pause reasons", IndependentReasons),
         ("Wallpaper fullscreen policy pauses for any individual monitor", IndividualMonitor),
         ("Wallpaper priority auto preserves the standalone default", AutomaticPriority),
+        ("Native refresh ignores unrelated setting broadcasts", NativeRefreshBroadcasts),
     ];
+
+    private static void NativeRefreshBroadcasts()
+    {
+        foreach (var (message, wParam, refreshable, expected, shape) in new (int, nint, bool, bool, string)[]
+        {
+            (0x001A, 0, true, false, "an Environment, Policy or ImmersiveColorSet broadcast (wParam 0)"),
+            (0x001A, 0x2F, true, false, "SPI_SETWORKAREA"),
+            (0x001A, 0x14, true, true, "SPI_SETDESKWALLPAPER"),
+            (0x001A, 0x4B, true, true, "SPI_SETFONTSMOOTHING"),
+            (0x001A, 0x200B, true, true, "SPI_SETFONTSMOOTHINGTYPE"),
+            (0x0015, 0, true, true, "WM_SYSCOLORCHANGE"),
+            (0x031A, 0, true, true, "WM_THEMECHANGED"),
+            (0x001A, 0x14, false, false, "SPI_SETDESKWALLPAPER with nothing refreshable"),
+            (0x0010, 0, true, false, "WM_CLOSE"),
+        })
+            Check.Equal(expected, PlaybackPolicy.ShouldRefreshNativeResources(message, wParam, refreshable), $"{shape} must {(expected ? "" : "not ")}refresh native resources");
+    }
 
     private static void IndependentReasons()
     {

@@ -47,12 +47,20 @@ internal static class DesktopWindowHost
     internal static bool DesktopHasForeground()
     {
         var foreground = GetForegroundWindow();
-        if (ClassOf(foreground) is not ("Progman" or "WorkerW" or "SHELLDLL_DefView")) return false;
+        if (!IsShellClass(foreground)) return false;
         var progman = FindWindow("Progman", null);
         if (progman == 0) return false;
         GetWindowThreadProcessId(progman, out var shellProcess);
         GetWindowThreadProcessId(foreground, out var foregroundProcess);
         return shellProcess != 0 && shellProcess == foregroundProcess;
+    }
+    // Runs inside the global mouse hook, so the class name is read into a stack buffer and
+    // compared in place: no StringBuilder or string per event.
+    internal static bool IsShellClass(nint window)
+    {
+        Span<char> name = stackalloc char[32];
+        var length = GetClassName(window, ref MemoryMarshal.GetReference(name), name.Length);
+        return name[..Math.Clamp(length, 0, name.Length)] is "Progman" or "WorkerW" or "SHELLDLL_DefView";
     }
     internal static string ClassOf(nint window)
     {
@@ -107,6 +115,7 @@ internal static class DesktopWindowHost
     [DllImport("user32.dll")] private static extern nint GetParent(nint child);
     [DllImport("user32.dll")] private static extern bool IsWindow(nint window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint window, StringBuilder name, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetClassNameW")] private static extern int GetClassName(nint window, ref char name, int count);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetClientRect(nint window, out Rect rect);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool ClientToScreen(nint window, ref Point point);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);

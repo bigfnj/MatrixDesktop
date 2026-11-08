@@ -12,6 +12,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     private readonly bool _wallpaper;
     private readonly PlaybackPolicy _playback = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 500 };
+    private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 400 };
+    private bool _refreshPending;
     private readonly CoordinatorWindow _coordinator;
     private NotifyIcon? _tray;
     private ToolStripMenuItem? _pauseMenu;
@@ -53,6 +55,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             _timer.Tick += OnTick;
             _timer.Start();
+            _refreshTimer.Tick += OnRefreshTimer;
             TryCreateSurface();
         }
         else
@@ -107,7 +110,10 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             try { using var process = Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "MatrixDesktopConfigurator.exe")) { UseShellExecute = true }); }
             catch (Exception error) { Report(error.Message); }
         });
-        menu.Items.Add("Refresh desktop", null, async (_, _) => await RefreshResourcesAsync());
+        var refresh = new ToolStripMenuItem("Refresh desktop", null, async (_, _) => await RefreshResourcesAsync());
+        menu.Items.Add(refresh);
+        // Only a scene that applies native resources while it runs can be refreshed (AUD-09).
+        menu.Opening += (_, _) => refresh.Visible = _form?.NativeResourcesRefreshable == true;
         var autostart = new ToolStripMenuItem("Start with Windows") { Checked = AutostartService.Enabled };
         autostart.Click += (_, _) =>
         {
@@ -241,6 +247,16 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         SetPause(PauseReason.Fullscreen, _options.WallpaperPauseFullscreen && DesktopWindowHost.ForegroundCoversAnyMonitor(Screen.AllScreens.Select(screen => screen.Bounds)));
         SetPause(PauseReason.Battery, _options.WallpaperPauseBattery && SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline);
         _pointer?.SetEnabled(_ready && !_playback.Paused);
+        if (_refreshPending && !_playback.Paused) { _refreshPending = false; _ = RefreshResourcesAsync(); }
+    }
+
+    // 2026-11-08 (AUD-09): accepted broadcasts come in bursts (a theme change sends several),
+    // so each restarts one short timer; a refresh that falls due while paused waits for resume.
+    private void OnRefreshTimer(object? sender, EventArgs args)
+    {
+        _refreshTimer.Stop();
+        if (_playback.Paused) _refreshPending = true;
+        else _ = RefreshResourcesAsync();
     }
 
     private void SetPause(PauseReason reason, bool enabled)
@@ -301,7 +317,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             if (_tray is not null) { _tray.Visible = false; _tray.Visible = true; }
             RecoverSurface();
         }
-        else if (message is 0x001a or 0x031a) _ = RefreshResourcesAsync();
+        else if (PlaybackPolicy.ShouldRefreshNativeResources(message, wParam, _form?.NativeResourcesRefreshable == true)) { _refreshTimer.Stop(); _refreshTimer.Start(); }
     }
 
     private async Task RefreshResourcesAsync()
@@ -332,6 +348,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         if (_exiting) return;
         _exiting = true;
         _timer.Stop(); _timer.Dispose();
+        _refreshTimer.Stop(); _refreshTimer.Dispose();
         _pointer?.Dispose();
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;

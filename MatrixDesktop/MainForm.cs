@@ -49,7 +49,7 @@ public sealed class MainForm : Form
     private bool _cursorHidden;
     private Shared.AppWindowIcon? _windowIcon;
 
-    private readonly Shared.NativeMediaBridge _mediaBridge = new(preview: false);
+    private readonly Shared.NativeMediaBridge _mediaBridge;
 
     private static string? _cachedUserDataFolder;
 
@@ -63,6 +63,7 @@ public sealed class MainForm : Form
 
         var effectiveArgs = ScreensaverWindowPolicy.EffectiveArguments(launchPlan);
         _appOptions = AppCli.Parse(effectiveArgs, out var passthroughArgs);
+        _mediaBridge = new(preview: false, MediaHostKind.For(launchPlan, _appOptions.WindowMode == WindowMode.Wallpaper));
         if (IsWallpaper || launchPlan.IsPreview)
         {
             TopLevel = false;
@@ -96,8 +97,9 @@ public sealed class MainForm : Form
         BackColor = System.Drawing.Color.Black;
 
         _startupQueryString = MatrixArgs.BuildQueryString(passthroughArgs);
-        // Capture the requested desktop before this window is shown.
-        _mediaBridge.Prepare(_startupQueryString, CaptureBounds);
+        // Capture the requested desktop before this window is shown; the full
+        // preparation waits for the staged web root in InitializeCurrentWebViewAsync.
+        _mediaBridge.CaptureDesktopBeforeShow(_startupQueryString, CaptureBounds);
 
         _webView = CreateWebView(GetAppDataUserDataFolder());
         Controls.Add(_webView);
@@ -135,6 +137,8 @@ public sealed class MainForm : Form
 
     internal Task RefreshNativeResourcesAsync() => _isShuttingDown ? Task.CompletedTask
         : _mediaBridge.RefreshAsync(_startupQueryString, CaptureBounds, DeviceDpi);
+
+    internal bool NativeResourcesRefreshable => _mediaBridge.Refreshable;
 
     internal void PostHostPointer(DesktopPointerBridge.Pointer pointer)
     {

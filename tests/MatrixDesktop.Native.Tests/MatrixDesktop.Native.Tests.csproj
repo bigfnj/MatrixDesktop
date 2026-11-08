@@ -7,9 +7,22 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <!-- NativeMediaBridge names CoreWebView2 types; the bridge tests never create a WebView. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\..\Shared\NativeMediaBridge.cs" Link="Production\NativeMediaBridge.cs" />
+    <Compile Include="..\..\Shared\MediaCatalog.cs" Link="Production\MediaCatalog.cs" />
+    <Compile Include="..\..\Shared\FlagNormalization.cs" Link="Production\FlagNormalization.cs" />
+    <Compile Include="..\..\Shared\StructuredArgumentCodec.cs" Link="Production\StructuredArgumentCodec.cs" />
     <Compile Include="..\..\MatrixDesktop\HostLaunchPlan.cs" Link="Production\HostLaunchPlan.cs" />
+    <Compile Include="..\..\MatrixDesktop\MediaHostKind.cs" Link="Production\MediaHostKind.cs" />
+    <Compile Include="..\..\MatrixDesktop\PointerGate.cs" Link="Production\PointerGate.cs" />
+    <Compile Include="..\..\MatrixDesktop\DesktopWindowHost.cs" Link="Production\DesktopWindowHost.cs" />
+    <Compile Include="..\..\MatrixDesktop\PlaybackPolicy.cs" Link="Production\PlaybackPolicy.cs" />
     <Compile Include="..\..\MatrixDesktop\ScreensaverWindowPolicy.cs" Link="Production\ScreensaverWindowPolicy.cs" />
     <Compile Include="..\..\MatrixDesktop\ForegroundWindow.cs" Link="Production\ForegroundWindow.cs" />
     <Compile Include="..\..\MatrixDesktop\AutostartService.cs" Link="Production\AutostartService.cs" />
@@ -25,4 +38,10 @@
     <Content Include="..\..\MatrixDesktop\web\assets\zmatrix\matrix-code.ttf" Link="matrix-code.ttf" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\MatrixDesktop\web\assets\zmatrix\matrix-code.LICENSE" Link="matrix-code.LICENSE" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <!-- Same WinForms-only workaround as MatrixDesktop.csproj: drop WebView2's WPF control reference. -->
+  <Target Name="_NativeTests_RemoveWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.FileName)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
 </Project>

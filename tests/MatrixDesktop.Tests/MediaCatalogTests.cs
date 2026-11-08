@@ -18,7 +18,58 @@ internal static class MediaCatalogTests
         ("Donor manifests preserve captions and overlapping movie membership", Manifest),
         ("A malformed donor manifest does not retain partial grants", BadManifest),
         ("New presets are introduced once without restoring deleted old presets", NewPreset),
+        ("A picture resource id never re-points to another file across catalog rebuilds", StableIds),
+        ("One folder used as personal and donor yields unique picture ids", SharedFolderIds),
+        ("A donor manifest repeating a file yields unique picture ids", RepeatedManifestIds),
     ];
+
+    private static void StableIds() => WithFolder(root =>
+    {
+        foreach (var name in new[] { "b.jpg", "c.jpg", "d.jpg" }) File.WriteAllBytes(Path.Combine(root, name), [1]);
+        var before = MediaCatalog.Images(root, null, new List<string>()).ToDictionary(entry => entry.Id, entry => entry.Path);
+        File.WriteAllBytes(Path.Combine(root, "a.jpg"), [1]);
+        var after = MediaCatalog.Images(root, null, new List<string>()).ToDictionary(entry => entry.Id, entry => entry.Path);
+        Check.Equal(3, before.Count, "the first catalog grants three pictures");
+        Check.Equal(4, after.Count, "the rebuilt catalog grants four distinct ids");
+        foreach (var (id, path) in before)
+        {
+            Check.True(after.ContainsKey(id), $"{id} must survive a rebuild that adds an earlier-sorting file");
+            Check.Equal(path, after[id], $"{id} must keep naming the same file after the rebuild");
+        }
+    });
+
+    private static void SharedFolderIds() => WithFolder(root =>
+    {
+        foreach (var name in new[] { "Neo.jpg", "Trinity.jpg" }) File.WriteAllBytes(Path.Combine(root, name), [1]);
+        var entries = MediaCatalog.Images(root, root, new List<string>());
+        Check.Equal(4, entries.Count, "the same folder is granted once per group");
+        var map = new Dictionary<string, MediaEntry>(StringComparer.Ordinal);
+        foreach (var entry in entries) map.Add(entry.Id, entry);
+        Check.Equal(2, entries.Select(entry => entry.Path).Distinct().Count(), "the duplicate entries name the same two files");
+        // A donor id must not depend on whether the personal folder also lists the file.
+        var donorOnly = MediaCatalog.Images(null, root, new List<string>()).ToDictionary(entry => entry.Path, entry => entry.Id);
+        foreach (var entry in entries.Where(entry => entry.Group == "matrix"))
+            Check.Equal(donorOnly[entry.Path], entry.Id, "a donor picture keeps its id when the personal folder changes");
+    });
+
+    private static void RepeatedManifestIds() => WithFolder(root =>
+    {
+        File.WriteAllBytes(Path.Combine(root, "neo.jpg"), [1]);
+        File.WriteAllText(Path.Combine(root, "uc3d-media.json"), System.Text.Json.JsonSerializer.Serialize(new
+        {
+            schema = 1,
+            images = new[]
+            {
+                new { file = "neo.jpg", caption = "Neo", groups = new[] { "matrix" } },
+                new { file = "neo.jpg", caption = "Neo again", groups = new[] { "matrix" } },
+            },
+        }));
+        var entries = MediaCatalog.Images(null, root, new List<string>());
+        Check.Equal(2, entries.Count, "a repeated manifest entry is retained as before");
+        var map = new Dictionary<string, MediaEntry>(StringComparer.Ordinal);
+        foreach (var entry in entries) map.Add(entry.Id, entry);
+        Check.Equal(entries[0].Id, MediaCatalog.Images(null, root, new List<string>())[0].Id, "the first occurrence keeps its id across rebuilds");
+    });
 
     private static void WithFolder(Action<string> action)
     {

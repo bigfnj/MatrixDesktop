@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace MatrixDesktop.Shared;
@@ -66,7 +68,7 @@ internal static class MediaCatalog
                 var groups = image.TryGetProperty("groups", out var groupList) ? groupList.EnumerateArray()
                     .Select(g => g.GetString() ?? "").Where(g => g is "matrix" or "reloaded" or "revolutions").Distinct().ToArray() : [];
                 if (groups.Length == 0) groups = ["matrix"];
-                imported.Add(new($"image-{entries.Count + imported.Count}", local.FullName, type, caption[..Math.Min(caption.Length, 200)], groups[0], groups));
+                imported.Add(new(ImageId(groups[0], local.FullName, entries, imported), local.FullName, type, caption[..Math.Min(caption.Length, 200)], groups[0], groups));
             }
             entries.AddRange(imported);
             return true;
@@ -120,12 +122,27 @@ internal static class MediaCatalog
                     break;
                 }
                 if (!ImageTypes.TryGetValue(file.Extension, out var type) || !Readable(file)) continue;
-                entries.Add(new($"image-{entries.Count}", file.FullName, type, System.IO.Path.GetFileNameWithoutExtension(file.Name), group));
+                entries.Add(new(ImageId(group, file.FullName, entries), file.FullName, type, System.IO.Path.GetFileNameWithoutExtension(file.Name), group));
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             warnings.Add($"Picture folder could not be read: {ex.Message}");
+        }
+    }
+
+    // 2026-11-08: ids name a file, not a position. UC3D keeps its startup caption list
+    // while every host refresh re-enumerates, so a positional id re-pointed to the next
+    // file and showed its neighbour's caption. The group is hashed too: personal and
+    // donor folders may be the same directory, and a duplicate id would throw in the
+    // bridge's resource map. A manifest that repeats a file gets an occurrence suffix.
+    private static string ImageId(string group, string path, List<MediaEntry> entries, List<MediaEntry>? pending = null)
+    {
+        for (var occurrence = 0; ; occurrence++)
+        {
+            var key = occurrence == 0 ? group + "\0" + path : group + "\0" + path + "\0" + occurrence;
+            var id = "image-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)), 0, 8).ToLowerInvariant();
+            if (!entries.Any(entry => entry.Id == id) && (pending is null || !pending.Any(entry => entry.Id == id))) return id;
         }
     }
 

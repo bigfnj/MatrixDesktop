@@ -5,13 +5,20 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Win32;
 
 namespace MatrixDesktop.Shared;
+
+// What kind of window hosts the page. Wallpaper and the screensaver preview sit behind
+// other applications, so their UC3D desktop comes from the wallpaper, never the screen.
+internal enum NativeHostKind { Interactive, Wallpaper, Screensaver, ScreensaverPreview }
 
 // Only generated font/wallpaper resources and explicitly granted UC3D media
 // are exposed. There is no directory mapping or filesystem-path request API.
@@ -21,6 +28,7 @@ internal sealed class NativeMediaBridge : IDisposable
     // Keep granted media on an intercepted origin, separate from bundled assets.
     private const string ResourceOrigin = "https://uc3d-media.local";
     private readonly bool _preview;
+    private readonly NativeHostKind _hostKind;
     private readonly SemaphoreSlim _updateLock = new(1, 1);
     private readonly Dictionary<string, MediaEntry> _files = new(StringComparer.Ordinal);
     private readonly List<string> _warnings = [];
@@ -31,15 +39,60 @@ internal sealed class NativeMediaBridge : IDisposable
     private string? _scriptId;
     private string _configuration = "";
     private byte[]? _desktop;
-    private object? _wallpaper;
-    private object? _zmatrixFonts;
+    private WallpaperEntry? _wallpaper;
+    private (AtlasEntry Normal, AtlasEntry Special)? _zmatrixFonts;
     private string? _assetRoot;
     private int _generation;
     private Rectangle _captureBounds;
     private int _atlasDpi = 96;
     private bool _disposed;
 
-    internal NativeMediaBridge(bool preview) => _preview = preview;
+    // 2026-11-08 (AUD-09, AUD-11): native work is cached on its real inputs, so an edit or a
+    // refresh rebuilds only what changed. Atlases key on everything GDI rasterises from,
+    // including the font-smoothing settings that DEFAULT_QUALITY follows. The wallpaper has
+    // no readable input, so an environment epoch (a refresh, a preference or display change)
+    // expires it, and a re-read that matches keeps its resource id.
+    private sealed record WallpaperEntry(Rectangle Bounds, int Epoch, int Built, WallpaperBackground.Capture Capture);
+    private readonly record struct AtlasKey(string Asset, int Dpi, string Raster, string? Font, string Repertoire);
+    private sealed record AtlasEntry(AtlasKey Key, GdiGlyphAtlas.Atlas Atlas);
+    private WallpaperEntry? _wallpaperCache;
+    private AtlasEntry? _normalAtlas, _specialAtlas;
+    private int _environment;
+
+    // 2026-11-08 (AUD-09): native work an edit or a refresh built on the thread pool, held with
+    // the inputs it was built from until Prepare takes it. A failed build is kept and rethrown
+    // there, so a fault never escapes as an unobserved task (fatal in CrashDumpWriter).
+    private readonly record struct Built<T>(T? Value, ExceptionDispatchInfo? Error) where T : class
+    {
+        internal static Built<T> Of(Func<T> build)
+        {
+            try { return new(build(), null); }
+            catch (Exception error) { return new(null, ExceptionDispatchInfo.Capture(error)); }
+        }
+        internal T Result { get { Error?.Throw(); return Value!; } }
+    }
+    private (Rectangle Bounds, int Epoch, Built<WallpaperBackground.Capture> Capture)? _builtWallpaper;
+    private (AtlasKey Key, bool Special, Built<GdiGlyphAtlas.Atlas> Atlas)[] _builtAtlases = [];
+
+    internal NativeMediaBridge(bool preview, NativeHostKind hostKind = NativeHostKind.Interactive)
+    {
+        _preview = preview;
+        _hostKind = hostKind;
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+    }
+
+    // Capture seams for the native harness; production uses the real captures.
+    internal Func<Rectangle, byte[]> ScreenCapture { get; init; } = CopyScreen;
+    internal Func<Rectangle, WallpaperBackground.Capture> WallpaperCapture { get; init; } = WallpaperBackground.Create;
+    internal Func<string?, IEnumerable<string>, bool, int, string?, string, Func<string, string>, GdiGlyphAtlas.Atlas> AtlasFactory { get; init; } = GdiGlyphAtlas.Create;
+    internal Func<string> RasterEnvironment { get; init; } = ReadRasterEnvironment;
+
+    // Only the ZMatrix page applies new native resources while it runs; UC3D reads its
+    // bootstrap once and Matrix has none, so a refresh cannot change what they show.
+    internal bool Refreshable { get; private set; }
+
+    private bool UsesWallpaperDesktop => _hostKind is NativeHostKind.Wallpaper or NativeHostKind.ScreensaverPreview;
 
     internal void SetAssetRoot(string webRoot)
     {
@@ -48,9 +101,20 @@ internal sealed class NativeMediaBridge : IDisposable
         _configuration = "";
     }
 
+    // Before the window is shown, take only what must precede it: the UC3D desktop
+    // snapshot, which a screen copy would otherwise take of this window. Prepare does
+    // the rest once the asset root is known, so ZMatrix work is never built twice.
+    internal void CaptureDesktopBeforeShow(string query, Rectangle captureBounds)
+    {
+        if (_disposed || _desktop is not null) return;
+        var options = ParseQuery(query);
+        if (options.TryGetValue("scene", out var scene) && scene.Equals("uc3d", StringComparison.OrdinalIgnoreCase) && Enabled(options, "desktopBackground"))
+            CaptureDesktop(captureBounds);
+    }
+
     internal void Prepare(string query, Rectangle captureBounds, int atlasDpi = 96)
     {
-        if (_disposed || (query == _configuration && captureBounds == _captureBounds && atlasDpi == _atlasDpi)) return;
+        if (_disposed || Unchanged(query, captureBounds, atlasDpi)) return;
         _configuration = query;
         _captureBounds = captureBounds;
         _atlasDpi = atlasDpi;
@@ -61,7 +125,8 @@ internal sealed class NativeMediaBridge : IDisposable
         _zmatrixFonts = null;
         _generation++;
         var options = ParseQuery(query);
-        if (options.TryGetValue("scene", out var selectedScene) && selectedScene.Equals("zmatrix", StringComparison.OrdinalIgnoreCase))
+        Refreshable = IsZMatrix(options);
+        if (Refreshable)
         {
             _desktop = null;
             PrepareZMatrix(options, captureBounds, atlasDpi);
@@ -98,57 +163,180 @@ internal sealed class NativeMediaBridge : IDisposable
             }
         }
         if (!Enabled(options, "desktopBackground")) _desktop = null;
-        else if (_desktop is null)
+        else if (_desktop is null) CaptureDesktop(captureBounds);
+    }
+
+    // A screen copy would bake other applications' windows into a wallpaper or preview,
+    // so those hosts paint the wallpaper instead, as ZMatrix does.
+    private void CaptureDesktop(Rectangle captureBounds)
+    {
+        try
         {
-            try
-            {
-                if (captureBounds.Width <= 0 || captureBounds.Height <= 0) throw new InvalidOperationException("No display bounds are available.");
-                using var bitmap = new Bitmap(captureBounds.Width, captureBounds.Height);
-                using (var graphics = Graphics.FromImage(bitmap))
-                    graphics.CopyFromScreen(captureBounds.Location, Point.Empty, captureBounds.Size);
-                using var stream = new MemoryStream();
-                bitmap.Save(stream, ImageFormat.Png);
-                _desktop = stream.ToArray();
-            }
-            catch (Exception ex)
-            {
-                _warnings.Add($"Desktop snapshot is unavailable: {ex.Message}");
-            }
+            if (captureBounds.Width <= 0 || captureBounds.Height <= 0) throw new InvalidOperationException("No display bounds are available.");
+            _desktop = UsesWallpaperDesktop ? WallpaperCapture(captureBounds).Png : ScreenCapture(captureBounds);
         }
+        catch (Exception ex)
+        {
+            _warnings.Add($"Desktop snapshot is unavailable: {ex.Message}");
+        }
+    }
+
+    private static byte[] CopyScreen(Rectangle captureBounds)
+    {
+        using var bitmap = new Bitmap(captureBounds.Width, captureBounds.Height);
+        using (var graphics = Graphics.FromImage(bitmap))
+            graphics.CopyFromScreen(captureBounds.Location, Point.Empty, captureBounds.Size);
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Png);
+        return stream.ToArray();
     }
 
     private void PrepareZMatrix(Dictionary<string, string> options, Rectangle bounds, int dpi)
     {
-        try
+        if (WantsWallpaper(options))
         {
-            var wallpaper = WallpaperBackground.Create(bounds);
-            var id = $"wallpaper-{_generation}";
-            _nativeResources.Add(id, wallpaper.Png);
-            _wallpaper = new { generation = _generation, url = ResourceUrl(id), width = wallpaper.Width, height = wallpaper.Height,
-                bounds = new { x = wallpaper.X, y = wallpaper.Y, width = wallpaper.Width, height = wallpaper.Height },
-                backgroundColor = wallpaper.BackgroundColor, source = "native-wallpaper", warnings = Array.Empty<string>() };
+            try
+            {
+                _wallpaper = Wallpaper(bounds);
+                _nativeResources.Add($"wallpaper-{_wallpaper.Built}", _wallpaper.Capture.Png);
+            }
+            catch (Exception error) { _warnings.Add($"Wallpaper background unavailable: {error.Message}"); }
         }
-        catch (Exception error) { _warnings.Add($"Wallpaper background unavailable: {error.Message}"); }
         try
         {
-            var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray());
-            var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"]);
-            var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal);
-            var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
-            var regularAtlas = GdiGlyphAtlas.Create(DecodeStructured(options.GetValueOrDefault("zmFont")), characters, false, dpi, asset,
-                $"font-{_generation}-normal", ResourceUrl);
-            var specialAtlas = GdiGlyphAtlas.Create(DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), special, true, dpi, asset,
-                $"font-{_generation}-special", ResourceUrl);
-            foreach (var (id, bytes) in regularAtlas.Resources.Concat(specialAtlas.Resources)) _nativeResources.Add(id, bytes);
-            _zmatrixFonts = new { generation = _generation, normal = regularAtlas.Metadata, special = specialAtlas.Metadata };
+            var (normal, special) = AtlasInputs(options, dpi);
+            var regular = Atlas(ref _normalAtlas, normal.Key, normal.Repertoire, false);
+            var specialAtlas = Atlas(ref _specialAtlas, special.Key, special.Repertoire, true);
+            foreach (var (id, bytes) in regular.Atlas.Resources.Concat(specialAtlas.Atlas.Resources)) _nativeResources.Add(id, bytes);
+            _zmatrixFonts = (regular, specialAtlas);
         }
         catch (Exception error) { _warnings.Add($"Native ZMatrix fonts unavailable: {error.Message}"); }
     }
 
-    private static string[] ReadTextArray(string? json, string[] fallback)
+    private static bool IsZMatrix(Dictionary<string, string> options) =>
+        options.TryGetValue("scene", out var scene) && scene.Equals("zmatrix", StringComparison.OrdinalIgnoreCase);
+
+    // The page decodes the wallpaper only in bitmap mode (zmatrix/runtime.js), and its
+    // choice parser lowercases without trimming, so colour mode skips the capture.
+    private static bool WantsWallpaper(Dictionary<string, string> options) =>
+        !string.Equals(options.GetValueOrDefault("zmBackgroundMode"), "color", StringComparison.OrdinalIgnoreCase);
+
+    // Both atlas roles with everything GDI rasterises them from. Each role has its own
+    // inputs, so an edit to one font rebuilds only that atlas.
+    private ((AtlasKey Key, string[] Repertoire) Normal, (AtlasKey Key, string[] Repertoire) Special) AtlasInputs(Dictionary<string, string> options, int dpi)
     {
-        if (string.IsNullOrWhiteSpace(json)) return fallback;
-        return JsonSerializer.Deserialize<string[]>(DecodeStructured(json)!) ?? throw new InvalidOperationException("A ZMatrix text list is invalid.");
+        var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray(), phrases: false);
+        var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"], phrases: true);
+        var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal).ToArray();
+        var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
+        var raster = RasterEnvironment();
+        return ((new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmFont")), string.Concat(characters)), characters),
+            (new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special));
+    }
+
+    private bool Unchanged(string query, Rectangle bounds, int dpi) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi;
+
+    // 2026-11-08 (AUD-09): the wallpaper capture with its PNG encode and both GDI atlases take
+    // most of a second on a large virtual screen. An edit or a refresh therefore builds what the
+    // next Prepare would miss on the thread pool and applies nothing there; Prepare then runs on
+    // the caller's (UI) thread and takes these results instead of building them itself. Prepare
+    // follows with exactly one generation step, so atlas ids minted here carry its generation.
+    private async Task BuildAheadAsync(string query, Rectangle bounds, int dpi)
+    {
+        var options = ParseQuery(query);
+        if (_disposed || Unchanged(query, bounds, dpi) || !IsZMatrix(options)) return;
+        var epoch = Volatile.Read(ref _environment);
+        var wallpaper = WantsWallpaper(options) && CachedWallpaper(bounds, epoch) is null
+            ? Task.Run(() => Built<WallpaperBackground.Capture>.Of(() => WallpaperCapture(bounds))) : null;
+        var roles = new List<(AtlasKey Key, string[] Repertoire, bool Special)>();
+        try
+        {
+            var (normal, special) = AtlasInputs(options, dpi);
+            if (_normalAtlas?.Key != normal.Key) roles.Add((normal.Key, normal.Repertoire, false));
+            if (_specialAtlas?.Key != special.Key) roles.Add((special.Key, special.Repertoire, true));
+        }
+        catch (Exception) { } // Prepare meets the same malformed input and reports it.
+        var generation = _generation + 1;
+        // The roles build in order on one thread, as Prepare would build them.
+        var atlases = roles.Count == 0 ? null : Task.Run(() => roles.Select(role => (role.Key, role.Special, Built<GdiGlyphAtlas.Atlas>.Of(() =>
+            AtlasFactory(role.Key.Font, role.Repertoire, role.Special, role.Key.Dpi, role.Key.Asset, AtlasPrefix(generation, role.Special), ResourceUrl)))).ToArray());
+        if (wallpaper is not null) _builtWallpaper = (bounds, epoch, await wallpaper);
+        if (atlases is not null) _builtAtlases = await atlases;
+    }
+
+    private void DropBuilt()
+    {
+        _builtWallpaper = null;
+        _builtAtlases = [];
+    }
+
+    private WallpaperEntry? CachedWallpaper(Rectangle bounds, int epoch) =>
+        _wallpaperCache is { } cached && cached.Bounds == bounds && cached.Epoch == epoch ? cached : null;
+
+    private WallpaperEntry Wallpaper(Rectangle bounds)
+    {
+        var epoch = Volatile.Read(ref _environment);
+        if (CachedWallpaper(bounds, epoch) is { } hit) return hit;
+        var cached = _wallpaperCache;
+        var capture = _builtWallpaper is { } built && built.Bounds == bounds && built.Epoch == epoch ? built.Capture.Result : WallpaperCapture(bounds);
+        _wallpaperCache = cached is not null && cached.Bounds == bounds && SameCapture(cached.Capture, capture)
+            ? cached with { Epoch = epoch }
+            : new WallpaperEntry(bounds, epoch, _generation, capture);
+        return _wallpaperCache;
+    }
+
+    private static bool SameCapture(WallpaperBackground.Capture a, WallpaperBackground.Capture b) =>
+        a.Width == b.Width && a.Height == b.Height && a.X == b.X && a.Y == b.Y
+        && a.BackgroundColor.AsSpan().SequenceEqual(b.BackgroundColor) && a.Png.AsSpan().SequenceEqual(b.Png);
+
+    // Resource ids carry the generation that built them, so an id never names other bytes.
+    private AtlasEntry Atlas(ref AtlasEntry? cache, AtlasKey key, string[] repertoire, bool special)
+    {
+        if (cache is not null && cache.Key == key) return cache;
+        var built = Array.FindIndex(_builtAtlases, entry => entry.Key == key && entry.Special == special);
+        cache = new AtlasEntry(key, built >= 0 ? _builtAtlases[built].Atlas.Result
+            : AtlasFactory(key.Font, repertoire, special, key.Dpi, key.Asset, AtlasPrefix(_generation, special), ResourceUrl));
+        return cache;
+    }
+
+    private static string AtlasPrefix(int generation, bool special) => $"font-{generation}-{(special ? "special" : "normal")}";
+
+    // GDI rasterises DEFAULT_QUALITY text with the current smoothing settings
+    // (GdiGlyphAtlas quality 0), so they are an atlas input.
+    private static string ReadRasterEnvironment()
+    {
+        static uint Read(uint action) { uint value = 0; return SystemParametersInfo(action, 0, ref value, 0) ? value : uint.MaxValue; }
+        // SPI_GETFONTSMOOTHING, ...TYPE, ...CONTRAST, ...ORIENTATION
+        return $"{Read(0x004A)}/{Read(0x200A)}/{Read(0x200C)}/{Read(0x2012)}";
+    }
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    private static extern bool SystemParametersInfo(uint action, uint parameter, ref uint value, uint update);
+
+    // The configurator never refreshes, so preference and display changes expire the wallpaper here.
+    private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is UserPreferenceCategory.Desktop or UserPreferenceCategory.Color or UserPreferenceCategory.Accessibility or UserPreferenceCategory.VisualStyle)
+            InvalidateEnvironment();
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e) => InvalidateEnvironment();
+
+    private void InvalidateEnvironment() => Interlocked.Increment(ref _environment);
+
+    // 2026-11-08: the list rules of zmatrix/settings.js (BMP only, no C0 or DEL, the size
+    // limits). config.js silently replaces a rejected list with its default, so the atlas
+    // must do the same, or the page requests glyphs this atlas never rasterised.
+    private static string[] ReadTextArray(string? json, string[] fallback, bool phrases)
+    {
+        if (string.IsNullOrWhiteSpace(json) || !global::Shared.StructuredArgumentCodec.TryDecode(json, out var decoded)) return fallback;
+        string?[]? values;
+        try { values = JsonSerializer.Deserialize<string?[]>(decoded); }
+        catch (Exception error) when (error is JsonException or InvalidOperationException) { return fallback; }
+        if (values is null || values.Any(text => text is null || text.Any(c => c < 0x20 || c == 0x7f || char.IsSurrogate(c)))) return fallback;
+        var texts = values.Select(text => text!).ToArray();
+        if (phrases) return texts.Length > 64 || texts.Any(text => text.Length is < 1 or > 256) || texts.SelectMany(text => text).Distinct().Count() > 1024 ? fallback : texts;
+        return texts.Length is < 1 or > 512 || texts.Any(text => text.Length != 1) ? fallback : texts;
     }
 
     private static string? DecodeStructured(string? value)
@@ -180,23 +368,43 @@ internal sealed class NativeMediaBridge : IDisposable
         try
         {
             if (_disposed) return;
+            await BuildAheadAsync(query, bounds, 96);
             Prepare(query, bounds);
             await PublishBootstrapAsync();
         }
-        finally { _updateLock.Release(); }
+        finally { DropBuilt(); _updateLock.Release(); }
     }
 
-    internal async Task RefreshAsync(string query, Rectangle bounds, int atlasDpi)
+    // A refresh re-reads every input and publishes only a change: the ZMatrix page discards
+    // its accumulated raster on every bootstrap it applies. Returns whether it published.
+    internal async Task<bool> RefreshAsync(string query, Rectangle bounds, int atlasDpi)
     {
         await _updateLock.WaitAsync();
         try
         {
-            if (_disposed) return;
+            if (_disposed) return false;
+            InvalidateEnvironment();
+            var generation = _generation;
+            var before = BootstrapJson(0);
+            var desktop = _desktop;
             _configuration = "";
+            // The published resources stay served while the work builds; only Prepare replaces them.
+            await BuildAheadAsync(query, bounds, atlasDpi);
+            if (_disposed) return false;
+            // A wallpaper-sourced desktop is re-read so a wallpaper change reaches a later UC3D load.
+            if (UsesWallpaperDesktop) _desktop = null;
             Prepare(query, bounds, atlasDpi);
+            // Unchanged inputs reuse their entries, so the bootstrap names the same ids; the
+            // UC3D desktop is served under a fixed id, so its bytes are compared.
+            if (BootstrapJson(0) == before && (desktop ?? []).AsSpan().SequenceEqual(_desktop ?? []))
+            {
+                _generation = generation;
+                return false;
+            }
             await PublishBootstrapAsync();
+            return true;
         }
-        finally { _updateLock.Release(); }
+        finally { DropBuilt(); _updateLock.Release(); }
     }
 
     private async Task PublishBootstrapAsync()
@@ -204,21 +412,7 @@ internal sealed class NativeMediaBridge : IDisposable
         if (_core is null || _disposed) return;
         var core = _core;
         if (_scriptId is not null) core.RemoveScriptToExecuteOnDocumentCreated(_scriptId);
-        var json = JsonSerializer.Serialize(new
-        {
-            nativeGeneration = _generation,
-            configuration = _configuration.Length == 0 ? "" : "?" + _configuration.TrimStart('?'),
-            images = _files.Values.Where(f => f.Id.StartsWith("image-", StringComparison.Ordinal))
-                .Select(f => new { id = f.Id, url = ResourceUrl(f.Id), caption = f.Caption, group = f.Group, groups = f.Groups ?? [f.Group] }),
-            desktopUrl = _desktop is null ? null : ResourceUrl("desktop"),
-            audioUrl = _files.ContainsKey("music") ? ResourceUrl("music") : null,
-            effectsUrl = _files.ContainsKey("effects") ? ResourceUrl("effects") : null,
-            glyphUrl = _files.ContainsKey("glyphs") ? ResourceUrl("glyphs") : null,
-            wallpaper = _wallpaper,
-            zmatrixFonts = _zmatrixFonts,
-            preview = _preview,
-            warnings = _warnings,
-        });
+        var json = BootstrapJson();
         // Snapshot before awaiting WebView2 registration. Child documents fetch this
         // current snapshot rather than depending on a frame's captured init script.
         _bootstrapJson = Encoding.UTF8.GetBytes(json);
@@ -230,7 +424,6 @@ internal sealed class NativeMediaBridge : IDisposable
             "window.matrixHostBootstrap=bootstrap;window.dispatchEvent(new CustomEvent('matrix-native-resources-updated',{detail:bootstrap}));return window.matrixHostBootstrap;};" +
             "if(!window.__matrixNativeMessages){window.__matrixNativeMessages=true;" +
             "const message=data=>{if(data?.type==='matrix-native-resources')apply(data.bootstrap);};" +
-            "window.chrome?.webview?.addEventListener('message',e=>message(e.data));" +
             "window.addEventListener('message',e=>{if(e.source===parent&&e.origin==='https://configurator.local')message(e.data);});}" +
             $"window.matrixHostBootstrapReady=fetch('{ResourceOrigin}/__uc3d/bootstrap',{{cache:'no-store'}})" +
             ".then(response=>{if(!response.ok)throw new Error('Native resource bootstrap failed ('+response.status+')');return response.json();})" +
@@ -245,6 +438,36 @@ internal sealed class NativeMediaBridge : IDisposable
     }
 
     private string ResourceUrl(string id) => ResourceOrigin + "/__uc3d/" + id;
+
+    // The document's bootstrap. Internal so the native harness can read it without a WebView.
+    internal string BootstrapJson() => BootstrapJson(_generation);
+
+    // The bytes this bridge serves for a native resource id, for the native harness.
+    internal byte[]? Resource(string id) => _nativeResources.GetValueOrDefault(id);
+
+    // Generations are written here, not stored in cached entries, so a reused entry is
+    // published under the current generation.
+    private string BootstrapJson(int generation) => JsonSerializer.Serialize(new
+    {
+        nativeGeneration = generation,
+        configuration = _configuration.Length == 0 ? "" : "?" + _configuration.TrimStart('?'),
+        images = _files.Values.Where(f => f.Id.StartsWith("image-", StringComparison.Ordinal))
+            .Select(f => new { id = f.Id, url = ResourceUrl(f.Id), caption = f.Caption, group = f.Group, groups = f.Groups ?? [f.Group] }),
+        desktopUrl = _desktop is null ? null : ResourceUrl("desktop"),
+        audioUrl = _files.ContainsKey("music") ? ResourceUrl("music") : null,
+        effectsUrl = _files.ContainsKey("effects") ? ResourceUrl("effects") : null,
+        glyphUrl = _files.ContainsKey("glyphs") ? ResourceUrl("glyphs") : null,
+        wallpaper = _wallpaper is { Capture: var capture } wallpaper
+            ? new { generation, url = ResourceUrl($"wallpaper-{wallpaper.Built}"), width = capture.Width, height = capture.Height,
+                bounds = new { x = capture.X, y = capture.Y, width = capture.Width, height = capture.Height },
+                backgroundColor = capture.BackgroundColor, source = "native-wallpaper", warnings = Array.Empty<string>() }
+            : null,
+        zmatrixFonts = _zmatrixFonts is { } fonts ? new { generation, normal = fonts.Normal.Atlas.Metadata, special = fonts.Special.Atlas.Metadata } : null,
+        preview = _preview,
+        // No input reaches these windows, so the page must not wait for a click.
+        interactive = _hostKind is not (NativeHostKind.Wallpaper or NativeHostKind.Screensaver or NativeHostKind.ScreensaverPreview),
+        warnings = _warnings,
+    });
 
     private void OnResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
@@ -295,6 +518,8 @@ internal sealed class NativeMediaBridge : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         if (_core is not null)
         {
             try { _core.WebResourceRequested -= OnResourceRequested; } catch (InvalidOperationException) { }
@@ -306,6 +531,9 @@ internal sealed class NativeMediaBridge : IDisposable
         _desktop = null;
         _zmatrixFonts = null;
         _wallpaper = null;
+        _wallpaperCache = null;
+        _normalAtlas = _specialAtlas = null;
+        DropBuilt();
         // An in-flight UI request may still be returning from its awaited WebView2 call.
         // Let the semaphore be collected rather than disposing under that request.
     }
