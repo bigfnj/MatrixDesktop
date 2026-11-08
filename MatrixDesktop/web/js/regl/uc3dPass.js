@@ -90,6 +90,9 @@ export default async function startUC3D(canvas, config) {
       .map(value => Number(value) > 0 ? Number(value) : Infinity));
     canvas.addEventListener("webglcontextlost", contextLost);
     stop = startLoop(canvas, runtime, (frame, w, h) => {
+      // The lost event is queued after isContextLost() turns true; a frame between them draws
+      // nothing and must not fail, so the event can still preventDefault for the page's restore.
+      if (gl.isContextLost()) return false;
       if (w !== width || h !== height) {
         width = w; height = h; canvas.width = w; canvas.height = h;
         gl.bindTexture(gl.TEXTURE_2D, output); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);

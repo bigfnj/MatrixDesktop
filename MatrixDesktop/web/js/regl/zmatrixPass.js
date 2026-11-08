@@ -33,6 +33,9 @@ export default async function startZMatrix(canvas, config) {
     gl.bindBuffer(gl.ARRAY_BUFFER, geometry); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
     const position = gl.getAttribLocation(program, "position"), image = gl.getUniformLocation(program, "image");
     stop = startLoop(canvas, runtime, frame => {
+      // The lost event is queued after isContextLost() turns true; a frame between them draws
+      // nothing and must not fail, so the event can still preventDefault for the page's restore.
+      if (gl.isContextLost()) return false;
       const resized = width !== frame.width || height !== frame.height;
       if (resized) { width = frame.width; height = frame.height; canvas.width = width; canvas.height = height; }
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texture);

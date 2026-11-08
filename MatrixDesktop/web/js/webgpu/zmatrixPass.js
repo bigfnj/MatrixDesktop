@@ -1,4 +1,5 @@
 import { createRuntime, startLoop } from "../zmatrix/runtime.js";
+import { showRenderFailure } from "../renderFailure.js";
 
 const shader = `
 struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f };
@@ -16,7 +17,7 @@ export default async function startZMatrix(canvas, config) {
   const gpuError = event => {
     if (dead) return;
     runtime?.diagnostics.errors.push(event.error.message); console.error("ZMatrix WebGPU validation:", event.error.message);
-    if (stop) stop(); else cleanup();
+    showRenderFailure("ZMatrix", event.error); if (stop) stop(); else cleanup();
   };
   const cleanup = () => {
     if (dead) return; dead = true; window.removeEventListener("pagehide", cleanup);
@@ -32,7 +33,12 @@ export default async function startZMatrix(canvas, config) {
     device = await adapter.requestDevice();
     if (dead) { device.destroy(); return cleanup; }
     device.addEventListener("uncapturederror", gpuError);
-    device.lost.then(info => { if (!dead) { runtime?.diagnostics.errors.push(`WebGPU device lost: ${info.message}`); if (stop) stop(); else cleanup(); } });
+    device.lost.then(info => {
+      if (dead) return;
+      runtime?.diagnostics.errors.push(`WebGPU device lost: ${info.message}`); if (stop) stop(); else cleanup();
+      // "destroyed" is a teardown; any other loss goes to the page, which owns recovery.
+      if (info.reason !== "destroyed") window.matrixRendererLost?.(`WebGPU device lost (${info.reason})`);
+    });
     context = canvas.getContext("webgpu");
     if (!context) throw new Error("ZMatrix WebGPU context is unavailable");
     const format = navigator.gpu.getPreferredCanvasFormat(); context.configure({ device, format, alphaMode: "opaque" });

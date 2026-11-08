@@ -3,6 +3,7 @@ import { createScene } from "./scene.js";
 import { createSurface, fitSurface, MAX_SURFACE_PIXELS } from "./surface.js";
 import { loadFonts, decodeImage } from "./fonts.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { showRenderFailure } from "../renderFailure.js";
 
 // Every asynchronous generation has one owner. Obsolete loads must dispose
 // their result even when a decoder does not implement AbortSignal itself.
@@ -171,11 +172,14 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
   };
   const present = state => {
     if (!state || dead) return;
-    draw(state); runtime.diagnostics.frames++; runtime.diagnostics.lastPresentedRevision = state.revision; runtime.diagnostics.ready = true;
+    // A draw that returns false presented nothing: a lost context waits for its event.
+    if (draw(state) === false) { runtime.diagnostics.ready = false; return; }
+    runtime.diagnostics.frames++; runtime.diagnostics.lastPresentedRevision = state.revision; runtime.diagnostics.ready = true;
   };
   const fail = error => {
     if (runtime.diagnostics.errors.length < 32) runtime.diagnostics.errors.push(error.message);
-    runtime.warn(`Rendering failed: ${error.message}`); console.error("ZMatrix render failed", error); dispose();
+    // dispose() removes the warning box, so the failure gets an element that outlives it.
+    showRenderFailure("ZMatrix", error); console.error("ZMatrix render failed", error); dispose();
   };
   runtime.diagnostics.dispose = dispose;
   runtime.diagnostics.step = count => {

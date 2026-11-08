@@ -557,11 +557,11 @@ await asyncTest("a failed slideshow picture warns once however often the slidesh
 async function withPassEnvironment(bootstrap, run) {
   const names = ["navigator", "window", "document", "Image", "fetch", "GPUBufferUsage", "GPUTextureUsage", "requestAnimationFrame", "cancelAnimationFrame", "createImageBitmap"];
   const descriptors = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
-  const previous = { warn: console.warn, error: console.error }, callbacks = [];
+  const previous = { warn: console.warn, error: console.error }, callbacks = [], appended = [];
   try {
     console.warn = () => {}; console.error = () => {};
-    const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() {} });
-    globalThis.document = { createElement: element, body: { append() {} }, addEventListener() {}, removeEventListener() {} };
+    const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() { this.removed = true; } });
+    globalThis.document = { createElement: element, body: { append: (...nodes) => appended.push(...nodes) }, addEventListener() {}, removeEventListener() {} };
     globalThis.window = { matrixHostBootstrap: bootstrap, devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
     globalThis.Image = class { naturalWidth = 32; naturalHeight = 32; async decode() {}
       set src(url) { const size = /(\d+)x(\d+)/.exec(url ?? ""); if (size) { this.naturalWidth = Number(size[1]); this.naturalHeight = Number(size[2]); } } };
@@ -571,7 +571,9 @@ async function withPassEnvironment(bootstrap, run) {
     globalThis.requestAnimationFrame = callback => { callbacks.push(callback); return callbacks.length; };
     globalThis.cancelAnimationFrame = () => {};
     // A stopped loop's last scheduled frame stays queued; running every pending callback keeps it a no-op.
-    await run({ tick: now => { for (const callback of callbacks.splice(0)) callback(now); }, diagnostics: () => globalThis.window.matrixRuntimeDiagnostics });
+    await run({ tick: now => { for (const callback of callbacks.splice(0)) callback(now); }, diagnostics: () => globalThis.window.matrixRuntimeDiagnostics,
+      // Text of the page elements still attached (an element's remove() detaches it).
+      visible: () => appended.filter(node => !node.removed && node.textContent).map(node => node.textContent) });
   } finally {
     console.warn = previous.warn; console.error = previous.error;
     for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; }
@@ -583,6 +585,7 @@ function fakeGL(maxTexture) {
   let pending = 0, lost = false;
   const target = { ...constants, allocations,
     lose() { lost = true; },
+    fault(code) { pending = code; },
     isContextLost: () => lost,
     getParameter: name => name === constants.MAX_VIEWPORT_DIMS ? new Int32Array([maxTexture, maxTexture]) : [constants.MAX_TEXTURE_SIZE, constants.MAX_RENDERBUFFER_SIZE].includes(name) ? maxTexture : 0,
     getExtension: () => ({ vertexAttribDivisorANGLE() {}, drawArraysInstancedANGLE() {} }),
@@ -625,23 +628,26 @@ await asyncTest("REGL UC3D fits its render target to the WebGL texture limit wit
   });
 });
 function fakeGPU(adapterLimit, defaultLimit) {
-  const textures = [], copies = [], resource = () => ({ createView: () => ({}), destroy() {} });
+  const textures = [], copies = [], resource = () => ({ createView: () => ({}), destroy() {} }), listeners = new Map();
+  let resolveLost;
+  const lost = new Promise(resolve => { resolveLost = resolve; });
   const device = {
-    limits: { maxTextureDimension2D: defaultLimit }, destroy() {},
+    // As a real device does, destroy() settles lost with the reason "destroyed".
+    limits: { maxTextureDimension2D: defaultLimit }, destroy() { resolveLost({ reason: "destroyed", message: "Device was destroyed." }); },
     queue: { copyExternalImageToTexture: (source, destination, size) => copies.push({ source: source.source, size }), writeBuffer() {}, submit() {} },
     createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
     createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
     createBuffer: resource, createTexture: descriptor => { textures.push(descriptor.size); return resource(); },
     createSampler: () => ({}), createBindGroup: () => ({}),
     createCommandEncoder: () => ({ beginRenderPass: () => ({ setPipeline() {}, setBindGroup() {}, setVertexBuffer() {}, draw() {}, end() {} }), finish: () => ({}) }),
-    addEventListener() {}, lost: new Promise(() => {}),
+    addEventListener: (name, listener) => listeners.set(name, listener), lost,
   };
   const adapter = { limits: { maxTextureDimension2D: adapterLimit }, requestDevice: async descriptor => {
     // Model the default limit: a device only receives the adapter maximum when it asks for it.
     device.limits.maxTextureDimension2D = Math.min(adapterLimit, descriptor?.requiredLimits?.maxTextureDimension2D ?? defaultLimit); return device; } };
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: { requestAdapter: async () => adapter, getPreferredCanvasFormat: () => "rgba8unorm" } } });
   const context = { configure() {}, unconfigure() {}, getCurrentTexture: () => resource() };
-  return { device, textures, copies, context };
+  return { device, textures, copies, context, lose: info => resolveLost(info), fire: (name, event) => listeners.get(name)?.(event) };
 }
 await asyncTest("WebGPU UC3D requests the adapter texture limit and fits the canvas and render target to it", async () => {
   await withPassEnvironment({}, async ({ tick, diagnostics }) => {
@@ -744,6 +750,61 @@ await asyncTest("original speed 0 shows a populated frozen field, animated and s
       assert.ok(diagnostics().activeStreams > 0 && diagnostics().glyphInstances > 0,
         `single-frame speed 0 drew ${diagnostics().activeStreams} streams and ${diagnostics().glyphInstances} glyphs`);
     } finally { stop(); }
+  });
+});
+await asyncTest("REGL UC3D waits for the lost-context event instead of failing a frame", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
+    const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+    try {
+      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present");
+      // isContextLost() is true at once; the browser queues the event as a later task.
+      gl.lose(); tick(100);
+      assert.deepEqual(diagnostics().errors, [], `a frame while the context was lost failed: ${diagnostics().errors.join("; ")}`);
+      assert.equal(diagnostics().ready, false, "ready must be false while the context is lost");
+      assert.equal(diagnostics().disposed, false, "the pass must wait for the lost event");
+      let prevented = false;
+      canvas.listeners.get("webglcontextlost")({ preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true, "the lost event must ask the browser to restore the context");
+      assert.deepEqual(diagnostics().errors, ["WebGL context was lost"]); assert.equal(diagnostics().disposed, true);
+    } finally { stop(); }
+  });
+});
+await asyncTest("a UC3D render failure stays visible after the scene disposes its overlays", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics, visible }) => {
+    const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
+    const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1", suppressWarnings: "true" }));
+    try {
+      gl.fault(1282); tick(0);
+      assert.deepEqual(diagnostics().errors, ["UC3D WebGL error 1282"], "witness: the frame must fail");
+      assert.equal(diagnostics().disposed, true, "witness: a failed frame disposes the scene");
+      assert.ok(visible().includes("UC3D rendering failed: UC3D WebGL error 1282"), `no visible failure; the page shows ${JSON.stringify(visible())}`);
+    } finally { stop(); }
+  });
+});
+await asyncTest("WebGPU UC3D hands a lost device to the page and shows a validation failure", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics, visible }) => {
+    for (const leg of ["unknown", "destroyed", "no-hook", "validation"]) {
+      const calls = [];
+      globalThis.window.matrixRendererLost = leg === "no-hook" ? undefined : reason => calls.push(reason);
+      const gpu = fakeGPU(8192, 8192), canvas = passCanvas(gpu.context, 200, 50);
+      const stop = await startWebGPU(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        tick(0); assert.equal(diagnostics().ready, true, `${leg}: witness: the first frame must present`);
+        if (leg === "validation") gpu.fire("uncapturederror", { error: { message: "synthetic validation" } });
+        else gpu.lose({ reason: leg === "no-hook" ? "unknown" : leg, message: "synthetic reset" });
+        await settle();
+        assert.equal(diagnostics().disposed, true, `${leg}: the pass must stop`);
+        if (leg === "validation") {
+          assert.deepEqual(diagnostics().errors, ["synthetic validation"]); assert.deepEqual(calls, [], "a validation failure is not a device loss");
+          assert.ok(visible().includes("UC3D rendering failed: synthetic validation"), `validation: no visible failure; the page shows ${JSON.stringify(visible())}`);
+        } else {
+          assert.deepEqual(diagnostics().errors, ["WebGPU device lost: synthetic reset"]);
+          if (leg === "unknown") assert.deepEqual(calls, ["WebGPU device lost (unknown)"], "a lost device must be handed to the page once");
+          if (leg === "destroyed") assert.deepEqual(calls, [], "reason 'destroyed' is a teardown, not a loss to recover from");
+        }
+      } finally { stop(); }
+    }
   });
 });
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);

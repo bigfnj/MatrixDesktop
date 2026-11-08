@@ -1,5 +1,6 @@
 import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig } from "../uc3d/runtime.js";
 import { fitSurface } from "../zmatrix/surface.js";
+import { showRenderFailure } from "../renderFailure.js";
 
 // The composite samples the desktop snapshot across the whole screen, so a capture wider
 // than the device texture limit is downscaled with its aspect kept instead of failing.
@@ -90,10 +91,14 @@ export default async function startUC3D(canvas, config) {
     let compositeBindGroup, targetView, geometrySize = 0, width = 0, height = 0;
     device.addEventListener("uncapturederror", event => {
       if (dead) return;
-      runtime.diagnostics.errors.push(event.error.message); console.error("UC3D WebGPU validation:", event.error.message); stop?.();
+      runtime.diagnostics.errors.push(event.error.message); console.error("UC3D WebGPU validation:", event.error.message);
+      showRenderFailure("UC3D", event.error); stop?.();
     });
     device.lost.then(info => {
-      if (!dead) { runtime.diagnostics.errors.push(`WebGPU device lost: ${info.message}`); stop?.(); }
+      if (dead) return;
+      runtime.diagnostics.errors.push(`WebGPU device lost: ${info.message}`); stop?.();
+      // "destroyed" is a teardown; any other loss goes to the page, which owns recovery.
+      if (info.reason !== "destroyed") window.matrixRendererLost?.(`WebGPU device lost (${info.reason})`);
     });
     stop = startLoop(canvas, runtime, (frame, w, h) => {
       if (w !== width || h !== height) {

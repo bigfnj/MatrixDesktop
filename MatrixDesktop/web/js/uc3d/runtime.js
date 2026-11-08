@@ -5,6 +5,7 @@ import { createAudio } from "./audio.js";
 import colorToRGB from "../colorToRGB.js";
 import { createPlaybackClock } from "../hostPlayback.js";
 import { fitSurface } from "../zmatrix/surface.js";
+import { showRenderFailure } from "../renderFailure.js";
 
 export async function loadImage(url) {
   if (!url) return null;
@@ -158,8 +159,9 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
         else if (runtime.config.once || fps === 0) elapsed = 10;
       } else elapsed = (now - start) / 1000;
       lastDraw = now;
-      try { draw(runtime.update(elapsed, width, height), width, height); runtime.diagnostics.ready = true; }
-      catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); dispose(); return; }
+      // A draw that returns false presented nothing: a lost context waits for its event.
+      try { runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false; }
+      catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); showRenderFailure("UC3D", error); dispose(); return; }
       previous = now;
       // Keep the single frame and overlays visible. Resources are released on pagehide
       // or explicit teardown, just as for the animated path, without scheduling a loop.
