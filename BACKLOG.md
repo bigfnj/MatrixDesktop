@@ -144,6 +144,7 @@ ACCEPTED-RECORDED with checkable evidence.
 | AUD-75 | medium | Text values containing '=' are parsed as new keys: an active UC3D musicFile, pictureDirectory or donorDirectory such as C:/Music/a=b.mp3, or an image URL with a query, is lost on Test, Export and copied-command import |
 | AUD-76 | medium | Crash handlers can enter single-threaded DbgHelp concurrently: the UI ThreadException and UnobservedTaskException paths each reach MiniDumpWriteDump, and the reservation counter is a cap, not a lock |
 | AUD-77 | low | An inherited Object property name in the query (constructor, toString, __proto__) passes config.js's parameter filter, has no parser, and throws before main.js's visible error boundary, so the renderer never starts and no notice explains why |
+| AUD-78 | medium | web-smoke's glyphIntensity check samples a fixed 2.5 s after the canvas appears, so on a slow runner the bright render can still be black and CI fails with nothing broken |
 
 Before that audit, at `06809a4` on 2026-11-07, the Windows PowerShell 5.1 full gate reported
 70 PASS, 0 FAIL, 0 UNCHECKED, with its actual Windows process exit observed as 0, and
@@ -249,6 +250,7 @@ analyzers at AnalysisMode=All; they were leads for the finders, not findings. 77
 | AUD-75 | Text values containing '=' are parsed as new keys: an active UC3D musicFile, pictureDirectory or donorDirectory such as C:/Music/a=b.mp3, or an image URL with a query, is lost on Test, Export and copied-command import | OPEN, planned FIXED | Found at CommandBuilder.cs:185, MatrixArgs.cs:287, ArgumentImporter.cs:512, ArgumentImporter.cs:305, AppCli.cs:269. |
 | AUD-76 | Crash handlers can enter single-threaded DbgHelp concurrently: the UI ThreadException and UnobservedTaskException paths each reach MiniDumpWriteDump, and the reservation counter is a cap, not a lock | OPEN, planned FIXED | Found at CrashDumpWriter.cs:113,115, BACKLOG.md:152. |
 | AUD-77 | An inherited Object property name in the query (constructor, toString, __proto__) passes config.js's parameter filter, has no parser, and throws before main.js's visible error boundary, so the renderer never starts and no notice explains why | OPEN, planned FIXED | Found at config.js:641, main.js:76. |
+| AUD-78 | web-smoke's glyphIntensity check samples a fixed 2.5 s after the canvas appears, so on a slow runner the bright render can still be black and CI fails with nothing broken | OPEN, planned FIXED | Found after this audit: CI run 42468134537 on the documentation-only commit fd2358f failed "glyphIntensity changes the stripe render: luma at 0 is 1.60 and at 2 is 0.00" (tests/web-smoke.py:620-641 sleeps 2500 ms, then samples). The same run's smoke process died with a fatal Python stderr-lock error from the static server's request logging, the AUD-56 defect. Planned: sample only after the renderer reports ready and has advanced frames; reproduce the flake deterministically under CDP CPU throttling as the killing mutation. |
 
 Dismissed by verification, recorded so nobody re-opens them:
 
