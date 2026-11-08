@@ -157,7 +157,7 @@ internal sealed partial class CommandBuilder
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
             if (!Uc3dControlProfile.IsActive(field.Id, values) || !ZMatrixControlProfile.IsActive(field.Id, values)) continue;
-            if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
+            if (IsInactiveForEffect(field.Id, effect))
             {
                 continue;
             }
@@ -186,6 +186,18 @@ internal sealed partial class CommandBuilder
             tokens.Add(serialized);
         }
     }
+
+    // A value the selected effect cannot use stays out of every command and the preview, as
+    // app.js getDisabledReason greys its editor, while the saved draft keeps it so returning
+    // to that effect restores it. Camera matters most: both renderers open the webcam
+    // whenever camera is true, and the page will not let a greyed checkbox be cleared.
+    // Effect names compare as the renderers look them up (regl/main.js effects[name]).
+    internal static bool IsInactiveForEffect(string fieldId, string effect) => fieldId switch
+    {
+        "stripeColors" => !ArgumentImporter.IsStripeEffect(effect),
+        "camera" => !string.Equals(effect, "mirror", StringComparison.Ordinal),
+        _ => false,
+    };
 
     private string SerializeWebValue(ArgumentDefinition field, JsonNode value)
     {
@@ -462,7 +474,7 @@ internal sealed partial class CommandBuilder
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
             if (!Uc3dControlProfile.IsActive(field.Id, values) || !ZMatrixControlProfile.IsActive(field.Id, values)) continue;
-            if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
+            if (IsInactiveForEffect(field.Id, effect))
             {
                 continue;
             }

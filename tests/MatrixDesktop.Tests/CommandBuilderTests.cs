@@ -11,6 +11,7 @@ internal static class CommandBuilderTests
         ("Only values that differ from the default are emitted", DefaultsAreSkipped),
         ("Stripe colours are omitted for a non stripe effect", StripeColorsGatedOff),
         ("Stripe colours are emitted for a stripe effect", StripeColorsGatedOn),
+        ("Camera is omitted unless the effect is mirror", CameraRequiresMirror),
         ("Window mode emits the matching wrapper flag", WindowModeFlags),
         ("A monitor index is dropped unless single monitor is selected", MonitorRequiresSingleMonitor),
         ("A test launch forces windowed and disables any-key exit", TestLaunchIsSafe),
@@ -67,6 +68,36 @@ internal static class CommandBuilderTests
         d["effect"] = "stripes";
         d["stripeColors"] = new JsonArray(new JsonObject { ["r"] = 1.0, ["g"] = 0.0, ["b"] = 0.0 });
         Check.Contains(Cmd(d), "--stripeColors 1,0,0", "a stripe effect must emit its colours");
+    }
+
+    // AUD-03. The page greys Camera unless Effect is Mirror and drops edits to a greyed field, so
+    // a camera=true set under Mirror cannot be cleared from another effect, while both renderers
+    // open the webcam whenever camera is true. Killing mutation: delete the camera arm of
+    // CommandBuilder.IsInactiveForEffect; the copied-command assertion fails first.
+    private static void CameraRequiresMirror()
+    {
+        var effects = Metadata.Groups.SelectMany(group => group.Fields).Single(field => field.Id == "effect").Options.Select(option => option.Value).ToArray();
+        Check.True(effects.Contains("mirror") && effects.Length > 2, "the catalog must offer Mirror and other effects");
+        foreach (var effect in effects.Where(effect => effect != "mirror"))
+        {
+            var d = Draft();
+            d["effect"] = effect;
+            d["camera"] = true;
+            var saved = d.DeepClone();
+            Check.DoesNotContain(Cmd(d), "--camera", $"the copied command must not open the webcam for effect {effect}");
+            Check.DoesNotContain(Builder.BuildWebQueryString(d), "camera=", $"the preview must not open the webcam for effect {effect}");
+            Check.False(Builder.BuildArguments(d, true, false).Contains("--camera"), $"the screensaver profile must not open the webcam for effect {effect}");
+            Check.False(Builder.BuildArguments(d, false, true).Contains("--camera"), $"Test must not open the webcam for effect {effect}");
+            Check.True(JsonNode.DeepEquals(saved, d), "building must leave the saved camera value for a return to Mirror");
+        }
+        var mirror = Draft();
+        mirror["effect"] = "mirror";
+        mirror["camera"] = true;
+        Check.Contains(Cmd(mirror), "--effect mirror --camera true", "Mirror still asks for the webcam");
+        Check.Contains(Builder.BuildWebQueryString(mirror), "camera=true", "the Mirror preview still asks for the webcam");
+        Check.True(Builder.BuildArguments(mirror, false, true).Contains("--camera"), "a Mirror test still asks for the webcam");
+        mirror["camera"] = false;
+        Check.Contains(string.Join(" ", Builder.BuildArguments(mirror, true, false)), "--camera false", "Mirror with every default still names the camera setting");
     }
 
     private static void WindowModeFlags()
