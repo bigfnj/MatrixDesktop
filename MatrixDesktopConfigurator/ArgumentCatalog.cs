@@ -243,7 +243,7 @@ internal static class ArgumentCatalog
                     Toggle("pictureCaptions", "Picture captions", "web", true, "pictureCaptions"),
                     Toggle("showClock", "Show clock", "web", false, "showClock"),
                     Toggle("clock12Hour", "12-hour clock", "web", false, "clock12Hour"),
-                    Toggle("desktopBackground", "Desktop snapshot background", "web", false, "desktopBackground", help: "Capture the desktop once when the app starts. This is a snapshot, not live wallpaper."),
+                    Toggle("desktopBackground", "Desktop snapshot background", "web", false, "desktopBackground", help: "Capture the desktop once when the app starts. Wallpaper mode and the screensaver preview use the desktop wallpaper only, never other windows. This is a snapshot, not live wallpaper."),
                     Number("pictureDepth", "Picture relief depth", "web", 0, 0, 2, 0.05, "3D luminance relief. Set to zero for a flat picture."),
                     Number("pictureScale", "Picture scale", "web", 1, 0.1, 3, 0.05, "Aspect-preserving picture size."),
                     Number("pictureDelay", "Picture delay (seconds)", "web", 20, 1, 180, 1, "Wait between picture sequences."),

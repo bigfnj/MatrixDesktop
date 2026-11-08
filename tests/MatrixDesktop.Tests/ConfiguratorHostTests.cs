@@ -9,7 +9,17 @@ internal static class ConfiguratorHostTests
     public static IEnumerable<(string, Action)> All =>
     [
         ("A second configurator on the same store is refused", SecondConfiguratorRefused),
+        ("The desktop snapshot help says wallpaper hosts use the wallpaper only", DesktopSnapshotHelp),
     ];
+
+    private static void DesktopSnapshotHelp()
+    {
+        // AUD-08 (help half). Killing mutation: restore the old help text, which did not say
+        // that wallpaper mode and the screensaver preview never capture other windows.
+        var field = ArgumentCatalog.Create().Groups.SelectMany(group => group.Fields).Single(candidate => candidate.Id == "desktopBackground");
+        Check.Contains(field.Help ?? string.Empty, "Wallpaper mode and the screensaver preview use the desktop wallpaper only, never other windows.",
+            "the help must say which hosts capture the live screen and which use the wallpaper image");
+    }
 
     private static void SecondConfiguratorRefused()
     {
