@@ -621,8 +621,19 @@ def check_glyph_intensity(browser, origin):
         page = browser.new_page(viewport={"width": 480, "height": 360})
         try:
             page.goto(f"{origin}/index.html?{query}", wait_until="load")
-            page.wait_for_function("document.querySelector('canvas') != null", timeout=20000)
-            page.wait_for_timeout(2500)
+            # Sample after two seconds of the renderer's own clock (it starts at the first frame)
+            # and at least ten frames. This used to sleep 2.5 s from when the canvas appeared,
+            # which happens before the renderer modules load, so a slow load sampled a page that
+            # had not drawn yet and blamed the uniform (CI on fd2358f, AUD-78). The deadline turns
+            # a renderer that never draws into a named failure instead of a hang.
+            try:
+                page.wait_for_function("window.matrixRuntimeDiagnostics?.ready === true"
+                                       " && matrixRuntimeDiagnostics.frames >= 10"
+                                       " && matrixRuntimeDiagnostics.simulationTime >= 2", timeout=60000)
+            except Exception:
+                state = page.evaluate("JSON.stringify({frames: window.matrixRuntimeDiagnostics?.frames ?? 0,"
+                                      " errors: window.matrixRuntimeDiagnostics?.errors ?? []})")
+                raise RuntimeError(f"{query} did not render 2 s of frames within 60 s: {state}") from None
             # Averaged over frames because rain is stochastic; one frame is not a measurement.
             return sum(mean_luma(page.screenshot()) for _ in range(3)) / 3
         finally:
@@ -630,8 +641,12 @@ def check_glyph_intensity(browser, origin):
 
     for effect, extra in (("palette", ""), ("stripe", "&effect=stripes")):
         base = f"suppressWarnings=true&numColumns=40{extra}"
-        dark = luma(f"{base}&glyphIntensity=0")
-        bright = luma(f"{base}&glyphIntensity=2")
+        try:
+            dark = luma(f"{base}&glyphIntensity=0")
+            bright = luma(f"{base}&glyphIntensity=2")
+        except RuntimeError as exc:
+            fail(f"glyphIntensity changes the {effect} render", f"could not sample: {exc}")
+            continue
         # Deliberately compares 0 against 2 rather than against the default. Comparing to the
         # default would also pass if the shader ignored the uniform and both runs were simply
         # the default render.
