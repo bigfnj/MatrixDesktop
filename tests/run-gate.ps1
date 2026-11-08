@@ -631,9 +631,17 @@ try {
                     -RedirectStandardOutput $zmatrixConfigLog -RedirectStandardError "$zmatrixConfigLog.err"
                 if ($zmatrixConfigRun.ExitCode -eq 0) { Test-Ok 'ZMatrix rebuilt metadata and structured web parsers agree' }
                 else { Test-Fail 'ZMatrix rebuilt metadata and structured web parsers agree' "see $zmatrixConfigLog" }
+                # AUD-13 drift guard: the C# effective-default tables against config.js and the stripe passes.
+                $defaultsTest = Join-Path $RepoRoot 'tests\effective-defaults-tests.mjs'
+                $defaultsLog = Join-Path $env:TEMP 'md-gate-effective-defaults.log'
+                $defaultsRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $defaultsTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
+                    -RedirectStandardOutput $defaultsLog -RedirectStandardError "$defaultsLog.err"
+                if ($defaultsRun.ExitCode -eq 0) { Test-Ok 'configurator effective defaults match the renderer for every version and effect' }
+                else { Test-Fail 'configurator effective defaults match the renderer for every version and effect' "see $defaultsLog" }
             } else {
                 Test-Unchecked 'UC3D rebuilt slider metadata and web parsers agree' 'node is not on PATH'
                 Test-Unchecked 'ZMatrix rebuilt metadata and structured web parsers agree' 'node is not on PATH'
+                Test-Unchecked 'configurator effective defaults match the renderer for every version and effect' 'node is not on PATH'
             }
             $smokeLog = Join-Path $env:TEMP 'md-gate-web-smoke.log'
             $smokeRun = Start-Process -FilePath $py -ArgumentList ('"' + $smokeScript + '"') -Wait -PassThru -NoNewWindow `
