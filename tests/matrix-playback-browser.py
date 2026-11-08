@@ -110,6 +110,14 @@ PLUG_HOST = """(() => {
 })();""" % json.dumps([PLUG_START, PLUG_CHANGED])
 
 
+FRAME_REQUESTS = """(() => {
+  // Count the page's animation frame requests, whoever makes them.
+  const request = window.requestAnimationFrame.bind(window);
+  window.__frameRequests = 0;
+  window.requestAnimationFrame = callback => { window.__frameRequests++; return request(callback); };
+})();"""
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     regl_main_override = None
     def log_message(self, *args):
@@ -463,6 +471,48 @@ def check_regl_plug_me_in_reload(context, port):
         page.close()
 
 
+def check_regl_paused_loop(context, port):
+    """A visible host pause must park the frame loop, not wake it at the display rate (R2-24).
+
+    A manual, fullscreen-app or battery pause leaves the page visible and running (AUD-06), so
+    a loop that only skipped drawing while paused still requested a frame for every display
+    refresh. A resume must start the loop again.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(FRAME_REQUESTS)
+    host = "paused => window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: { paused } }))"
+    counts = "({ requests: window.__frameRequests, frames: matrixRuntimeDiagnostics.frames })"
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&numColumns=40", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+        start = page.evaluate(counts)
+        page.wait_for_timeout(1000)
+        playing = page.evaluate(counts)["requests"] - start["requests"]
+        assert playing >= 3, f"the counter saw {playing} frame requests in 1 s of play, so it cannot see a running loop"
+        page.evaluate(host, True)
+        page.wait_for_timeout(300)
+        before = page.evaluate(counts)
+        frozen = capture(page)
+        page.wait_for_timeout(2000)
+        after = page.evaluate(counts)
+        assert after["requests"] == before["requests"], f"a paused renderer requested {after['requests'] - before['requests']} animation frames in 2 s"
+        assert after["frames"] == before["frames"], f"a paused renderer drew {after['frames'] - before['frames']} frames"
+        assert ImageChops.difference(frozen, capture(page)).getbbox() is None, "the paused frame changed"
+        page.evaluate(host, False)
+        try:
+            page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 2", arg=after["frames"], timeout=5000)
+        except Exception:
+            raise AssertionError(f"the renderer did not draw again within 5 s of a resume: {page.evaluate(counts)}") from None
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+        return playing
+    finally:
+        page.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--renderer", choices=["regl", "webgpu", "both"], default="both")
@@ -545,6 +595,8 @@ def main():
                         print("PASS original Matrix regl fps=0 and once draw one still frame that survives a window resize, and an fps=30 control keeps animating", flush=True)
                         check_regl_plug_me_in_reload(context, server.server_port)
                         print("PASS Plug me in survives a recovery reload and a navigation to the startup query; a changed configuration still shows the software rendering notice", flush=True)
+                        playing = check_regl_paused_loop(context, server.server_port)
+                        print(f"PASS original Matrix regl parks its frame loop through a visible host pause (0 frame requests in 2 s against {playing} in 1 s of play) and resumes", flush=True)
                 finally:
                     context.close()
             browser.close()

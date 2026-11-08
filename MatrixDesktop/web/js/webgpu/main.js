@@ -1,5 +1,5 @@
 import createCanvasSize from "../canvasSize.js";
-import { createPlaybackClock, unseenEpoch } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback, unseenEpoch } from "../hostPlayback.js";
 import { createShaderTime, introSafeLimits } from "../shaderTime.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
@@ -54,6 +54,7 @@ export default async (canvas, config) => {
 	let device;
 	let canvasContext;
 	let frameRequest;
+	let parked = false, stopListening = null;
 	let sizeTracker;
 	let gpuFailed = false;
 	let gpuErrors = 0;
@@ -95,6 +96,7 @@ export default async (canvas, config) => {
 		clock.dispose();
 		window.removeEventListener("pagehide", cleanup);
 		cancelAnimationFrame(frameRequest);
+		stopListening?.();
 		sizeTracker?.cleanup();
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
@@ -215,7 +217,9 @@ export default async (canvas, config) => {
 		if (cleanedUp || deviceLost) return;
 		const wall = now;
 		now = clock.seconds(now) * 1000;
-		if (clock.paused) { frameRequest = requestAnimationFrame(renderLoop); return; }
+		// R2-24: a visible host pause (AUD-06) parks the loop instead of waking it at the display
+		// rate; the resume listener below requests the next frame.
+		if (clock.paused) { parked = true; return; }
 		if (isNaN(start)) {
 			start = now;
 		}
@@ -272,6 +276,11 @@ export default async (canvas, config) => {
 		destroyContext();
 		return;
 	}
+	stopListening = subscribeHostPlayback((paused) => {
+		if (paused || !parked || cleanedUp || deviceLost) return;
+		parked = false;
+		frameRequest = requestAnimationFrame(renderLoop);
+	});
 	frameRequest = requestAnimationFrame(renderLoop);
 	} catch (error) {
 		diagnostics.errors.push(error.message);

@@ -9,7 +9,7 @@ import makeQuiltPass from "./quiltPass.js";
 import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
-import { createPlaybackClock, unseenEpoch } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback, unseenEpoch } from "../hostPlayback.js";
 import { createShaderTime, introSafeLimits, shaderTick } from "../shaderTime.js";
 
 const effects = {
@@ -80,7 +80,7 @@ export default async (canvas, config) => {
 	let pipeline = [];
 	let cleanedUp = false;
 	let regl;
-	let tick;
+	let frameRequest = null, parked = false, stopListening = null;
 	let contextLost = false;
 	const cleanup = () => {
 		if (cleanedUp) {
@@ -90,7 +90,8 @@ export default async (canvas, config) => {
 		diagnostics.ready = false; diagnostics.disposed = true;
 		clock.dispose();
 		window.removeEventListener("pagehide", cleanup);
-		tick?.cancel();
+		cancelAnimationFrame(frameRequest);
+		stopListening?.();
 		window.removeEventListener("resize", resize);
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
@@ -173,14 +174,22 @@ export default async (canvas, config) => {
 	diagnostics.initialized = true;
 	diagnostics.dispose = cleanup;
 
-	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
+	// R2-24: a manual, fullscreen-app or battery pause leaves the page visible (AUD-06), so the
+	// loop parks while paused instead of waking at the display rate, and the resume listener
+	// below starts it again. It is this file's own requestAnimationFrame chain, as in UC3D and
+	// ZMatrix: regl's stop hands cancelAnimationFrame its callback instead of the request id, so
+	// after a cancel regl's next request stays pending, and a loop made again at that moment
+	// would run twice per frame. regl.poll() and the flush are what regl.frame did around each
+	// callback.
+	const draw = () => {
+		frameRequest = null;
 		// AUD-19: isContextLost() turns true before the browser queues webglcontextlost, so a
 		// frame in between finds the canvas blank and must clear ready, as UC3D and ZMatrix do.
 		if (contextLost || regl._gl.isContextLost()) { diagnostics.ready = false; return; }
-		if (clock.paused) return;
-		if (singleFrame) {
-			tick.cancel();
-		}
+		if (clock.paused) { parked = true; return; }
+		if (!singleFrame) frameRequest = requestAnimationFrame(draw);
+		regl.poll();
+		const viewportWidth = regl._gl.drawingBufferWidth, viewportHeight = regl._gl.drawingBufferHeight;
 
 		const now = clock.seconds() * 1000;
 
@@ -221,7 +230,14 @@ export default async (canvas, config) => {
 			stillShown = true;
 			if (config.useCamera) stopCamera();
 		}
+		regl._gl.flush();
+	};
+	stopListening = subscribeHostPlayback((paused) => {
+		if (paused || !parked || cleanedUp) return;
+		parked = false;
+		frameRequest = requestAnimationFrame(draw);
 	});
+	frameRequest = requestAnimationFrame(draw);
 	} catch (error) {
 		diagnostics.errors.push(error.message);
 		cleanup();

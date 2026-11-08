@@ -638,6 +638,14 @@ let pendingFrame = null, lastFrame = null;
 // One document for every fake page: js/hostPlayback.js listens for visibilitychange on the
 // document it finds when first imported.
 const pageDocument = new Events();
+// js/hostPlayback.js adds its matrix-host-state listener to window once, when first imported,
+// and every case clears window's listeners, so keep that listener to pause the host (R2-24).
+let hostState = null;
+const addWindowListener = window.addEventListener;
+window.addEventListener = function (type, fn) {
+	if (type === "matrix-host-state") hostState ??= fn;
+	return addWindowListener.call(this, type, fn);
+};
 const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution, params = {} }) => {
 	const run = {};
 	const borrowed = { createView: () => ({}), destroy() { throw new Error("canvas texture destroyed"); } };
@@ -825,6 +833,35 @@ await test("WebGPU Matrix renderer at fps 0 draws one still frame and stops", as
 		control.frame(16);
 		assert.notEqual(pendingFrame, null, "fps 30 must keep animating");
 	} finally { control.dispose(); }
+});
+
+await test("WebGPU Matrix renderer parks its frame loop through a host pause (R2-24)", async () => {
+	assert.equal(typeof hostState, "function", "js/hostPlayback.js no longer listens for matrix-host-state on window");
+	const host = (paused) => hostState({ detail: { paused } });
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	const request = globalThis.requestAnimationFrame;
+	let requests = 0;
+	globalThis.requestAnimationFrame = (fn) => { requests++; return request(fn); };
+	try {
+		run.frame(16); run.frame(33);
+		assert.notEqual(pendingFrame, null, "a playing renderer must request its next frame");
+		// A pause and resume before the requested frame runs must not request a second one.
+		host(true); host(false);
+		assert.equal(requests, 2, "a resume with a frame still pending requested another");
+		host(true);
+		run.frame(50);
+		assert.equal(pendingFrame, null, "a paused renderer must not request another frame");
+		const frames = run.diagnostics.frames;
+		host(false);
+		assert.notEqual(pendingFrame, null, "a resume must request a frame");
+		run.frame(66);
+		assert.equal(run.diagnostics.frames, frames + 1, "the frame after a resume must draw");
+		assert.notEqual(pendingFrame, null, "the resumed renderer must keep requesting frames");
+	} finally {
+		host(false);
+		run.dispose();
+		globalThis.requestAnimationFrame = request;
+	}
 });
 
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);
