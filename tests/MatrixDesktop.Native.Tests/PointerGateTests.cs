@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using MatrixDesktop;
 
 // The wallpaper pointer gate with an injected foreground probe, plus the real probe's
@@ -9,7 +10,7 @@ internal static class PointerGateTests
         ("Pointer gate throttles moves before probing the foreground", ThrottleBeforeProbe),
         ("Pointer gate forwards the same events as before", ForwardedSequence),
         ("Desktop foreground probe allocates nothing per call", ProbeAllocatesNothing),
-        ("Desktop shell class check reads real window classes", ShellClassReadsRealClasses),
+        ("Desktop shell class check reads real window classes without a shell session", ShellClassReadsRealClasses),
     ];
 
     private const int Move = 0x0200, LeftDown = 0x0201;
@@ -47,15 +48,37 @@ internal static class PointerGateTests
 
     private static void ShellClassReadsRealClasses()
     {
-        var progman = FindWindow("Progman", null);
-        var taskbar = FindWindow("Shell_TrayWnd", null);
-        Require(progman != 0 && taskbar != 0, "This check needs the interactive shell's Progman and taskbar windows.");
-        Require(DesktopWindowHost.ClassOf(progman) == "Progman", "Control: the string class read must name Progman.");
-        Require(DesktopWindowHost.IsShellClass(progman), "The in-place class check must accept the real Progman window.");
-        Require(!DesktopWindowHost.IsShellClass(taskbar), "The in-place class check must reject the taskbar (Shell_TrayWnd).");
+        // Message-only windows of classes registered here, so the check needs no shell
+        // session (the tier-1 gate runs this suite on a hosted runner too).
+        foreach (var (className, accepted) in new[] { ("Progman", true), ("WorkerW", true), ("SHELLDLL_DefView", true), ("Shell_TrayWnd", false), ("Worker", false), ("WorkerWx", false) })
+        {
+            var instance = GetModuleHandleW(null);
+            var windowClass = new WndClass { WndProc = GetProcAddress(GetModuleHandleW("user32.dll"), "DefWindowProcW"), Instance = instance, ClassName = className };
+            var registered = RegisterClassW(ref windowClass) != 0;
+            if (!registered && Marshal.GetLastWin32Error() != 1410) throw new InvalidOperationException($"Could not register the {className} test class: {Marshal.GetLastWin32Error()}.");
+            var window = CreateWindowExW(0, className, null, 0, 0, 0, 0, 0, -3, 0, instance, 0);
+            try
+            {
+                Require(window != 0, $"Could not create a {className} message-only window: {Marshal.GetLastWin32Error()}.");
+                Require(DesktopWindowHost.ClassOf(window) == className, $"Control: the string class read must name {className}.");
+                Require(DesktopWindowHost.IsShellClass(window) == accepted, $"The in-place class check must {(accepted ? "accept" : "reject")} {className}.");
+            }
+            finally
+            {
+                if (window != 0) DestroyWindow(window);
+                if (registered) UnregisterClassW(className, instance);
+            }
+        }
         Require(!DesktopWindowHost.IsShellClass(0), "The in-place class check must reject a missing window.");
     }
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    private static extern nint FindWindow(string className, string? title);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WndClass { public uint Style; public nint WndProc; public int ClassExtra, WindowExtra; public nint Instance, Icon, Cursor, Background; public string? MenuName; public string ClassName; }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern ushort RegisterClassW(ref WndClass windowClass);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool UnregisterClassW(string className, nint instance);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern nint CreateWindowExW(int exStyle, string className, string? title, int style, int x, int y, int width, int height, nint parent, nint menu, nint instance, nint parameter);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(nint window);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern nint GetModuleHandleW(string? name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)] private static extern nint GetProcAddress(nint module, string name);
 }
