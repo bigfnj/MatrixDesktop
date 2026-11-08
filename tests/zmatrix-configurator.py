@@ -73,9 +73,9 @@ STUB = """
   // that order, so the C# harness requests for them queue here. Run concurrently, a slow harness
   // start answered an older command last and the page kept the command of an edit it had already
   // replaced. buildWebQuery is not queued: the host awaits the media bridge for it.
-  // __hostDelay holds the next queued request back that many milliseconds, as a slow start does.
   // A body is serialized when the page posts it, as WebView2 does: payload.draft is the page's
   // live draft, which a later edit changes while the request waits its turn.
+  // check_host_reply_order holds this queue to the host's order.
   const askHost = async body => {
     const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body});
     if (!response.ok) throw new Error(await response.text());
@@ -84,12 +84,7 @@ STUB = """
   let hostQueue = Promise.resolve();
   const askHostInOrder = msg => {
     const body = JSON.stringify(msg);
-    const delay = window.__hostDelay || 0;
-    window.__hostDelay = 0;
-    const answer = hostQueue.then(async () => {
-      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-      return askHost(body);
-    });
+    const answer = hostQueue.then(() => askHost(body));
     hostQueue = answer.catch(() => {});
     return answer;
   };
@@ -1151,27 +1146,55 @@ def check_effective_defaults(page, fixture):
     assert saved(page)["numColumns"] == 80, "Columns 80 on operator was not kept"
 
 
+# Holds the answer to the first stripes buildCommand at the page's fetch, outside the stub, as a
+# slow harness start would. The witness records how long it was held and how many builds the
+# page had posted when it was let go.
+HOLD_STRIPES_BUILD = """hold => {
+  const realFetch = window.fetch.bind(window);
+  window.__heldBuild = null;
+  window.fetch = async (url, init) => {
+    const response = await realFetch(url, init);
+    const message = url === '/__host' ? JSON.parse(init.body) : null;
+    if (!window.__heldBuild && message?.type === 'buildCommand' && message.payload?.draft?.effect === 'stripes') {
+      const witness = window.__heldBuild = {held: 0, builds: 0};
+      const started = performance.now();
+      await new Promise(resolve => setTimeout(resolve, hold));
+      witness.held = performance.now() - started;
+      witness.builds = window.__smokeMessages.filter(m => m.type === 'buildCommand').length;
+    }
+    return response;
+  };
+}"""
+
+
 def check_host_reply_order(page, _fixture):
-    # The real host answers command builds one at a time in arrival order, so a slow earlier
-    # build (a cold harness start under load) holds the next one back rather than landing after
-    # it: the command shown is the latest edit's. Concurrent answers once timed out the check above.
+    # This holds the STUB to ConfiguratorForm's order contract; it is not a page guarantee.
+    # app.js updateCommand shows whichever buildCommand reply comes last and has no stale-reply
+    # guard, because the host answers buildCommand synchronously and replies in arrival order.
+    # The stripes build's answer is held at the page's fetch while the pride edit posts the next
+    # build, so a stub that forwards the two concurrently delivers pride first and the stale
+    # stripes reply last. Concurrent forwarding once timed out the AUD-13 check above.
+    hold = 1500
     builds = "window.__smokeMessages.filter(m=>m.type==='buildCommand').length"
     answered = "window.__smokeReplies.filter(r=>r.type==='buildCommand').length"
     page.wait_for_function(builds + ">0 && " + answered + "===" + builds)  # init's build has settled
     start = page.evaluate(builds)
-    page.evaluate("window.__hostDelay=1500")
+    page.evaluate(HOLD_STRIPES_BUILD, hold)
     field(page, "effect").locator("select").select_option("stripes")
     page.wait_for_function(builds + "===" + str(start + 1))
     field(page, "effect").locator("select").select_option("pride")
     page.wait_for_function(answered + "===" + str(start + 2))
     page.wait_for_timeout(200)  # both replies received
+    witness = page.evaluate("window.__heldBuild")
+    assert witness and witness["held"] >= hold - 50, "witness: the stripes build's answer was not held back: " + str(witness)
+    assert witness["builds"] == start + 2, "witness: the pride build was not posted while the stripes answer was held: " + str(witness)
     command = page.locator("#commandOutput").input_value()
     assert "--effect pride" in command, "a slow earlier command reply replaced the latest edit's command: " + command
 
 
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
-    ("A slow earlier command reply never replaces the latest edit's command", check_host_reply_order),
+    ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
     ("ZMatrix catalog renders every structured control", check_catalog),
     ("ZMatrix editor changes survive real C# command import", check_editors),
     ("ZMatrix scene and cleanup dependencies retain disabled values", check_gating),
