@@ -204,24 +204,40 @@ const syncScratchDraft = () => {
 	return state.scratchDraft;
 };
 
+// requestHost posts before its first await, so a call orders the save at once.
+const saveDraftNow = async () => {
+	try {
+		await requestHost("saveDraft", {
+			draft: state.draft,
+			selectedPresetId: state.selectedPresetId,
+			scratchDraft: syncScratchDraft(),
+		});
+		// Unconditional. The old guard was `if (!state.dirty)`, which could never be
+		// true here because updateDraftValue sets dirty before scheduling the save.
+		setSaveState("Draft saved");
+	} catch (error) {
+		setSaveState("Save failed");
+		setStatus(error.message, "error");
+	}
+};
+
 const scheduleSaveDraft = () => {
 	window.clearTimeout(state.saveTimer);
 	setSaveState("Saving…");
-	state.saveTimer = window.setTimeout(async () => {
-		try {
-			await requestHost("saveDraft", {
-				draft: state.draft,
-				selectedPresetId: state.selectedPresetId,
-				scratchDraft: syncScratchDraft(),
-			});
-			// Unconditional. The old guard was `if (!state.dirty)`, which could never be
-			// true here because updateDraftValue sets dirty before scheduling the save.
-			setSaveState("Draft saved");
-		} catch (error) {
-			setSaveState("Save failed");
-			setStatus(error.message, "error");
-		}
+	state.saveTimer = window.setTimeout(() => {
+		state.saveTimer = 0;
+		saveDraftNow();
 	}, 250);
+};
+
+// confirm() and prompt() block the page, so a save armed just before one comes due only after
+// the preset request that follows the dialog, and stores the selection from before it. The
+// preset actions post a pending save first instead.
+const flushPendingDraftSave = () => {
+	if (!state.saveTimer) return;
+	window.clearTimeout(state.saveTimer);
+	state.saveTimer = 0;
+	saveDraftNow();
 };
 
 const scheduleCommandBuild = () => {
@@ -1135,6 +1151,7 @@ const refreshAll = () => {
 };
 
 const saveCurrentPreset = async (forceName = false) => {
+	flushPendingDraftSave();
 	const existing = state.presets.find((preset) => preset.id === state.selectedPresetId);
 	let name = existing?.name;
 	if (!name || forceName) {
@@ -1185,6 +1202,7 @@ const deletePreset = async () => {
 		setStatus("Select a saved preset to delete.", "error");
 		return;
 	}
+	flushPendingDraftSave();
 	if (!window.confirm(`Delete "${existing.name}"?`)) return;
 	try {
 		const result = await requestHost("deletePreset", { id: existing.id });

@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from urllib.parse import quote
 from pathlib import Path
@@ -83,7 +84,7 @@ STUB = """
       if(msg.type==='buildWebQuery' && window.__holdPreviewReplies) {
         window.__heldPreviewReplies.push({id:msg.id,ok:true,payload});return;
       }
-      setTimeout(() => window.configHost.receive({id:msg.id,ok:true,payload}),0);
+      setTimeout(() => window.configHost.receive({id:msg.id,ok:true,payload}),window.__replyDelay||0);
     } catch (error) { window.configHost.receive({id:msg.id,ok:false,payload:{message:String(error)}}); }
   }};
 })();
@@ -468,6 +469,92 @@ def check_scratch_draft(page, fixture):
             fresh.close()
 
 
+def held_dialog(answer=None):
+    # The page stays blocked in confirm()/prompt() past the 250 ms draft-save deadline. Callers
+    # also give the stub a real host's reply latency (15 ms), or the reply beats the overdue save.
+    def handle(dialog):
+        time.sleep(0.35)
+        dialog.accept(answer) if answer is not None else dialog.accept()
+    return handle
+
+
+def edit_then_click(page, selector):
+    # numColumns 77 arms the draft save and the click follows in the same task, so the save is
+    # still pending when the action starts; the state at click time is the witness.
+    return page.evaluate("""selector => {
+        const saves = () => window.__smokeMessages.filter(m => m.type === 'saveDraft').length;
+        const before = window.__smokeMessages.length, count = saves();
+        const input = document.querySelector('[data-field="numColumns"] input[type=number]');
+        input.value = '77'; input.dispatchEvent(new Event('input', {bubbles: true}));
+        const button = document.querySelector(selector);
+        let atClick = null;
+        button.addEventListener('click', () => {
+            atClick = {saves: saves(), label: document.querySelector('#saveState').textContent};
+        }, {capture: true, once: true});
+        button.click();
+        return {before, count, atClick};
+    }""", selector)
+
+
+def preset_messages(page, start):
+    sent = []
+    for message in page.evaluate("window.__smokeMessages")[start:]:
+        payload = message["payload"]
+        if message["type"] == "saveDraft":
+            sent.append("saveDraft(" + str(payload["selectedPresetId"]) + "," + str(payload["draft"]["numColumns"]) + ")")
+        elif message["type"] in ("deletePreset", "savePreset"):
+            sent.append(message["type"] + "(" + (payload.get("id") or payload.get("preset", {}).get("name")) + ")")
+    return sent
+
+
+def check_pending_save_delete(page, _fixture):
+    page.locator("#presetSelect").select_option("alpha")
+    page.wait_for_timeout(400)
+    page.evaluate("window.__replyDelay=15")
+    page.once("dialog", held_dialog())
+    witness = edit_then_click(page, "#deletePresetButton")
+    assert witness["atClick"] == {"saves": witness["count"], "label": "Saving…"}, "the draft save was not pending at the click: " + json.dumps(witness)
+    page.wait_for_function("window.__smokeReplies.some(r=>r.type==='deletePreset')")
+    page.wait_for_timeout(400)
+    sent = preset_messages(page, witness["before"])
+    assert sent == ["saveDraft(alpha,77)", "deletePreset(alpha)"], "a draft save pending at Delete arrived out of order: " + ", ".join(sent)
+    host = page.evaluate("window.__host")
+    assert host["selectedPresetId"] is None and host["lastDraft"]["numColumns"] == 77, "the store kept a deleted selection or lost the edit"
+
+
+def check_pending_save_save_as(page, _fixture):
+    page.locator("#presetSelect").select_option("alpha")
+    page.wait_for_timeout(400)
+    page.evaluate("window.__replyDelay=15")
+    page.once("dialog", held_dialog("Gamma"))
+    witness = edit_then_click(page, "#saveAsPresetButton")
+    assert witness["atClick"] == {"saves": witness["count"], "label": "Saving…"}, "the draft save was not pending at the click: " + json.dumps(witness)
+    page.wait_for_function("window.__smokeReplies.some(r=>r.type==='savePreset')")
+    page.wait_for_timeout(400)
+    sent = preset_messages(page, witness["before"])
+    assert sent == ["saveDraft(alpha,77)", "savePreset(Gamma)"], "a draft save pending at Save As arrived out of order: " + ", ".join(sent)
+    host = page.evaluate("window.__host")
+    gamma = next(preset for preset in host["userPresets"] if preset["name"] == "Gamma")
+    assert host["selectedPresetId"] == gamma["id"] and host["lastDraft"]["numColumns"] == 77, "the store did not select the new preset with the edit"
+
+
+def check_settled_save(page, _fixture):
+    # Control: nothing pending, so Delete must not post a draft save of its own.
+    page.locator("#presetSelect").select_option("alpha")
+    field(page, "numColumns").locator('input[type="number"]').fill("77")
+    page.wait_for_timeout(600)
+    start = page.evaluate("window.__smokeMessages.length")
+    assert preset_messages(page, 0)[-1] == "saveDraft(alpha,77)", "the edit was not saved before the control"
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#deletePresetButton").click()
+    page.wait_for_function("window.__smokeReplies.some(r=>r.type==='deletePreset')")
+    page.wait_for_timeout(400)
+    sent = preset_messages(page, start)
+    assert sent == ["deletePreset(alpha)"], "Delete posted a draft save with nothing pending: " + ", ".join(sent)
+    host = page.evaluate("window.__host")
+    assert host["selectedPresetId"] is None and host["lastDraft"]["numColumns"] == 77, "the control store is wrong"
+
+
 def check_test_exited(page, _fixture):
     stop, status = page.locator("#stopButton"), page.locator("#statusLine")
     launches = "window.__smokeReplies.filter(r=>r.type==='testCommand').length"
@@ -539,8 +626,11 @@ CHECKS = [
     ("Rename changes only the preset name and keeps its saved values", check_rename),
     ("Stop Test follows the host's exit notice for the running test only", check_test_exited),
     ("Last draft brings back the unlinked draft after a preset was chosen", check_scratch_draft),
+    ("A draft save pending at Delete lands before the delete", check_pending_save_delete),
+    ("A draft save pending at Save As lands before the new preset", check_pending_save_save_as),
+    ("Delete with no pending draft save posts no save of its own", check_settled_save),
 ]
-PRESET_CHECKS = {check_rename, check_scratch_draft}
+PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
 
 def main():
