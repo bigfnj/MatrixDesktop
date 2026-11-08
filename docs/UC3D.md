@@ -66,9 +66,11 @@ Original controls starts with bloom disabled, matching the native rain compositi
   glyph depth in 3D. Captions use imported titles or personal filenames.
 - Enable the clock for local 12- or 24-hour time. Clock size is independent
   of glyph size.
-- **Desktop snapshot background** captures the desktop once before startup.
-  It does not create live wallpaper. The snapshot stays in memory and is not
-  written into the staged web assets.
+- **Desktop snapshot background** copies the screen once before the window shows
+  in fullscreen, windowed and `/s` launches; wallpaper mode and the screensaver
+  preview use the desktop wallpaper image only, never other windows. It does not
+  create live wallpaper. The snapshot stays in memory and is not written into the
+  staged web assets.
 - Sound starts off. Choose code sizzle or ambient music. A local music file
   replaces synthesized ambient music. The preview starts muted; its Test sound
   button is an explicit playback action. If autoplay is blocked, use Enable
@@ -89,7 +91,9 @@ argument guide. Useful defaults are `scene=matrix`, `showPictures=false`,
 and `mouseRotation=false`. Selecting UC3D alone does not opt into desktop
 capture, pictures or sound. `fps=0` and `once=true` draw one frame. Original controls
 uses a ten-second simulation snapshot at the selected animation speed for that
-frame; at speed 1 the startup ramp is complete.
+frame; at speed 1 the startup ramp is complete. At animation speed 0 the streams
+first enter as they would in ten seconds at speed 1, so both the animated and the
+single-frame views show a populated frozen field.
 Original pictures form through newly spawned streams, pan across the sampled
 image and retain those streams until they fall clear. The next image and selected
 gap begin after that clearance, so total time between pictures exceeds the forming
