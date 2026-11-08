@@ -670,7 +670,14 @@ try {
                     $bad = @([regex]::Matches($smokeOut, '(?m)^\s+FAIL\s+(.+)$') | ForEach-Object { $_.Groups[1].Value })
                     Test-Fail 'headless web smoke' ($bad -join ' | ')
                 }
-                2 { Test-Unchecked 'headless web smoke' 'playwright or its chromium build is unavailable for this interpreter' }
+                # UNCHECKED only with the UNVERIFIED line web-smoke.py prints on its cannot-verify
+                # paths, so the reason names the real cause and the logs; exit 2 without it is a
+                # FAIL, as for the other Python cases (Get-GateCaseVerdict, gate-lib.ps1; R2-35).
+                2 {
+                    $smokeVerdict = Get-GateCaseVerdict -ExitCode 2 -Log $smokeLog
+                    if ($smokeVerdict.Outcome -eq 'unchecked') { Test-Unchecked 'headless web smoke' $smokeVerdict.Detail }
+                    else { Test-Fail 'headless web smoke' $smokeVerdict.Detail }
+                }
                 default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
             }
         }

@@ -1117,7 +1117,9 @@ def main():
         from playwright.sync_api import sync_playwright
         from PIL import Image  # noqa: F401  -- mean_luma needs it; fail fast, not mid-run
     except ImportError as exc:
-        print(f"  a dependency is missing for this interpreter: {exc}", file=sys.stderr)
+        # The gate counts exit 2 as UNCHECKED only with this witness at the start of a line,
+        # because argparse usage errors and a missing script exit 2 as well (R2-35).
+        print(f"UNVERIFIED: a dependency is missing for this interpreter: {exc}", file=sys.stderr)
         return 2
 
     print("=== web smoke: harness ===")
@@ -1140,7 +1142,7 @@ def main():
                 browser = pw.chromium.launch(args=["--use-gl=angle", "--use-angle=swiftshader",
                                                    "--enable-unsafe-swiftshader"])
             except Exception as exc:
-                print(f"  chromium is unavailable: {exc}", file=sys.stderr)
+                print(f"UNVERIFIED: chromium is unavailable: {exc}", file=sys.stderr)
                 return 2
 
             print("=== web smoke: configurator ===")

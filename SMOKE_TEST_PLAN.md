@@ -246,10 +246,10 @@ For a new check or gate, deliberately introduce the defect it should detect,
 confirm the intended named failure, restore the source and rerun. For compiled
 tests, verify the artifact was rebuilt and its test witness actually executed.
 A probe that exits 2 for an unavailable environment must also print a line that
-starts with `CANNOT VERIFY`, `UNVERIFIED` or `UNCHECKED`. In the gate, the Python
-cases under `tier 1: UC3D importer and WebGL smoke` and the tier 3 wallpaper,
-screensaver and configurator cases treat exit 2 without that line as a failure,
-because argparse usage errors and missing scripts also exit 2.
+starts with `CANNOT VERIFY`, `UNVERIFIED` or `UNCHECKED`. In the gate, the headless
+web smoke, the Python cases under `tier 1: UC3D importer and WebGL smoke` and the
+tier 3 wallpaper, screensaver and configurator cases treat exit 2 without that
+line as a failure, because argparse usage errors and missing scripts also exit 2.
 
 ## Interactive and hardware checks
 

@@ -691,6 +691,77 @@ try {
         Assert-Equal 1 $witness.Count "the block ran to the Python check (reported: $($all -join ' / '))"
         Assert-Equal 0 @($all | Where-Object { $_ -like 'FAIL|*' }).Count "nothing failed (reported: $($all -join ' / '))"
     }
+
+    # ------------------------------------------------------------ R2-35 headless web smoke exit 2
+
+    Invoke-TestCase 'R2-35 (a) the gate counts the web smoke''s exit 2 as UNCHECKED only with a witness line, naming the logs' {
+        # The real exit-2 clause of run-gate.ps1's switch on the web smoke's exit code.
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $switches = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.SwitchStatementAst] -and $n.Condition.Extent.Text -eq '$smokeExit' }, $true))
+        Assert-Equal 1 $switches.Count 'run-gate.ps1 has one switch on $smokeExit'
+        $clauses = @($switches[0].Clauses | Where-Object { $_.Item1.Extent.Text -eq '2' })
+        Assert-Equal 1 $clauses.Count 'that switch has one clause for exit 2'
+        $body = $clauses[0].Item2.Extent.Text
+        $block = [scriptblock]::Create($body.Substring(1, $body.Length - 2))
+        $script:Reported = New-Object 'Collections.Generic.List[string]'
+        function Test-Ok { param([string]$Msg) $script:Reported.Add("ok|$Msg") }
+        function Test-Fail { param([string]$Msg, [string]$Detail) $script:Reported.Add("FAIL|$Msg|$Detail") }
+        function Test-Unchecked { param([string]$Msg, [string]$Why) $script:Reported.Add("UNCHECKED|$Msg|$Why") }
+        $legs = @(
+            # web-smoke.py's message before R2-35: no witness, so a harness failure.
+            @{ Label = 'no-witness'; Err = "  chromium is unavailable: x`n"; Want = 'FAIL|headless web smoke|harness error: exit 2 without a cannot-verify witness; see *' }
+            @{ Label = 'witness'; Err = "UNVERIFIED: chromium is unavailable: x`n"; Want = 'UNCHECKED|headless web smoke|UNVERIFIED: chromium is unavailable: x; see *' }
+        )
+        foreach ($leg in $legs) {
+            $script:Reported.Clear()
+            $smokeLog = New-LogPath ('r2-35-' + $leg.Label)
+            [IO.File]::WriteAllText($smokeLog, "=== web smoke: harness ===`n")
+            [IO.File]::WriteAllText("$smokeLog.err", $leg.Err)
+            $smokeExit = 2
+            $smokeOut = "=== web smoke: harness ===`n" + $leg.Err
+            . $block
+            $all = @($script:Reported)
+            Assert-Equal 1 $all.Count "$($leg.Label): one report line (reported: $($all -join ' / '))"
+            if ($all[0] -notlike $leg.Want) { throw "$($leg.Label): reported '$($all[0])', expected '$($leg.Want)'" }
+            if ($all[0] -notlike "*$smokeLog.err*") { throw "$($leg.Label): the reason does not name $smokeLog.err ($($all[0]))" }
+        }
+    }
+
+    # A copy of the real web-smoke.py beside a stub fixture: the script exits 3 before its imports
+    # when its repo has no loadState fixture.
+    function New-WebSmokeCopy {
+        $root = Join-Path $scratch 'websmoke'
+        $copy = Join-Path $root 'tests\web-smoke.py'
+        if (-not (Test-Path -LiteralPath $copy -PathType Leaf)) {
+            foreach ($dir in 'tests', 'artifacts\gate') { New-Item -ItemType Directory -Force -Path (Join-Path $root $dir) | Out-Null }
+            Copy-Item -LiteralPath (Join-Path $here 'web-smoke.py') -Destination $copy
+            [void](New-StubFile 'websmoke\artifacts\gate\loadState.json' '{}')
+        }
+        return $copy
+    }
+
+    Invoke-TestCase 'R2-35 (b) web-smoke.py without its dependencies exits 2 with an UNVERIFIED line, which the gate counts as UNCHECKED' {
+        if (-not $Python) { return 'CANNOT VERIFY R2-35 (b): no Python interpreter' }
+        $log = New-LogPath 'r2-35-dependency'
+        # -S leaves site-packages off sys.path, so the Playwright import fails.
+        $verdict = Invoke-GateChildCase -FilePath $Python -ArgumentList ('-S "' + (New-WebSmokeCopy) + '"') -Log $log
+        Assert-Equal 2 $verdict.ExitCode "a missing dependency is the cannot-verify exit ($($verdict.Detail))"
+        Assert-Equal 'unchecked' $verdict.Outcome "the exit 2 carries its witness ($($verdict.Detail))"
+        if ($verdict.Detail -notlike 'UNVERIFIED: a dependency is missing for this interpreter: *') { throw "the reason does not name the missing dependency ($($verdict.Detail))" }
+    }
+
+    Invoke-TestCase 'R2-35 (c) web-smoke.py exits 2 with an UNVERIFIED line when chromium cannot start' {
+        if (-not $Python) { return 'CANNOT VERIFY R2-35 (c): no Python interpreter' }
+        if ((Invoke-NativeQuiet -FilePath $Python -ArgumentList @('-c', 'import playwright, PIL')) -ne 0) { return 'CANNOT VERIFY R2-35 (c): this Python lacks Playwright or Pillow' }
+        $browsers = Join-Path $scratch 'no-browsers'
+        New-Item -ItemType Directory -Force -Path $browsers | Out-Null
+        $log = New-LogPath 'r2-35-chromium'
+        # An empty browser folder: Playwright imports, and launching chromium fails.
+        $verdict = Invoke-GateChildCase -FilePath $Python -ArgumentList ('"' + (New-WebSmokeCopy) + '"') -Log $log -Environment @{ PLAYWRIGHT_BROWSERS_PATH = $browsers }
+        Assert-Equal 2 $verdict.ExitCode "chromium that cannot start is the cannot-verify exit ($($verdict.Detail))"
+        Assert-Equal 'unchecked' $verdict.Outcome "the exit 2 carries its witness ($($verdict.Detail))"
+        if ($verdict.Detail -notlike 'UNVERIFIED: chromium is unavailable: *') { throw "the reason does not say chromium is unavailable ($($verdict.Detail))" }
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
