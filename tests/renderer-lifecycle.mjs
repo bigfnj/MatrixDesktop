@@ -217,6 +217,35 @@ await test("a lost renderer reloads within a budget and then explains itself", a
 	assert.equal(page.log.errors.length, 1);
 });
 
+// R2-55: after repeated GPU resets Chromium refuses the page every WebGL context, and the
+// recovery reload showed how REGL tripped over the null instead of the restart notice.
+await test("a renderer the browser refuses a WebGL context ends in the restart notice", async () => {
+	const { default: loadRenderer } = await import("../MatrixDesktop/web/js/rendererLoader.js");
+	const { unrecoverable } = await import("../MatrixDesktop/web/js/rendererRecovery.js");
+	const canvasIn = (refused) => {
+		const doc = { createElement: () => ({ ownerDocument: doc, getContext: () => (refused ? null : {}), replaceWith() {} }) };
+		return doc.createElement("canvas");
+	};
+	const startError = new Error("REGL could not start: webgl not supported");
+	const importRegl = async () => ({ default: async () => { throw startError; } });
+	const notice = unrecoverable("the browser refused a new WebGL context").message;
+	assert.match(notice, /could not be recovered automatically\. Restart MatrixDesktop to try again\.$/);
+	for (const scene of ["matrix", "uc3d", "zmatrix"]) {
+		const error = await loadRenderer(canvasIn(true), { scene }, false, { importRegl }).catch((caught) => caught);
+		assert.equal(error.message, notice, `${scene}: a refused context must end in the restart notice`);
+		assert.equal(error.cause, startError, `${scene}: the renderer's own error must stay attached`);
+	}
+	await assert.rejects(loadRenderer(canvasIn(false), { scene: "matrix" }, false, { importRegl }), (error) => error === startError,
+		"a renderer that fails while WebGL works must keep its own error");
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		const importWebGPU = async () => ({ default: async () => { throw new Error("no WebGPU device"); } });
+		const error = await loadRenderer(canvasIn(true), { scene: "matrix" }, true, { importWebGPU, importRegl }).catch((caught) => caught);
+		assert.equal(error.message, `${notice} (after WebGPU failed: no WebGPU device)`);
+	} finally { console.warn = warn; }
+});
+
 await test("config ignores inherited Object names as parameter keys and font names", () => {
 	// URL keys and font names are looked up in plain object tables. With `in`, names every
 	// object inherits matched too: ?constructor=1 threw before any renderer started, and

@@ -129,7 +129,12 @@ export default async (canvas, config) => {
 			break;
 	}
 
-	regl = createREGL({ canvas, pixelRatio: 1, extensions, optionalExtensions });
+	let startError = null;
+	regl = createREGL({ canvas, pixelRatio: 1, extensions, optionalExtensions, onDone: (error) => { startError = error; } });
+	// R2-55: when the canvas gets no WebGL context (Chromium refuses every new one for the session
+	// after repeated GPU resets) or lacks a required extension, the minified REGL says why only
+	// through onDone and returns null, and regl.on below threw a TypeError instead.
+	if (regl == null) throw new Error(`REGL could not start: ${startError}`);
 	// AUD-19: on restore regl re-creates every texture empty, and the glyph atlases and
 	// palette are uploaded once, so a restored context draws black. Stay not ready from
 	// the loss on and tell the page, which owns recovery (js/main.js).
