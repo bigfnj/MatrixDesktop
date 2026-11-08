@@ -159,6 +159,33 @@ def check_regl_time_rebase(context, port):
         page.close()
 
 
+def check_regl_single_frame(context, port):
+    """fps=0 must draw one still frame, as UC3D and ZMatrix do, not a black canvas (AUD-47)."""
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        for fps in ("0", "30"):
+            page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&fps={fps}", wait_until="load")
+            page.wait_for_function("window.matrixRuntimeDiagnostics?.frames > 0", timeout=30000)
+            page.wait_for_timeout(2000)
+            frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+            image = capture(page).convert("L")
+            bright = sum(image.histogram()[41:]) / (image.width * image.height)
+            assert bright > 0.01, f"fps={fps} canvas is black: {bright:.2%} of pixels above luma 40"
+            page.wait_for_timeout(300)
+            later = page.evaluate("matrixRuntimeDiagnostics.frames")
+            if fps == "0":
+                assert frames == 1 and later == 1, f"fps=0 must draw exactly one frame: {frames} then {later}"
+            else:
+                assert later > frames, f"fps=30 control stopped animating at {frames} frames"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--renderer", choices=["regl", "webgpu", "both"], default="both")
@@ -231,6 +258,8 @@ def main():
                         print("PASS original Matrix regl context loss clears ready, reports once to the page and stays not ready after restore", flush=True)
                         check_regl_time_rebase(context, server.server_port)
                         print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
+                        check_regl_single_frame(context, server.server_port)
+                        print("PASS original Matrix regl fps=0 draws one still frame and an fps=30 control keeps animating", flush=True)
                 finally:
                     context.close()
             browser.close()

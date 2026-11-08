@@ -200,6 +200,9 @@ export default async (canvas, config) => {
 	pipeline = await makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeEndPass]);
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
+	// AUD-47: fps 0 made the frame time Infinity, so nothing ever rendered and the canvas
+	// stayed black. Like UC3D and ZMatrix, it now draws one still frame, as once does.
+	const singleFrame = config.once || !(config.fps > 0);
 	let frames = 0;
 	let last = NaN;
 
@@ -221,7 +224,7 @@ export default async (canvas, config) => {
 			last = start;
 		}
 
-		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || config.once;
+		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame;
 		if (shouldRender) {
 			while (now - targetFrameTimeMilliseconds > last) {
 				last += targetFrameTimeMilliseconds;
@@ -252,7 +255,7 @@ export default async (canvas, config) => {
 		device.queue.submit([encoder.finish()]);
 		diagnostics.frames = frames; diagnostics.ready = !gpuFailed; diagnostics.simulationTime = (now - start) / 1000;
 
-		if (!config.once) {
+		if (!singleFrame) {
 			frameRequest = requestAnimationFrame(renderLoop);
 		} else {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.

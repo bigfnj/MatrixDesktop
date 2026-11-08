@@ -162,13 +162,16 @@ export default async (canvas, config) => {
 	if (cleanedUp) { for (const step of pipeline) step.cleanup?.(); regl.destroy(); return; }
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
+	// AUD-47: fps 0 made the frame time Infinity, so nothing ever rendered and the canvas
+	// stayed black. Like UC3D and ZMatrix, it now draws one still frame, as once does.
+	const singleFrame = config.once || !(config.fps > 0);
 	let last = NaN;
 	diagnostics.initialized = true;
 	diagnostics.dispose = cleanup;
 
 	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
 		if (clock.paused || contextLost || regl._gl.isContextLost()) return;
-		if (config.once) {
+		if (singleFrame) {
 			tick.cancel();
 		}
 
@@ -178,7 +181,7 @@ export default async (canvas, config) => {
 			last = now;
 		}
 
-		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || config.once == true;
+		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame;
 
 		if (shouldRender) {
 			while (now - targetFrameTimeMilliseconds > last) {
@@ -206,7 +209,7 @@ export default async (canvas, config) => {
 		activeFrames++;
 		diagnostics.frames = activeFrames; diagnostics.ready = true;
 		diagnostics.simulationTime = clock.seconds();
-		if (config.once) {
+		if (singleFrame) {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
 			if (config.useCamera) stopCamera();
 		}

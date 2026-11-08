@@ -323,13 +323,14 @@ const makeMatrixDevice = (maxTextureDimension2D) => {
 		removeEventListener: (type, fn) => events.removeEventListener(type, fn),
 		emit: (type, event) => { for (const fn of [...(events.listeners.get(type) ?? [])]) fn(event); },
 		createTexture(config) { device.sizes.push(config.size); return createTexture.call(device, config); },
-		createCommandEncoder: () => ({ ...encoder, finish: () => ({}) }),
+		renderPasses: 0,
+		createCommandEncoder: () => ({ ...encoder, beginRenderPass: (descriptor) => { device.renderPasses++; return encoder.beginRenderPass(descriptor); }, finish: () => ({}) }),
 		queue: { ...device.queue, submit() {}, writeBuffer(buffer, offset, data) { device.writes.push([buffer, data]); } },
 		destroy() { device.destroyed = true; },
 	});
 };
 let pendingFrame = null, lastFrame = null;
-const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution }) => {
+const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution, params = {} }) => {
 	const run = {};
 	const borrowed = { createView: () => ({}), destroy() { throw new Error("canvas texture destroyed"); } };
 	globalThis.requestAnimationFrame = (fn) => { pendingFrame = lastFrame = fn; return 1; };
@@ -347,7 +348,7 @@ const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution
 		getBoundingClientRect: () => ({ left: 0, top: 0, width: cssWidth, height: cssHeight }),
 		getContext: () => ({ configure() {}, unconfigure() {}, getCurrentTexture: () => borrowed }) });
 	const { default: start } = await import("../MatrixDesktop/web/js/webgpu/main.js");
-	await start(run.canvas, makeConfig({ numColumns: "4", camera: "false", resolution: String(resolution) }));
+	await start(run.canvas, makeConfig({ numColumns: "4", camera: "false", resolution: String(resolution), ...params }));
 	run.diagnostics = window.matrixRuntimeDiagnostics;
 	run.frame = (now) => { const frame = pendingFrame; pendingFrame = null; frame?.(now); };
 	run.dispose = () => run.diagnostics.dispose();
@@ -473,6 +474,21 @@ await test("WebGPU Matrix renderer feeds the shaders a small time after four day
 		near(next.seconds - moved.seconds, 0.017, "time must stay continuous after the move", 1e-3);
 		assert.deepEqual([first, second, moved, next].map(({ frames }) => frames), [0, 1, 2, 3], "the frame counter must keep counting through a move");
 	} finally { run.dispose(); }
+});
+
+await test("WebGPU Matrix renderer at fps 0 draws one still frame and stops", async () => {
+	const still = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "0" } });
+	try {
+		still.frame(16);
+		assert(still.device.renderPasses > 0, "fps 0 must render its one frame, not leave the canvas black");
+		assert.equal(pendingFrame, null, "fps 0 must not schedule another frame");
+		assert.deepEqual([still.diagnostics.frames, still.diagnostics.ready], [1, true]);
+	} finally { still.dispose(); }
+	const control = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "30" } });
+	try {
+		control.frame(16);
+		assert.notEqual(pendingFrame, null, "fps 30 must keep animating");
+	} finally { control.dispose(); }
 });
 
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);
