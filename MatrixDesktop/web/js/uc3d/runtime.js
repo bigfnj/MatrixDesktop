@@ -83,14 +83,16 @@ export async function createRuntime(canvas, options, backend) {
       const nextAspect = Math.max(1, width) / Math.max(1, height);
       if (Math.abs(nextAspect - aspect) > 0.0001) { aspect = nextAspect; dirty = true; }
       scene.viewport?.(aspect);
-      const state = scene.update(seconds);
+      let state = scene.update(seconds);
       if (state.pictureIndex !== currentIndex) requestPhoto(state.pictureIndex);
       if (diagnostics.pictureStatus !== "ready") state.pictureWeight = 0;
       // A forming picture returns to a front-facing pose, as manual movement already
       // suppresses the picture. Keep the relief visible without shearing its silhouette.
       if (!scene.grid) {
         state.yaw *= 1 - state.pictureWeight; state.pitch *= 1 - state.pictureWeight; state.roll *= 1 - state.pictureWeight;
-        if (config.volumetric && config.isometric) { state.yaw += Math.PI / 4 * (1 - state.pictureWeight); state.pitch += Math.PI / 8 * (1 - state.pictureWeight); }
+        // The scene seeds a mouse gesture from its own state, so the fixed isometric
+        // view offset belongs to this derived view only, never to the scene's object.
+        if (config.volumetric && config.isometric) state = { ...state, yaw: state.yaw + Math.PI / 4 * (1 - state.pictureWeight), pitch: state.pitch + Math.PI / 8 * (1 - state.pictureWeight) };
       }
       const changed = dirty || Boolean(scene.grid);
       if (changed) { grid = scene.grid ? scene.grid(aspect, photo) : createGrid(config, aspect, photo); dirty = false; }

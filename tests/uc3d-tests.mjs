@@ -5,7 +5,7 @@ import { createNativeRandom, nativeSettings, nativeFallSpeed, nativePictureGrid,
 import { selectImages, createMedia } from "../MatrixDesktop/web/js/uc3d/media.js";
 import { formatClock } from "../MatrixDesktop/web/js/uc3d/overlays.js";
 import { createAudio } from "../MatrixDesktop/web/js/uc3d/audio.js";
-import { startLoop } from "../MatrixDesktop/web/js/uc3d/runtime.js";
+import { startLoop, createRuntime } from "../MatrixDesktop/web/js/uc3d/runtime.js";
 import { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
 import startWebGPU from "../MatrixDesktop/web/js/webgpu/uc3dPass.js";
 import "./uc3d-config-tests.mjs";
@@ -473,6 +473,64 @@ await asyncTest("WebGPU initialization rejects missing contexts and preserves er
       if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
     }
   }
+});
+// A minimal page for the real createRuntime: overlays, pictures and pointer listeners.
+function runtimeDom(bootstrap = {}) {
+  const names = ["window", "document", "Image"];
+  const saved = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const element = () => ({ style: {}, dataset: {}, append() {}, setAttribute() {}, remove() {},
+    getContext: () => ({ drawImage() {}, getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }) }) });
+  globalThis.window = { matrixHostBootstrap: bootstrap, devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+  globalThis.document = { createElement: element, body: { append() {} }, addEventListener() {}, removeEventListener() {} };
+  globalThis.Image = class { naturalWidth = 4; naturalHeight = 4; async decode() {} };
+  const listeners = new Map();
+  const canvas = { dataset: {}, clientWidth: 200, clientHeight: 100,
+    addEventListener: (name, listener) => listeners.set(name, listener), removeEventListener: name => listeners.delete(name) };
+  return { canvas, listeners,
+    move: (x, y) => listeners.get("pointermove")({ clientX: x, clientY: y }),
+    restore() { for (const [name, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; } } };
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+await asyncTest("legacy isometric mouse rotation starts from the displayed pose without a 45-degree snap", async () => {
+  const dom = runtimeDom();
+  try {
+    const config = resolveConfig({ scene: "uc3d", isometric: "true", mouseRotation: "true" });
+    assert.equal(config.uc3dControls, "legacy"); assert.equal(config.volumetric, true); assert.equal(config.isometric, true);
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      const before = runtime.update(1, 200, 100).uniforms.slice(22, 24);
+      dom.move(50, 50); dom.move(50, 50);
+      const after = runtime.update(1 + 1/60, 200, 100);
+      assert.equal(after.state.mouseActive, true, "the zero-delta touch must enter manual control");
+      for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
+        const jump = after.uniforms[22 + index] - before[index];
+        assert.ok(Math.abs(jump) < 1e-4, `first touch moved ${name} by ${jump.toFixed(3)} rad`);
+      }
+    } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
+});
+await asyncTest("legacy first touch during a forming picture keeps the flattened pose continuous", async () => {
+  const dom = runtimeDom({ images: [{ url: "synthetic:picture", group: "custom" }] });
+  try {
+    const config = resolveConfig({ scene: "uc3d", isometric: "false", mouseRotation: "true", showPictures: "true", pictureDelay: "1", pictureDuration: "8" });
+    assert.equal(config.uc3dControls, "legacy"); assert.equal(config.isometric, false); assert.equal(config.codeRotation, true);
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      runtime.update(0, 200, 100); await settle();
+      assert.equal(runtime.diagnostics.pictureStatus, "ready");
+      const forming = runtime.update(2.85, 200, 100);
+      assert.ok(forming.state.pictureWeight > .2 && forming.state.pictureWeight < .8, `witness: picture weight ${forming.state.pictureWeight} is not forming`);
+      const before = forming.uniforms.slice(22, 24);
+      assert.ok(Math.abs(before[0]) + Math.abs(before[1]) > .01, "witness: automatic rotation must be visible before the touch");
+      dom.move(50, 50); dom.move(50, 50);
+      const after = runtime.update(2.85 + 1/60, 200, 100);
+      assert.equal(after.state.mouseActive, true); near(after.state.pictureWeight, 0);
+      for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
+        const jump = after.uniforms[22 + index] - before[index];
+        assert.ok(Math.abs(jump) < 1e-4, `first touch during a forming picture moved ${name} by ${jump.toFixed(3)} rad`);
+      }
+    } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
 });
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;
