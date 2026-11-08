@@ -952,6 +952,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         '-p:DebugType=embedded'
         '-p:DebugSymbols=true'
     )
+    # What the publish command line below (and release.yml's) sets without a -p: flag, plus
+    # the SDK default it relies on. The publish-profile parity check reads both lists.
+    $PublishImplied = @{ Configuration = 'Release'; RuntimeIdentifier = 'win-x64'; SelfContained = 'false'; PublishTrimmed = 'false' }
 
     $publishOk = $true
     foreach ($proj in 'MatrixDesktop\MatrixDesktop.csproj', 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj') {
@@ -989,6 +992,21 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             Test-Fail 'payload carries no .pdb or .xml' ("{0} file(s), {1:N0} bytes: {2}" -f $junk.Count, $bytes, (($junk | Select-Object -First 4 | ForEach-Object { $_.Name }) -join ', '))
         } else {
             Test-Ok 'payload carries no .pdb or .xml'
+        }
+
+        # The shipped build uses the OS ICU data. InvariantGlobalization in a csproj or a
+        # publish flag would turn that off for every user without any test noticing.
+        $invariant = @()
+        foreach ($runtimeConfig in 'MatrixDesktop.runtimeconfig.json', 'MatrixDesktopConfigurator.runtimeconfig.json') {
+            $runtimeConfigPath = Join-Path $GatePublishDir $runtimeConfig
+            # A missing file is already a FAIL in the required-files check above.
+            if (-not (Test-Path -LiteralPath $runtimeConfigPath -PathType Leaf)) { continue }
+            if ('true' -eq "$(Get-RuntimeConfigOption -Path $runtimeConfigPath -Name 'System.Globalization.Invariant')") { $invariant += $runtimeConfig }
+        }
+        if ($invariant.Count -gt 0) {
+            Test-Fail 'published apps keep ICU globalization' "System.Globalization.Invariant is true in $($invariant -join ', ')"
+        } else {
+            Test-Ok 'published apps keep ICU globalization (no System.Globalization.Invariant in either runtimeconfig.json)'
         }
 
         if (Test-Path -LiteralPath (Join-Path $RepoRoot 'LICENSE') -PathType Leaf) {
@@ -1032,6 +1050,27 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 }
             }
         }
+    }
+
+    # README recommends the framework-dependent publish profiles for local builds, and
+    # release.yml loads no profile, so a property set only in a profile makes the local build
+    # differ silently from the shipped one. Both profiles set InvariantGlobalization until
+    # AUD-63. Each property must come from a -p: flag above, the publish command line itself
+    # ($PublishImplied) or the matching csproj (Get-PublishProfileParityProblems, gate-lib.ps1).
+    $profileProblems = @()
+    $profileCount = 0
+    foreach ($project in 'MatrixDesktop', 'MatrixDesktopConfigurator') {
+        $relativeProfile = "$project\Properties\PublishProfiles\Portable-win-x64-framework-dependent.pubxml"
+        $profilePath = Join-Path $RepoRoot $relativeProfile
+        if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) { $profileProblems += "${relativeProfile}: not found"; continue }
+        $profileProblems += @(Get-PublishProfileParityProblems -ProfilePath $profilePath -CsprojPath (Join-Path $RepoRoot "$project\$project.csproj") `
+            -PublishFlags $PublishFlags -Implied $PublishImplied -Label $relativeProfile)
+        $profileCount++
+    }
+    if ($profileProblems.Count -gt 0) {
+        Test-Fail 'local publish profiles build what ships' ($profileProblems -join '; ')
+    } else {
+        Test-Ok "local publish profiles build what ships ($profileCount framework-dependent profiles checked)"
     }
 
     if ($Tier1Only) {

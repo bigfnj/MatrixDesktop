@@ -327,6 +327,76 @@ try {
         if ($moved[0] -notmatch '^release\.yml runs the CI result check at line \d+, after its first') { throw "the problem does not name the CI result check ($($moved[0]))" }
     }
 
+    # ------------------------------------------------------------ AUD-63 publish profile parity
+
+    New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'profiles') | Out-Null
+    $stubFlags = @('-p:PublishReadyToRun=true', '-p:DebugType=embedded')
+    $stubImplied = @{ Configuration = 'Release'; RuntimeIdentifier = 'win-x64' }
+    $stubCsproj = New-StubFile 'profiles\Stub.csproj' ("<Project Sdk=`"Microsoft.NET.Sdk`">`n  <!-- <InvariantGlobalization>true</InvariantGlobalization> in a comment is not a property -->`n" +
+        "  <PropertyGroup>`n    <TargetFramework>net10.0-windows</TargetFramework>`n  </PropertyGroup>`n</Project>`n")
+    function New-StubProfile {
+        param([string]$Name, [string]$Body)
+        return New-StubFile "profiles\$Name.pubxml" ("<Project>`n  <PropertyGroup>`n    <PublishProtocol>FileSystem</PublishProtocol>`n" +
+            "    <PublishDir>bin\out\</PublishDir>`n$Body  </PropertyGroup>`n</Project>`n")
+    }
+    function Get-StubProblems {
+        param([string]$ProfilePath)
+        return @(Get-PublishProfileParityProblems -ProfilePath $ProfilePath -CsprojPath $stubCsproj -PublishFlags $stubFlags -Implied $stubImplied -Label 'Stub.pubxml')
+    }
+
+    Invoke-TestCase 'AUD-63 (a) a profile property must come from a flag, the publish command line or the csproj, with the same value' {
+        $covered = New-StubProfile 'covered' ("    <Configuration>Release</Configuration>`n    <RuntimeIdentifier>win-x64</RuntimeIdentifier>`n" +
+            "    <TargetFramework>net10.0-windows</TargetFramework>`n    <PublishReadyToRun>True</PublishReadyToRun>`n")
+        $problems = @(Get-StubProblems $covered)
+        Assert-Equal 0 $problems.Count "every property is given the same value elsewhere ($($problems -join '; '))"
+        $invariant = @(Get-StubProblems (New-StubProfile 'invariant' "    <InvariantGlobalization>true</InvariantGlobalization>`n"))
+        Assert-Equal 1 $invariant.Count "a property only the profile sets ($($invariant -join '; '))"
+        Assert-Equal 'Stub.pubxml: InvariantGlobalization=true is set only here; the gate and release.yml publish without it' $invariant[0] 'the problem names the profile and the property'
+        $r2r = Get-StubProblems (New-StubProfile 'r2r' "    <PublishReadyToRun>false</PublishReadyToRun>`n")
+        Assert-Equal 'Stub.pubxml: PublishReadyToRun=false, but the gate and release.yml publish with true' "$r2r" 'a flag with another value'
+        $rid = Get-StubProblems (New-StubProfile 'rid' "    <RuntimeIdentifier>win-arm64</RuntimeIdentifier>`n")
+        Assert-Equal 'Stub.pubxml: RuntimeIdentifier=win-arm64, but the gate and release.yml publish with win-x64' "$rid" 'the command line sets another value'
+        $framework = @(Get-StubProblems (New-StubProfile 'framework' "    <TargetFramework>net9.0-windows</TargetFramework>`n"))
+        Assert-Equal 1 $framework.Count "the csproj sets another framework ($($framework -join '; '))"
+    }
+
+    Invoke-TestCase 'AUD-63 (b) the real framework-dependent profiles match the gate''s publish, and re-adding InvariantGlobalization fails naming the file' {
+        $repo = Split-Path -Parent $here
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $assignments = @($gateAst.FindAll({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] }, $true))
+        $values = @{}
+        foreach ($name in '$PublishFlags', '$PublishImplied') {
+            $found = @($assignments | Where-Object { $_.Left.Extent.Text -eq $name })
+            Assert-Equal 1 $found.Count "run-gate.ps1 assigns $name once"
+            $values[$name] = $found[0].Right.Expression.SafeGetValue()
+        }
+        $flags = [string[]]@($values['$PublishFlags'])
+        if ($flags.Count -lt 5 -or @($flags | Where-Object { $_ -notlike '-p:*=*' }).Count -gt 0) { throw "run-gate.ps1's publish flags did not read back ($($flags -join ' '))" }
+        foreach ($project in 'MatrixDesktop', 'MatrixDesktopConfigurator') {
+            $relative = "$project\Properties\PublishProfiles\Portable-win-x64-framework-dependent.pubxml"
+            $problems = @(Get-PublishProfileParityProblems -ProfilePath (Join-Path $repo $relative) -CsprojPath (Join-Path $repo "$project\$project.csproj") `
+                -PublishFlags $flags -Implied $values['$PublishImplied'] -Label $relative)
+            Assert-Equal 0 $problems.Count "$relative as committed ($($problems -join '; '))"
+        }
+        $relative = 'MatrixDesktopConfigurator\Properties\PublishProfiles\Portable-win-x64-framework-dependent.pubxml'
+        $text = [IO.File]::ReadAllText((Join-Path $repo $relative))
+        $readded = New-StubFile 'profiles\readded.pubxml' ($text -replace '(\r?\n)(\s*)<DebugType>', '$1$2<InvariantGlobalization>true</InvariantGlobalization>$1$2<DebugType>')
+        $problems = @(Get-PublishProfileParityProblems -ProfilePath $readded -CsprojPath (Join-Path $repo 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj') `
+            -PublishFlags $flags -Implied $values['$PublishImplied'] -Label $relative)
+        Assert-Equal 1 $problems.Count "InvariantGlobalization re-added to the configurator profile ($($problems -join '; '))"
+        if ($problems[0] -notlike "$relative`: InvariantGlobalization=true is set only here*") { throw "the problem does not name the configurator profile ($($problems[0]))" }
+    }
+
+    Invoke-TestCase 'AUD-63 (c) a runtimeconfig.json option reads back, and an absent one is null under strict mode' {
+        $invariantConfig = New-StubFile 'profiles\invariant.runtimeconfig.json' ('{ "runtimeOptions": { "tfm": "net10.0", "configProperties": ' +
+            '{ "System.Globalization.Invariant": true, "System.Runtime.TieredPGO": false } } }')
+        Assert-Equal 'True' "$(Get-RuntimeConfigOption -Path $invariantConfig -Name 'System.Globalization.Invariant')" 'the option is read'
+        $icuConfig = New-StubFile 'profiles\icu.runtimeconfig.json' '{ "runtimeOptions": { "tfm": "net10.0", "configProperties": { "System.Runtime.TieredPGO": false } } }'
+        Assert-Equal $null (Get-RuntimeConfigOption -Path $icuConfig -Name 'System.Globalization.Invariant') 'an absent option'
+        $bare = New-StubFile 'profiles\bare.runtimeconfig.json' '{ "runtimeOptions": { "tfm": "net10.0" } }'
+        Assert-Equal $null (Get-RuntimeConfigOption -Path $bare -Name 'System.Globalization.Invariant') 'no configProperties at all'
+    }
+
     Invoke-TestCase 'AUD-28 (f) the newest CI run on the tagged commit decides, and no run is a failure' {
         function New-Run { param([long]$Id, [string]$Status, [string]$Conclusion) [pscustomobject]@{ id = $Id; status = $Status; conclusion = $Conclusion } }
         Assert-Equal 'missing' (Get-CiCheckVerdict -CheckRuns @()).Outcome 'CI never ran on the commit'

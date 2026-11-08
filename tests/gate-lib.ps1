@@ -236,6 +236,73 @@ function Get-CiWaitDecision {
     return 'fail'
 }
 
+# ---------------------------------------------------------------- publish profile parity
+
+# The property elements of every PropertyGroup in an MSBuild file, as Name/Value pairs.
+# Parsed as XML, so a property named inside a comment does not count.
+function Get-MsBuildProperties {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $doc = New-Object Xml.XmlDocument
+    $doc.Load($Path)
+    return @($doc.SelectNodes("/*[local-name()='Project']/*[local-name()='PropertyGroup']/*") |
+        Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element } |
+        ForEach-Object { [pscustomobject]@{ Name = $_.LocalName; Value = $_.InnerText.Trim() } })
+}
+
+# A local publish profile must not change the build beyond what the gate and release.yml
+# pass, or the documented local publish differs silently from the shipped one: both
+# framework-dependent profiles set InvariantGlobalization, which nothing that ships sets.
+# Each profile property needs the same value from a -p:Name=Value flag, from -Implied (what
+# the publish command line itself sets: -c, -r, --no-self-contained, and SDK defaults the
+# gate relies on) or from the matching csproj. -Ignore holds the properties that only say
+# where or how the profile writes. Each problem names the profile.
+function Get-PublishProfileParityProblems {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfilePath,
+        [Parameter(Mandatory = $true)][string]$CsprojPath,
+        [AllowEmptyCollection()][string[]]$PublishFlags = @(),
+        [hashtable]$Implied = @{},
+        [string[]]$Ignore = @('PublishProtocol', 'PublishDir'),
+        [string]$Label = $ProfilePath
+    )
+    $given = @{}
+    foreach ($flag in $PublishFlags) {
+        $m = [regex]::Match($flag, '^-p:([^=]+)=(.*)$')
+        if ($m.Success) { $given[$m.Groups[1].Value] = $m.Groups[2].Value }
+    }
+    foreach ($name in $Implied.Keys) { if (-not $given.ContainsKey($name)) { $given[$name] = [string]$Implied[$name] } }
+    $csproj = @(Get-MsBuildProperties -Path $CsprojPath)
+    $problems = @()
+    foreach ($property in @(Get-MsBuildProperties -Path $ProfilePath)) {
+        if ($Ignore -contains $property.Name) { continue }
+        if (@($csproj | Where-Object { $_.Name -eq $property.Name -and $_.Value -eq $property.Value }).Count -gt 0) { continue }
+        if ($given.ContainsKey($property.Name)) {
+            if ($given[$property.Name] -eq $property.Value) { continue }
+            $problems += "${Label}: $($property.Name)=$($property.Value), but the gate and release.yml publish with $($given[$property.Name])"
+        } else {
+            $problems += "${Label}: $($property.Name)=$($property.Value) is set only here; the gate and release.yml publish without it"
+        }
+    }
+    return $problems
+}
+
+# One runtimeOptions.configProperties value from a published runtimeconfig.json, or $null
+# when it is absent. Safe under Set-StrictMode, which throws on a missing JSON property.
+function Get-RuntimeConfigOption {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $node = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    foreach ($step in @('runtimeOptions', 'configProperties', $Name)) {
+        if ($null -eq $node) { return $null }
+        $member = $node.PSObject.Properties[$step]
+        if (-not $member) { return $null }
+        $node = $member.Value
+    }
+    return $node
+}
+
 # Runs one child harness with stdout and stderr redirected to $Log and "$Log.err", the way
 # every gate case runs, and classifies it. The self-tests call this same function with stub
 # scripts, so they exercise the gate's real redirection and verdict path. -Environment sets
