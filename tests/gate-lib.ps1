@@ -84,7 +84,7 @@ function Find-GatePython {
 function Get-UnparsableJsModules {
     param(
         [Parameter(Mandatory = $true)][string]$Node,
-        [Parameter(Mandatory = $true)][IO.FileInfo[]]$Files
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][IO.FileInfo[]]$Files
     )
     $bad = @()
     $mjsDir = Join-Path ([IO.Path]::GetTempPath()) ('md-gate-mjs-' + [Guid]::NewGuid().ToString('N'))

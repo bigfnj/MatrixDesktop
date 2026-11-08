@@ -157,6 +157,7 @@ try {
         [void](New-StubFile 'js\broken-two.js' "const = ;`n")
         $bad = @(Get-UnparsableJsModules -Node $nodeCmd.Source -Files @(Get-ChildItem -LiteralPath $jsDir -Filter *.js -File))
         Assert-Equal 'broken-one.js,broken-two.js' (($bad | Sort-Object) -join ',') 'node --check names every broken module'
+        Assert-Equal 0 @(Get-UnparsableJsModules -Node $nodeCmd.Source -Files @()).Count 'no modules is zero failures, not a binding error'
         $unused = 99996
         while (Get-Process -Id $unused -ErrorAction SilentlyContinue) { $unused += 4 }
         $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
