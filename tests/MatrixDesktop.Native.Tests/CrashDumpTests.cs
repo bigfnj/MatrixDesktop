@@ -26,12 +26,14 @@ internal static class CrashDumpTests
         var previous = Count;
         Counter.SetValue(null, 0);
         Directory.CreateDirectory(root);
-        // The writer logs every outcome; keep those lines out of the owner's real log.
+        // The writer logs every outcome; keep those lines out of the owner's real log. Restore the
+        // path the case found, normally the harness fixture: null would mean the owner's real log.
+        var previousLog = HarnessLog.CurrentPath;
         Logger.ResetForTests(Path.Combine(root, "MatrixDesktop.log"));
         try { test(root); }
         finally
         {
-            Logger.ResetForTests(null);
+            Logger.ResetForTests(previousLog);
             Counter.SetValue(null, previous);
             var parent = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar);
             Require(Path.GetDirectoryName(root) == parent && Path.GetFileName(root).StartsWith("matrix-dump-reservation-", StringComparison.Ordinal), "Cleanup must remain in the owned synthetic dump fixture.");

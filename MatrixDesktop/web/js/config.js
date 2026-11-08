@@ -669,7 +669,7 @@ export default (urlParams) => {
 		}
 	}
 
-	const version = validParams.version in versions ? versions[validParams.version] : versions.classic;
+	const version = Object.hasOwn(versions, validParams.version) ? versions[validParams.version] : versions.classic;
 	const fontName = [validParams.font, version.font, defaults.font].find((name) => Object.hasOwn(fonts, name));
 	const font = fonts[fontName];
 

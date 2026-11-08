@@ -217,6 +217,19 @@ await test("a lost renderer reloads within a budget and then explains itself", a
 	assert.equal(page.log.errors.length, 1);
 });
 
+await test("config ignores inherited Object names as parameter keys and font names", () => {
+	// URL keys and font names are looked up in plain object tables. With `in`, names every
+	// object inherits matched too: ?constructor=1 threw before any renderer started, and
+	// font=constructor spread Object into the config, leaving no glyph atlas URL. (AUD-79)
+	const baseline = makeConfig({});
+	for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+		assert.deepEqual(makeConfig({ [name]: "1" }), baseline, `${name} is not a parameter and must be ignored`);
+		const font = makeConfig({ font: name });
+		assert.equal(font.glyphMSDFURL, baseline.glyphMSDFURL, `font=${name} must fall back to the version's font`);
+		assert.equal(font.glyphSequenceLength, baseline.glyphSequenceLength, `font=${name} must fall back to the version's font`);
+	}
+});
+
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {
 	let disconnects = 0;
 	const run = (behavior) => getLKG(true, { timeoutMs: 5, loadCore: async () => ({ Client: class {

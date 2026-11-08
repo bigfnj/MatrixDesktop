@@ -677,8 +677,19 @@ def check_glyph_intensity(browser, origin):
         page = browser.new_page(viewport={"width": 480, "height": 360})
         try:
             page.goto(f"{origin}/index.html?{query}", wait_until="load")
-            page.wait_for_function("document.querySelector('canvas') != null", timeout=20000)
-            page.wait_for_timeout(2500)
+            # Sample after two seconds of the renderer's own clock (it starts at the first frame)
+            # and at least ten frames. This used to sleep 2.5 s from when the canvas appeared,
+            # which happens before the renderer modules load, so a slow load sampled a page that
+            # had not drawn yet and blamed the uniform (CI on fd2358f, AUD-78). The deadline turns
+            # a renderer that never draws into a named failure instead of a hang.
+            try:
+                page.wait_for_function("window.matrixRuntimeDiagnostics?.ready === true"
+                                       " && matrixRuntimeDiagnostics.frames >= 10"
+                                       " && matrixRuntimeDiagnostics.simulationTime >= 2", timeout=60000)
+            except Exception:
+                state = page.evaluate("JSON.stringify({frames: window.matrixRuntimeDiagnostics?.frames ?? 0,"
+                                      " errors: window.matrixRuntimeDiagnostics?.errors ?? []})")
+                raise RuntimeError(f"{query} did not render 2 s of frames within 60 s: {state}") from None
             # Averaged over frames because rain is stochastic; one frame is not a measurement.
             return sum(mean_luma(page.screenshot()) for _ in range(3)) / 3
         finally:
@@ -686,8 +697,12 @@ def check_glyph_intensity(browser, origin):
 
     for effect, extra in (("palette", ""), ("stripe", "&effect=stripes")):
         base = f"suppressWarnings=true&numColumns=40{extra}"
-        dark = luma(f"{base}&glyphIntensity=0")
-        bright = luma(f"{base}&glyphIntensity=2")
+        try:
+            dark = luma(f"{base}&glyphIntensity=0")
+            bright = luma(f"{base}&glyphIntensity=2")
+        except RuntimeError as exc:
+            fail(f"glyphIntensity changes the {effect} render", f"could not sample: {exc}")
+            continue
         # Deliberately compares 0 against 2 rather than against the default. Comparing to the
         # default would also pass if the shader ignored the uniform and both runs were simply
         # the default render.
@@ -698,6 +713,44 @@ def check_glyph_intensity(browser, origin):
         else:
             ok(f"glyphIntensity changes the {effect} render",
                f"luma {dark:.1f} at 0 vs {bright:.1f} at 2")
+
+
+def check_inherited_effect_names(browser, origin):
+    """An unknown effect name falls back to palette, including names every object inherits.
+
+    The renderer picked its effect with `config.effect in effects`, which is also true for
+    constructor, toString and __proto__, so effect=constructor handed Object to the pipeline
+    as a pass factory and the renderer failed to start instead of falling back (AUD-79).
+    """
+    problems, frames = [], []
+    for name in ("constructor", "toString", "__proto__"):
+        page = browser.new_page(viewport={"width": 320, "height": 240})
+        errors = []
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        try:
+            page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=20&effect={name}", wait_until="load")
+            try:
+                page.wait_for_function("window.matrixRuntimeDiagnostics?.frames > 3"
+                                       " || window.matrixRuntimeDiagnostics?.errors.length > 0"
+                                       " || document.querySelector('.notice') != null", timeout=30000)
+            except Exception:
+                pass  # reported below from the state the page reached
+            state = page.evaluate("""() => ({
+                frames: window.matrixRuntimeDiagnostics?.frames ?? 0,
+                errors: window.matrixRuntimeDiagnostics?.errors ?? [],
+                notice: document.querySelector('.notice')?.textContent.trim() ?? null })""")
+        finally:
+            page.close()
+        found = [(text.splitlines() or [""])[0] for text in
+                 errors + state["errors"] + ([state["notice"]] if state["notice"] else [])]
+        frames.append(f"{name} {state['frames']}")
+        if state["frames"] <= 3 or found:
+            problems.append(f"effect={name}: {state['frames']} frames; " + "; ".join(found[:2]))
+    if problems:
+        fail("inherited effect names fall back to the palette render", " | ".join(problems))
+    else:
+        ok("inherited effect names fall back to the palette render", "frames: " + ", ".join(frames))
 
 
 def check_matrix_web(page, origin):
@@ -1081,6 +1134,7 @@ def main():
             page = browser.new_page(viewport=VIEWPORT)
             check_matrix_web(page, web_origin)
             page.close()
+            check_inherited_effect_names(browser, web_origin)
 
             print("=== web smoke: flags actually do something ===")
             check_glyph_intensity(browser, web_origin)

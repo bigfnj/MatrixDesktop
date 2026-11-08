@@ -152,7 +152,7 @@ export default async (canvas, config) => {
 	let shaderSeconds = 0;
 	// AUD-65: tick wraps before float32 loses integers (js/shaderTime.js).
 	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => shaderTick(activeFrames, config.cycleFrameSkip) } });
-	const effectName = config.effect in effects ? config.effect : "palette";
+	const effectName = Object.hasOwn(effects, config.effect) ? config.effect : "palette";
 	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas,
 		elapsedSeconds: () => shaderTime.seconds(clock.seconds()), onTimeRebase: shaderTime.onRebase };
 	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);

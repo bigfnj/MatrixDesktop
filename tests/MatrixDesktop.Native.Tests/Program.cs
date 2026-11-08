@@ -3,6 +3,9 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using MatrixDesktop.Shared;
 
+// Before anything can log: diagnostics go to this run's fixture, never the owner's real log.
+HarnessLog.Redirect();
+
 var tests = new List<(string Name, Action Test)>
 {
     ("Native GDI resolves bundled and special fonts with real metrics", NativeProof.DefaultFaces),
@@ -27,6 +30,8 @@ tests.AddRange(NativeBridgeTests.All);
 tests.AddRange(PointerGateTests.All);
 if (args.Length == 2 && args[0] == "--only") tests = tests.Where(item => item.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToList();
 if (tests.Count == 0) throw new ArgumentException("The native test filter matched no tests.");
+// Last and outside the filter, so it sees where every selected case left the logger.
+tests.Add((HarnessLog.CaseName, HarnessLog.Verify));
 var failures = 0;
 foreach (var (name, test) in tests)
 {
@@ -34,6 +39,7 @@ foreach (var (name, test) in tests)
     catch (Exception error) { failures++; Console.WriteLine("FAIL " + name + ": " + error.Message); }
 }
 Console.WriteLine($"{tests.Count - failures}/{tests.Count} native tests passed.");
+HarnessLog.Finish(failures == 0);
 return failures == 0 ? 0 : 1;
 
 internal static class NativeProof

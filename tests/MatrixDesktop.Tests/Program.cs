@@ -3,6 +3,9 @@ using MatrixDesktopConfigurator;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+// Before anything can log: diagnostics go to this run's fixture, never the owner's real log.
+HarnessLog.Redirect();
+
 // Export tests launch a renamed copy of this console apphost. Record real argv
 // before any test dispatch, without starting the renderer or touching user state.
 if (Environment.GetEnvironmentVariable("MATRIXDESKTOP_TEST_ARGV_CAPTURE") is string capturePath)
@@ -117,6 +120,8 @@ tests.AddRange(HostLifecyclePolicyTests.All);
 if (args.Length == 2 && args[0] == "--only")
     tests = tests.Where(test => test.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToList();
 if (tests.Count == 0) throw new ArgumentException("The requested test filter matched no tests.");
+// Last and outside the filter, so it sees where every selected case left the logger.
+tests.Add((HarnessLog.CaseName, HarnessLog.Verify));
 
 var failures = 0;
 foreach ((string name, Action test) in tests)
@@ -135,4 +140,5 @@ foreach ((string name, Action test) in tests)
 
 Console.WriteLine();
 Console.WriteLine($"{tests.Count - failures}/{tests.Count} tests passed.");
+HarnessLog.Finish(failures == 0);
 return failures == 0 ? 0 : 1;
