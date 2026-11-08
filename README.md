@@ -16,8 +16,8 @@ Choose **Wallpaper** in the configurator's window mode, or launch any scene with
 per-user startup control. Wallpaper mode leaves typing and desktop icons usable;
 desktop pointer effects are optional. Fullscreen applications pause it by default,
 and battery pause is available separately. A paused wallpaper keeps its last frame
-on the desktop; only a locked or disconnected session, sleep or a display turning off
-hides and suspends the renderer.
+on the desktop; only a locked or disconnected session, sleep or Windows turning the
+display off asks WebView2 to suspend the renderer, which stays hidden while suspended.
 
 ```cmd
 MatrixDesktop.exe --wallpaper --scene matrix
@@ -27,7 +27,9 @@ MatrixDesktop.exe --wallpaper --scene zmatrix
 
 Launching the wallpaper again, for example with new settings, replaces the running one,
 and one tray icon remains. If the running wallpaper has not exited within 10 seconds,
-the new launch shows a message and stops.
+the new launch shows a message and stops. A launch without administrator rights cannot
+ask a wallpaper started as administrator to exit, so both keep running, each with its
+own tray icon, and the new launch logs a warning.
 
 If WebView2's renderer process exits or stays unresponsive, the wallpaper reloads its
 page, at most 3 times in 10 minutes. If the browser process is lost, or a reload fails
@@ -127,7 +129,11 @@ See [UC3D options and local media](docs/UC3D.md) and the
 
 - **1.2.0** adds wallpaper hosting for every scene, ZMatrix controls and `.cfg`
   import, native font/wallpaper resources, tray playback and startup controls,
-  and Windows screensaver entrypoints. Existing presets keep their saved values.
+  and Windows screensaver entrypoints. The first time the configurator opens a
+  preset store from an earlier build, each field a preset uses that held the old
+  default for the preset's scene takes the value the renderer draws for that scene,
+  version and effect. This does not change what the preset renders; it lets the
+  editor show the value that renders.
 - **1.1.0** adds the optional UC3D scene in both rendering backends, local picture and
   audio inputs, an optional privately imported glyph atlas, and a starter preset.
   Original-unit sliders, native stream/movement behavior and picture formation are
