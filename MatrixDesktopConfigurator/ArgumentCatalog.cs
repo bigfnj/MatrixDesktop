@@ -33,6 +33,7 @@ internal static class ArgumentCatalog
                 ["pictureDuration"] = 30.0,
             },
         },
+        VersionDefaults = CreateVersionDefaults(),
         // The original screensaver's settings dialog groups Normal, Highlight and Background
         // colour. UC3D reads the same shared keys as the Matrix scene (cursorColor is the
         // leading-glyph highlight: web/js/uc3d/runtime.js:44-45, scaled by cursorIntensity at
@@ -387,12 +388,158 @@ internal static class ArgumentCatalog
 
         return result;
     }
+
+    // What each config.js version (web/js/config.js:180-437) draws for a catalog field that a
+    // command leaves out, where it differs from classic, in catalog units: RGB colours rounded
+    // as the catalog rounds them, slant in degrees. tests/effective-defaults-tests.mjs holds
+    // every entry to the real config.js, so a version edit there fails until this follows.
+    private static Dictionary<string, Dictionary<string, object?>> CreateVersionDefaults() => new()
+    {
+        ["3d"] = new() { ["fallSpeed"] = 0.5, ["raindropLength"] = 0.3, ["volumetric"] = true },
+        ["megacity"] = new() { ["font"] = "megacity", ["animationSpeed"] = 0.5, ["numColumns"] = 40.0 },
+        ["neomatrixology"] = new()
+        {
+            ["font"] = "neomatrixology", ["cursorColor"] = new ColorValue(0.999, 1, 0.5),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.38, 0.344, 0.02, 0.2), new(0.97, 0.916, 0.43, 0.7), new(0.98, 0.944, 0.62, 0.8) },
+            ["animationSpeed"] = 0.8, ["numColumns"] = 40.0,
+        },
+        ["operator"] = new()
+        {
+            ["cursorColor"] = new ColorValue(0.32, 1, 0.49),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.1, 0.9, 0.42, 0.5), new(1, 1, 1, 1) },
+            ["cursorIntensity"] = 3.0, ["fallSpeed"] = 0.6, ["cycleSpeed"] = 0.01, ["raindropLength"] = 1.5,
+            ["numColumns"] = 108.0, ["bloomSize"] = 0.6, ["bloomStrength"] = 0.75,
+        },
+        ["nightmare"] = new()
+        {
+            ["font"] = "gothic",
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.4, 0, 0, 0.2), new(0.8, 0, 0, 0.4), new(1, 0.76, 0.4, 0.7), new(1, 1, 1, 1) },
+            ["fallSpeed"] = 1.2, ["cycleSpeed"] = 0.35, ["raindropLength"] = 0.5, ["slant"] = 22.5, ["numColumns"] = 60.0,
+        },
+        ["paradise"] = new()
+        {
+            ["font"] = "coptic",
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.54, 0.06, 0.06, 0.3), new(0.9, 0.58, 0.1, 0.5), new(1, 0.68, 0.2, 0.6), new(1, 0.92, 0.8, 0.9) },
+            ["fallSpeed"] = 0.02, ["cycleSpeed"] = 0.005, ["raindropLength"] = 0.4, ["numColumns"] = 40.0, ["bloomStrength"] = 1.0,
+        },
+        ["resurrections"] = new()
+        {
+            ["font"] = "resurrections", ["cursorColor"] = new ColorValue(0.699, 1, 0.6),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.2, 1, 0.4, 0.92), new(1, 1, 1, 1) },
+            ["numColumns"] = 70.0,
+        },
+        ["trinity"] = new()
+        {
+            ["font"] = "resurrections", ["cursorColor"] = new ColorValue(0.699, 1, 0.6), ["glintColor"] = new ColorValue(1, 0.829, 0.2),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.2, 0.8, 0.332, 1) },
+            ["cycleSpeed"] = 0.01, ["forwardSpeed"] = 0.2, ["raindropLength"] = 0.3, ["volumetric"] = true, ["numColumns"] = 60.0, ["density"] = 0.75,
+        },
+        ["morpheus"] = new()
+        {
+            ["font"] = "resurrections", ["cursorColor"] = new ColorValue(0.701, 1, 0.7), ["glintColor"] = new ColorValue(0, 1, 0.4),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.8, 0.2, 0.308, 1) },
+            ["cycleSpeed"] = 0.015, ["forwardSpeed"] = 0.1, ["raindropLength"] = 0.4, ["volumetric"] = true, ["numColumns"] = 60.0, ["density"] = 0.75,
+        },
+        ["bugs"] = new()
+        {
+            ["font"] = "resurrections", ["cursorColor"] = new ColorValue(0.3, 0.5, 1), ["glintColor"] = new ColorValue(0.2, 0.4, 1),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.8, 0.704, 0.2, 1) },
+            ["cycleSpeed"] = 0.01, ["forwardSpeed"] = 0.4, ["raindropLength"] = 0.3, ["volumetric"] = true, ["numColumns"] = 60.0, ["density"] = 0.75,
+        },
+        ["palimpsest"] = new()
+        {
+            ["font"] = "huberfishA",
+            ["palette"] = new ColorStop[] { new(0.925, 0.92, 0.875, 0), new(0.02, 0.084, 0.18, 0.4) },
+            ["fallSpeed"] = 0.5, ["raindropLength"] = 1.2, ["slant"] = -11.25, ["numColumns"] = 40.0, ["bloomStrength"] = 0.2,
+        },
+        ["twilight"] = new()
+        {
+            ["font"] = "huberfishD", ["cursorColor"] = new ColorValue(0.999, 1, 0.6),
+            ["palette"] = new ColorStop[] { new(0, 0.04, 0.1, 0), new(0.02, 0.084, 0.18, 0.1), new(0.9, 0.1, 0.676, 0.5), new(1, 0.92, 0.2, 0.8) },
+            ["cursorIntensity"] = 1.5, ["fallSpeed"] = 0.1, ["raindropLength"] = 0.9, ["numColumns"] = 50.0, ["bloomStrength"] = 0.1,
+        },
+        ["holoplay"] = new()
+        {
+            ["font"] = "resurrections", ["cursorColor"] = new ColorValue(0.699, 1, 0.6), ["glintColor"] = new ColorValue(1, 0.829, 0.2),
+            ["palette"] = new ColorStop[] { new(0, 0, 0, 0), new(0.2, 0.8, 0.332, 1) },
+            ["cycleSpeed"] = 0.01, ["forwardSpeed"] = 0.0, ["raindropLength"] = 0.3, ["volumetric"] = true, ["numColumns"] = 20.0,
+            ["density"] = 3.0, ["bloomStrength"] = 0.0, ["ditherMagnitude"] = 0.0,
+        },
+    };
+
+    // regl/stripePass.js:10-29 (and webgpu/stripePass.js): the rows a stripe effect draws when
+    // stripeColors is absent, expanded as the renderer expands them because make1DTexture
+    // filters linearly, so three rows of a colour do not draw like one.
+    private static ColorValue[] Rows(int repeat, params ColorValue[] colors) => colors.SelectMany(color => Enumerable.Repeat(color, repeat)).ToArray();
+
+    internal static readonly ColorValue[] TransPrideStripes = Rows(3,
+        new(0.36, 0.81, 0.98), new(0.96, 0.66, 0.72), new(1, 1, 1), new(0.96, 0.66, 0.72), new(0.36, 0.81, 0.98));
+
+    internal static readonly ColorValue[] PrideStripes = Rows(2,
+        new(0.89, 0.01, 0.01), new(1, 0.55, 0), new(1, 0.93, 0), new(0, 0.5, 0.15), new(0, 0.3, 1), new(0.46, 0.03, 0.53));
+
+    // config.js:652-668: naming any effect makes the cursor white (except in UC3D), the cursor
+    // intensity 2, the glint white and the glyph intensity 1, over the version's own values.
+    // CommandBuilder never names the default palette effect, so palette keeps the version's.
+    internal static Dictionary<string, Dictionary<string, Dictionary<string, object?>>> CreateEffectDefaults(IEnumerable<ArgumentGroup> groups)
+    {
+        var white = new ColorValue(1, 1, 1);
+        var effects = groups.SelectMany(group => group.Fields).Single(field => field.Id == "effect").Options
+            .Select(option => option.Value).Where(effect => effect != "palette").ToArray();
+        var result = new Dictionary<string, Dictionary<string, Dictionary<string, object?>>>();
+        foreach (var scene in new[] { "matrix", "uc3d" })
+        {
+            var byEffect = new Dictionary<string, Dictionary<string, object?>>();
+            foreach (var effect in effects)
+            {
+                var values = new Dictionary<string, object?> { ["cursorIntensity"] = 2.0, ["glintColor"] = white, ["glyphIntensity"] = 1.0 };
+                if (scene != "uc3d") values["cursorColor"] = white;
+                if (ArgumentImporter.IsStripeEffect(effect)) values["stripeColors"] = effect == "pride" ? PrideStripes : TransPrideStripes;
+                byEffect[effect] = values;
+            }
+            result[scene] = byEffect;
+        }
+        return result;
+    }
 }
 
 internal sealed class ConfiguratorMetadata
 {
     public List<ArgumentGroup> Groups { get; init; } = [];
     public Dictionary<string, Dictionary<string, object?>> SceneDefaults { get; init; } = [];
+    public Dictionary<string, Dictionary<string, object?>> VersionDefaults { get; init; } = [];
+    // config.js:438-442 aliases, which commands may name.
+    public Dictionary<string, string> VersionAliases { get; init; } = new()
+        { ["throwback"] = "operator", ["updated"] = "resurrections", ["1999"] = "operator", ["2003"] = "classic", ["2021"] = "resurrections" };
+    private Dictionary<string, Dictionary<string, Dictionary<string, object?>>>? _effectDefaults;
+    // effectDefaults[scene][effect][fieldId]; scene is "matrix" or "uc3d" (ZMatrix has no effect).
+    public Dictionary<string, Dictionary<string, Dictionary<string, object?>>> EffectDefaults => _effectDefaults ??= ArgumentCatalog.CreateEffectDefaults(Groups);
+
+    // What the renderer draws for a field the command leaves out, in config.js's order
+    // (:679-698): an effect's implied values over the scene profile over the version over the
+    // catalog. Version and effect are not emitted for ZMatrix, so it renders classic there.
+    // app.js effectiveDefaultsFor is the page's copy of this rule.
+    internal object? EffectiveDefault(ArgumentDefinition field, string scene, string? uc3dMode, string? version, string? effect)
+    {
+        if (scene == "uc3d" && uc3dMode == "legacy" && field.Id == "bloomStrength") return field.DefaultValue;
+        if (scene != "zmatrix" && effect is not null && effect != "palette"
+            && EffectDefaults.TryGetValue(scene == "uc3d" ? "uc3d" : "matrix", out var byEffect)
+            && byEffect.TryGetValue(effect, out var effectValues) && effectValues.TryGetValue(field.Id, out var effectValue))
+            return effectValue;
+        if (SceneDefaults.TryGetValue(scene, out var sceneValues) && sceneValues.TryGetValue(field.Id, out var sceneValue)) return sceneValue;
+        if (scene != "zmatrix" && version is not null
+            && VersionDefaults.TryGetValue(VersionAliases.GetValueOrDefault(version, version), out var versionValues)
+            && versionValues.TryGetValue(field.Id, out var versionValue))
+            return versionValue;
+        return field.DefaultValue;
+    }
+
+    // The default CommandBuilder omitted before version and effect were modelled (scene and
+    // catalog only). Used solely to carry old drafts across without changing their render.
+    internal object? LegacyDefault(ArgumentDefinition field, string scene, string? uc3dMode)
+        => scene == "uc3d" && uc3dMode == "legacy" && field.Id == "bloomStrength" ? field.DefaultValue
+            : SceneDefaults.TryGetValue(scene, out var sceneValues) && sceneValues.TryGetValue(field.Id, out var sceneValue) ? sceneValue
+            : field.DefaultValue;
     // Presentation only: read by configurator/js/app.js sceneSections, never by CommandBuilder,
     // the importers or the randomizer, which all walk Groups.
     public Dictionary<string, List<ScenePlacement>> ScenePlacements { get; init; } = [];

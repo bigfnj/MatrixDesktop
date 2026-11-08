@@ -147,29 +147,51 @@ const makeSwatchButton = (color, { disabled = false, label = "color" } = {}) => 
 };
 
 const allFields = () => state.metadata.groups.flatMap((group) => group.fields);
-const defaultValueFor = (field) => state.draft.scene === "uc3d" && state.draft.uc3dControls === "legacy" && field.id === "bloomStrength"
-	? field.defaultValue : state.metadata.sceneDefaults?.[state.draft.scene]?.[field.id] ?? field.defaultValue;
+// AUD-13: what the renderer draws for each field a command leaves out, for this draft's
+// scene, version and effect, in config.js's order: an effect's implied values over the scene
+// profile over the version over the catalog. The page's copy of ConfiguratorMetadata
+// EffectiveDefault (ArgumentCatalog.cs), which CommandBuilder uses to leave defaults out.
+// ZMatrix emits neither a version nor an effect; legacy UC3D draws the catalog bloom.
+const effectiveDefaultsFor = (draft) => {
+	const metadata = state.metadata || {};
+	const scene = draft?.scene || "matrix";
+	const version = draft?.version || "classic";
+	const effect = draft?.effect || "palette";
+	const zmatrix = scene === "zmatrix";
+	const defaults = {
+		...state.defaultDraft,
+		...(zmatrix ? {} : metadata.versionDefaults?.[metadata.versionAliases?.[version] ?? version]),
+		...metadata.sceneDefaults?.[scene],
+		...(zmatrix || effect === "palette" ? {} : metadata.effectDefaults?.[scene === "uc3d" ? "uc3d" : "matrix"]?.[effect]),
+	};
+	if (scene === "uc3d" && draft?.uc3dControls === "legacy") defaults.bloomStrength = state.defaultDraft.bloomStrength;
+	return defaults;
+};
+const defaultValueFor = (field) => effectiveDefaultsFor(state.draft)[field.id] ?? field.defaultValue;
 const editedSceneFields = new Set();
 const rememberDraftEdits = (explicitKeys = []) => {
 	editedSceneFields.clear();
-	const defaults = { ...state.defaultDraft, ...state.metadata.sceneDefaults?.[state.draft.scene] };
+	const defaults = effectiveDefaultsFor(state.draft);
 	for (const key of Object.keys(state.draft))
 		if (key !== "scene" && JSON.stringify(state.draft[key]) !== JSON.stringify(defaults[key])) editedSceneFields.add(key);
 	for (const key of explicitKeys) if (key !== "scene") editedSceneFields.add(key);
 };
 const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "transPride"]);
+// The choices effectiveDefaultsFor reads; switching one re-targets untouched fields.
+const defaultContextFields = new Set(["scene", "version", "effect"]);
 
 // Fields whose value changes which *other* fields are gated (see
 // getDisabledReason). Editing one of these must re-render the whole group so
-// the dependent fields pick up their new enabled/disabled state.
-const gatingFields = new Set(["windowMode", "effect", "clickRipples", "scene", "uc3dControls", "volumetric", "forwardMovement", "randomForwardMovement", "showPictures", "showClock", "sound", "zmBackgroundMode", "zmMonotonousCleanupEnabled", "zmRandomizedCleanupEnabled"]);
+// the dependent fields pick up their new enabled/disabled state. Version gates
+// nothing but moves untouched editors to its own values (defaultContextFields).
+const gatingFields = new Set(["windowMode", "effect", "version", "clickRipples", "scene", "uc3dControls", "volumetric", "forwardMovement", "randomForwardMovement", "showPictures", "showClock", "sound", "zmBackgroundMode", "zmMonotonousCleanupEnabled", "zmRandomizedCleanupEnabled"]);
 
 const normalizeDraft = (draft) => {
 	const saved = draft ? clone(draft) : {};
 	// Preserve old full drafts before the new scene defaults can claim their controls.
 	if (saved.scene === "uc3d" && !["original", "legacy"].includes(saved.uc3dControls))
 		saved.uc3dControls = Object.keys(saved).some(key => nativeUc3dFields.has(key)) ? "original" : "legacy";
-	return { ...clone(state.defaultDraft), ...clone(state.metadata?.sceneDefaults?.[saved.scene] || {}), ...saved };
+	return { ...clone(effectiveDefaultsFor({ ...state.defaultDraft, ...state.metadata?.sceneDefaults?.[saved.scene], ...saved })), ...saved };
 };
 
 const setStatus = (message, tone = "normal") => {
@@ -227,11 +249,13 @@ const updateCommand = async () => {
 const updateDraftValue = (field, value) => {
 	// A picker opened before a scene change can finish after its field is disabled.
 	if (getDisabledReason(field)) return;
-	if (field.id === "scene" && value !== state.draft.scene) {
-		const previous = { ...state.defaultDraft, ...state.metadata.sceneDefaults?.[state.draft.scene] };
-		const next = { ...state.defaultDraft, ...state.metadata.sceneDefaults?.[value] };
+	// A scene, version or effect switch moves each untouched field from what the old choice
+	// draws to what the new one draws (AUD-13), so the editors keep showing the render.
+	if (defaultContextFields.has(field.id) && value !== state.draft[field.id]) {
+		const previous = effectiveDefaultsFor(state.draft);
+		const next = effectiveDefaultsFor({ ...state.draft, [field.id]: value });
 		for (const key of Object.keys(next)) {
-			if (key !== "scene" && !editedSceneFields.has(key) && JSON.stringify(state.draft[key]) === JSON.stringify(previous[key]))
+			if (!defaultContextFields.has(key) && !editedSceneFields.has(key) && JSON.stringify(state.draft[key]) === JSON.stringify(previous[key]))
 				state.draft[key] = clone(next[key]);
 		}
 	}

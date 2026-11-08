@@ -368,7 +368,47 @@ def check_limits(page, fixture):
     page.wait_for_function("document.querySelector('#stopButton').disabled")
 
 
+def hex_rows(rows):
+    # app.js colorToHex rounds half up, as Math.round does.
+    return ["#" + "".join("%02x" % int(row[channel] * 255 + 0.5) for channel in "rgb") for row in rows]
+
+
+def wait_command(page, text):
+    page.wait_for_function("text=>document.querySelector('#commandOutput').value.includes(text)", arg=text)
+    return page.locator("#commandOutput").input_value()
+
+
+def check_effective_defaults(page, fixture):
+    # AUD-13: an Effect or Version switch moves untouched editors to what the renderer draws
+    # (app.js effectiveDefaultsFor over metadata.effectDefaults and versionDefaults), the
+    # command leaves them out, and a value chosen afterwards is sent.
+    effects = fixture["metadata"]["effectDefaults"]["matrix"]
+    for effect, rows in (("stripes", 15), ("pride", 12)):
+        field(page, "effect").locator("select").select_option(effect)
+        command = wait_command(page, "--effect " + effect)
+        draft = saved(page)
+        assert draft["stripeColors"] == effects[effect]["stripeColors"] and len(draft["stripeColors"]) == rows, effect + " stripe editor kept " + str(draft["stripeColors"])
+        shown = field(page, "stripeColors").locator(".hex-input").evaluate_all("nodes=>nodes.map(node=>node.value.toLowerCase())")
+        assert shown == hex_rows(effects[effect]["stripeColors"]), effect + " stripe editor shows " + str(shown)
+        assert draft["cursorColor"] == effects[effect]["cursorColor"], effect + " cursor editor kept " + str(draft["cursorColor"])
+        assert "stripeColors" not in command and "cursorColor" not in command, "untouched editors were sent: " + command
+    field(page, "effect").locator("select").select_option("palette")
+    page.wait_for_function("!document.querySelector('#commandOutput').value.includes('--effect')")
+    draft = saved(page)
+    assert draft["stripeColors"] == fixture["defaultDraft"]["stripeColors"] and draft["cursorColor"] == fixture["defaultDraft"]["cursorColor"], "returning to palette did not restore the catalog editors"
+    field(page, "version").locator("select").select_option("operator")
+    command = wait_command(page, "--version operator")
+    columns = field(page, "numColumns").locator('input[type="number"]')
+    assert columns.input_value() == "108", "Version operator shows Columns " + columns.input_value() + ", the renderer draws 108"
+    assert "numColumns" not in command, "untouched Columns was sent: " + command
+    columns.fill("80")
+    columns.blur()
+    command = wait_command(page, "--numColumns 80")
+    assert saved(page)["numColumns"] == 80, "Columns 80 on operator was not kept"
+
+
 CHECKS = [
+    ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("ZMatrix catalog renders every structured control", check_catalog),
     ("ZMatrix editor changes survive real C# command import", check_editors),
     ("ZMatrix scene and cleanup dependencies retain disabled values", check_gating),

@@ -543,7 +543,7 @@ public sealed class ConfiguratorForm : Form
         var saver = Path.Combine(Path.GetDirectoryName(renderer)!, "MatrixDesktop.scr");
         if (!File.Exists(saver)) throw new FileNotFoundException("Publish MatrixDesktop.scr beside MatrixDesktop.exe before selecting it as the screensaver.");
         var draft = ReadObject(payload, "draft");
-        global::Shared.ScreensaverProfile.Save(_commandBuilder.BuildArguments(draft, includeDefaults: true, forTest: false).ToArray());
+        global::Shared.ScreensaverProfile.Save(_commandBuilder.BuildScreensaverArguments(draft).ToArray());
         global::Shared.ScreensaverRegistration.Register(saver);
         return new { saved = true, message = "Current visual settings saved and MatrixDesktop selected as the screensaver." };
     }

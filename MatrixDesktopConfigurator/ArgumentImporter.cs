@@ -103,6 +103,9 @@ internal sealed class ArgumentImporter
             if (Uc3dControlProfile.Mode(draft) == "original" && draft["animationSpeed"] is JsonValue speed && speed.TryGetValue<double>(out var animationSpeed))
                 draft["animationSpeed"] = Math.Clamp(animationSpeed, 0, 4);
         }
+        // A field the command leaves out shows what that command renders for its version and
+        // effect (AUD-13), as the scene profile above does for the scene.
+        CommandBuilder.AdoptRenderedDefaults(_metadata, draft, applied);
 
         return new ImportResult
         {
