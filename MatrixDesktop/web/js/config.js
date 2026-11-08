@@ -636,9 +636,11 @@ paramMapping.angle = paramMapping.slant;
 paramMapping.colors = paramMapping.stripeColors;
 
 export default (urlParams) => {
+	// Own registry entries only: "in" also matches Object.prototype names such as
+	// constructor or __proto__, which have no parser and would throw before the renderer.
 	const validParams = Object.fromEntries(
 		Object.entries(urlParams)
-			.filter(([key]) => key in paramMapping)
+			.filter(([key]) => Object.hasOwn(paramMapping, key))
 			.map(([key, value]) => [paramMapping[key].key, paramMapping[key].parser(value)])
 			.filter(([_, value]) => value != null),
 	);
@@ -668,7 +670,7 @@ export default (urlParams) => {
 	}
 
 	const version = validParams.version in versions ? versions[validParams.version] : versions.classic;
-	const fontName = [validParams.font, version.font, defaults.font].find((name) => name in fonts);
+	const fontName = [validParams.font, version.font, defaults.font].find((name) => Object.hasOwn(fonts, name));
 	const font = fonts[fontName];
 
 	const baseTextureURL = textureURLs[[version.baseTexture, defaults.baseTexture].find((name) => name in textureURLs)];

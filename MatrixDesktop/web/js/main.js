@@ -73,7 +73,10 @@ document.body.onload = async () => {
 	try { await window.matrixHostBootstrapReady; }
 	catch (error) { showError(error); return; }
 	const urlParams = new URLSearchParams(window.location.search);
-	const config = makeConfig(Object.fromEntries(urlParams.entries()));
+	// Inside the visible error boundary: a configuration failure must explain itself.
+	let config;
+	try { config = makeConfig(Object.fromEntries(urlParams.entries())); }
+	catch (error) { showError(error); return; }
 	// Config check FIRST. && evaluates left to right, so asking supportsWebGPU() first
 	// meant awaiting navigator.gpu.requestAdapter() on every launch even though the default
 	// renderer is "regl", which initialises the D3D12 adapter enumeration and can spin up the

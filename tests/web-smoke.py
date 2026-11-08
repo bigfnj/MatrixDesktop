@@ -676,6 +676,38 @@ def check_matrix_web(page, origin):
         fail("matrix web bundle sizes its canvas", drawn["why"])
 
 
+def check_config_error_boundary(browser, origin):
+    """A configuration exception must produce the visible startup notice, not a silent page."""
+    name = "a configuration exception shows the visible startup error"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    served = []
+
+    def stub(route):
+        served.append(route.request.url)
+        route.fulfill(content_type="text/javascript",
+                      body="export default () => { throw new Error('injected configuration failure'); };")
+
+    try:
+        page.route("**/js/config.js", stub)
+        page.goto(f"{origin}/index.html?suppressWarnings=true", wait_until="load")
+        try:
+            page.wait_for_function("[...document.querySelectorAll('.notice')].some(n => "
+                                   "n.textContent.includes('injected configuration failure'))", timeout=10000)
+        except Exception:
+            if not served:
+                fail(name, "the config.js stub was never requested, so the boundary was not exercised")
+            else:
+                fail(name, "makeConfig threw and no .notice explains it; the page stays black")
+            return
+        ok(name, f"stub served {len(served)}x")
+    finally:
+        page.close()
+
+
+def check_startup_paths(browser, origin):
+    check_config_error_boundary(browser, origin)
+
+
 def main():
     state_path = REPO / "artifacts" / "gate" / "loadState.json"
     if not state_path.exists():
@@ -725,6 +757,9 @@ def main():
 
             print("=== web smoke: flags actually do something ===")
             check_glyph_intensity(browser, web_origin)
+
+            print("=== web smoke: renderer startup paths ===")
+            check_startup_paths(browser, web_origin)
 
             browser.close()
     finally:

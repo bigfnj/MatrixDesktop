@@ -110,6 +110,21 @@ await test("an intro that cannot progress is skipped instead of rendering nothin
 	} finally { console.warn = warn; }
 });
 
+await test("inherited Object property names in the query are ignored like any unknown key", () => {
+	const inherited = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"];
+	const query = Object.fromEntries([["unknownKey", "1"], ...inherited.map((key) => [key, "1"]), ["numColumns", "17"], ["fallSpeed", "0.9"]]);
+	assert.equal(Object.hasOwn(query, "__proto__"), true, "the probe must carry __proto__ as an own query key");
+	const config = makeConfig(query);
+	assert.equal(config.numColumns, 17); assert.equal(config.fallSpeed, 0.9);
+	for (const key of ["unknownKey", ...inherited]) assert.equal(Object.hasOwn(config, key), false, key);
+	assert.equal(Object.getPrototypeOf(config), Object.prototype);
+	const plain = makeConfig({});
+	for (const name of inherited) {
+		assert.equal(makeConfig({ font: name }).glyphMSDFURL, plain.glyphMSDFURL, `font=${name} must fall back to the default glyph atlas`);
+		assert.equal(makeConfig({ font: name, version: "megacity" }).glyphMSDFURL, "assets/megacity_msdf.png", `font=${name} must fall back to the version's font`);
+	}
+});
+
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {
 	let disconnects = 0;
 	const run = (behavior) => getLKG(true, { timeoutMs: 5, loadCore: async () => ({ Client: class {
