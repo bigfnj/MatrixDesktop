@@ -47,6 +47,14 @@ LOSS_HOOK = """(() => {
     get() { return reason => { calls.push(String(reason)); return pageHook?.(reason); }; },
     set(value) { pageHook = value; } });
   window.__matrixRendererLostCalls = calls;
+  // This loop starts before any renderer, so it runs first in every frame: a loss it causes
+  // meets the renderer's own frame callback in that frame, before webglcontextlost (a later
+  // task) arrives. The capture listener reads ready as that event arrives.
+  window.__frameFirst = [];
+  const first = () => { requestAnimationFrame(first); for (const task of window.__frameFirst.splice(0)) task(); };
+  requestAnimationFrame(first);
+  window.__readyAtLostEvent = null;
+  addEventListener('webglcontextlost', () => { window.__readyAtLostEvent = Boolean(window.matrixRuntimeDiagnostics?.ready); }, true);
 })();"""
 
 
@@ -98,14 +106,23 @@ def capture(page):
 
 
 def lose_regl_context(page):
-    """Lose the running renderer's WebGL context; it must clear ready and report the loss once."""
+    """Lose the running renderer's WebGL context; it must clear ready and report the loss once.
+
+    The first frame that finds the context lost must already clear ready: the canvas is
+    blank from the loss on, and webglcontextlost only arrives in a later task.
+    """
     page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
-    page.evaluate("window.__beforeLoss = true; window.__loseContext = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__loseContext.loseContext()")
+    page.evaluate("window.__beforeLoss = true; window.__loseContext = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__frameFirst.push(() => window.__loseContext.loseContext())")
     try:
         page.wait_for_function("window.__beforeLoss !== true || !matrixRuntimeDiagnostics.ready", timeout=1000)
     except Exception:
         raise AssertionError("WebGL context loss left matrixRuntimeDiagnostics.ready true") from None
     assert page.evaluate("window.__beforeLoss === true"), "the page reloaded during a pending WebGL loss instead of waiting for the restore"
+    try:
+        page.wait_for_function("window.__readyAtLostEvent !== null", timeout=1000)
+    except Exception:
+        raise AssertionError("webglcontextlost never reached the page, so the check proved nothing") from None
+    assert page.evaluate("window.__readyAtLostEvent") is False, "ready was still true when webglcontextlost arrived, after a frame had found the context lost"
     lost = page.evaluate("({ errors: matrixRuntimeDiagnostics.errors, calls: window.__matrixRendererLostCalls, frames: matrixRuntimeDiagnostics.frames })")
     assert lost["errors"] == ["WebGL context lost"], f"context loss was not recorded: {lost['errors']}"
     assert lost["calls"] == ["WebGL context lost"], f"page hook calls after the loss: {lost['calls']}"

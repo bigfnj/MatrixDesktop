@@ -170,7 +170,10 @@ export default async (canvas, config) => {
 	diagnostics.dispose = cleanup;
 
 	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
-		if (clock.paused || contextLost || regl._gl.isContextLost()) return;
+		// AUD-19: isContextLost() turns true before the browser queues webglcontextlost, so a
+		// frame in between finds the canvas blank and must clear ready, as UC3D and ZMatrix do.
+		if (contextLost || regl._gl.isContextLost()) { diagnostics.ready = false; return; }
+		if (clock.paused) return;
 		if (singleFrame) {
 			tick.cancel();
 		}
