@@ -699,5 +699,52 @@ test("UC3D overlay warnings are capped at 32 distinct entries", () => {
     overlays.dispose();
   } finally { dom.restore(); }
 });
+// Population, glyph rows and weighted geometry sums of an original scene at one time.
+function startupPrint(scene, time) {
+  const state = scene.update(time), grid = scene.grid(2), streams = scene.inspect();
+  const sum = key => streams.reduce((total, stream) => total + stream[key], 0);
+  let data = 0; for (let i = 0; i < grid.data.length; i++) data += grid.data[i] * (i % 16 + 1);
+  return [state.activeStreams, grid.instanceCount, sum("renderY"), sum("x"), sum("z"), data];
+}
+const startupOptions = { uc3dAmount: 100, codeRotation: true, forwardMovement: true, randomForwardMovement: true, sidewaysMovement: true };
+test("original nonzero animation speeds keep their pinned startup ramp and geometry", () => {
+  // Pinned from the scene before the speed-0 fix (fd2358f), seed 12345, aspect 2.
+  const pinned = {
+    1: [[0, 0, 0, 0, 0, 0, 0], [1, 10, 85, 232, -33.99263667820747, -29.174670991330167, 92691.70666326582],
+      [10, 100, 2312, 686.8, 19.581728178122383, 70.07818261225493, 2290282.6175416857]],
+    0.5: [[0, 0, 0, 0, 0, 0, 0], [1, 5, 24, 120.44, 6.629524185696833, -38.63392451358523, 29240.343511283398],
+      [10, 50, 1099, 798.8, -103.45773526736997, -59.84218094180656, 1175837.2999242917]],
+  };
+  for (const [speed, rows] of Object.entries(pinned)) {
+    const scene = original({ ...startupOptions, animationSpeed: Number(speed) }); scene.viewport(2);
+    for (const [time, ...expected] of rows) {
+      const actual = startupPrint(scene, time), label = `speed ${speed} at ${time} s`;
+      assert.deepEqual(actual.slice(0, 2), expected.slice(0, 2), `${label}: streams and glyphs ${actual.slice(0, 2)} changed from ${expected.slice(0, 2)}`);
+      actual.slice(2).forEach((value, i) => assert.ok(Math.abs(value - expected[i + 2]) <= 1e-9 * Math.max(1, Math.abs(expected[i + 2])), `${label}: geometry ${value} changed from ${expected[i + 2]}`));
+    }
+  }
+});
+await asyncTest("original speed 0 shows a populated frozen field, animated and single-frame", async () => {
+  const scene = original({ ...startupOptions, animationSpeed: 0 }); scene.viewport(2);
+  const first = startupPrint(scene, 0), streams = scene.inspect();
+  assert.equal(first[0], 100, `animated speed 0 admitted ${first[0]} of 100 streams`);
+  assert.ok(first[1] >= 1000, `animated speed 0 drew ${first[1]} glyphs`);
+  assert.ok(streams.filter(stream => stream.renderY < 10).length > 50, "the populated streams must have entered the view");
+  for (const time of [1, 5, 30]) {
+    assert.deepEqual(startupPrint(scene, time), first, `speed 0 moved at ${time} s`);
+    assert.deepEqual(scene.inspect(), streams, `speed 0 streams changed at ${time} s`);
+  }
+  await withPassEnvironment({}, async ({ tick, diagnostics }) => {
+    const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
+    const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", animationSpeed: "0", once: "true", resolution: "1" }));
+    try {
+      tick(12345);
+      assert.deepEqual(diagnostics().errors, []); assert.equal(diagnostics().ready, true);
+      assert.equal(diagnostics().controls, "original"); assert.equal(diagnostics().frames, 1, "witness: once draws one frame");
+      assert.ok(diagnostics().activeStreams > 0 && diagnostics().glyphInstances > 0,
+        `single-frame speed 0 drew ${diagnostics().activeStreams} streams and ${diagnostics().glyphInstances} glyphs`);
+    } finally { stop(); }
+  });
+});
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;

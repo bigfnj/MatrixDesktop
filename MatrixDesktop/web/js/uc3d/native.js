@@ -202,11 +202,14 @@ export function createNativeScene(config, pictureCount = 0) {
       const stream = { id: i, symbols: new Uint8Array(39), mutations: new Uint8Array(39), mirrors: new Uint8Array(39) };
       spawn(stream); stream.y = 25; streams.push(stream);
     }
+    // Speed 0 freezes every stream, so its ramp would never admit one. Populate the field
+    // with the ten-second speed-1 stream entry instead, leaving the camera, movement,
+    // pictures and the tick clock untouched. Every nonzero speed keeps its own ramp.
+    if (speed === 0) for (let i = 0; i < Math.round(10/STEP); i++) fall(STEP);
   };
   const step = () => {
     simulated = ++ticks*STEP; const dt = STEP*speed;
     updatePicture(STEP); updateCamera(dt);
-    active = Math.min(settings.amount, active+settings.amount*.1*dt);
     if (config.forwardMovement && config.volumetric) {
       if (config.randomForwardMovement && (forwardTimer -= dt) < 0) { forwardTarget = random(120)-60; forwardTimer = random(1500)*.01; }
       forwardVelocity += (forwardTarget-forwardVelocity)*dt; forwardDistance += forwardVelocity*.1*dt;
@@ -216,6 +219,11 @@ export function createNativeScene(config, pictureCount = 0) {
       else if ((sidewaysTimer -= dt) < 0) { sidewaysTarget = (random(2000)-1000)*.01; sidewaysTimer = random(500)*.01; }
       sidewaysVelocity += (sidewaysTarget-sidewaysVelocity)*dt; sidewaysDistance += sidewaysVelocity*dt;
     }
+    fall(dt);
+  };
+  // Stream entry and fall. Movement does not read the active count, so the ramp may follow it.
+  const fall = (dt) => {
+    active = Math.min(settings.amount, active+settings.amount*.1*dt);
     const bottom = plane(nativeViewProjection(aspect, config, { viewMatrix }), false);
     for (let index = 0; index < activeCount(); index++) {
       const stream = streams[index];
