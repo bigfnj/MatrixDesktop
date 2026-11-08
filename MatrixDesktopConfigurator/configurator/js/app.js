@@ -389,6 +389,48 @@ const sceneSections = (scene) => {
 	return sections;
 };
 
+// Keyboard focus across a rebuild. A removed control takes focus with it to <body>, so
+// every gating change and list edit used to send the next Tab back to the first field.
+// The focused control is recorded by position (its field, its list row and its index in
+// that row, or among the field's controls outside rows) and the same position is focused
+// in the rebuilt field. A removed last row lands on the new last row; an emptied list, or
+// a control that is now disabled, falls back to the field's first enabled control.
+const focusableSelector = "input, select, textarea, button, summary";
+const focusRowSelector = ".list-row, .phrase-row";
+const focusControls = (scope, inRow) =>
+	[...scope.querySelectorAll(focusableSelector)].filter((node) => inRow || !node.closest(focusRowSelector));
+const captureFocus = (root) => {
+	const node = document.activeElement;
+	if (!node || node === document.body || !root.contains(node)) return null;
+	const shell = node.closest("[data-field]");
+	const row = node.closest(focusRowSelector);
+	return {
+		node,
+		field: shell?.dataset.field ?? null,
+		row: row && shell ? [...shell.querySelectorAll(focusRowSelector)].indexOf(row) : -1,
+		index: (row ? focusControls(row, true) : focusControls(shell ?? root, false)).indexOf(node),
+	};
+};
+const restoreFocus = (shell, focus) => {
+	if (!focus) return;
+	// Moved rather than rebuilt (the screensaver actions): the same node, refocused.
+	if (focus.node.isConnected) {
+		focus.node.focus({ preventScroll: true });
+		return;
+	}
+	if (!shell) return;
+	const rows = shell.querySelectorAll(focusRowSelector);
+	const row = focus.row >= 0 && rows.length ? rows[Math.min(focus.row, rows.length - 1)] : null;
+	const inRow = row ? focusControls(row, true) : [];
+	const outside = focusControls(shell, false);
+	const preferred = row ? inRow[Math.min(focus.index, inRow.length - 1)] : focus.row < 0 ? outside[focus.index] : null;
+	for (const candidate of [preferred, ...inRow, ...outside]) {
+		if (!candidate || candidate.disabled) continue;
+		candidate.focus({ preventScroll: true });
+		if (document.activeElement === candidate) return;
+	}
+};
+
 // Render every group as a section (sticky header + field grid) into one
 // scrollable surface. A non-empty filter keeps only fields whose visible label,
 // catalog label or either section title matches, and drops emptied sections, so a
@@ -401,6 +443,7 @@ const renderFields = () => {
 	closeColorPicker();
 	const surface = el.fieldSurface;
 	const prevScroll = surface.scrollTop;
+	const focus = captureFocus(surface);
 	surface.replaceChildren();
 
 	const filter = state.filter.trim().toLowerCase();
@@ -463,6 +506,7 @@ const renderFields = () => {
 		surface.append(empty);
 	}
 
+	restoreFocus(focus?.field ? surface.querySelector(`[data-field="${CSS.escape(focus.field)}"]`) : null, focus);
 	surface.scrollTop = prevScroll;
 };
 
@@ -763,6 +807,7 @@ const renderPhraseField = (field) => {
 		return valid;
 	};
 	const draw = () => {
+		const focus = captureFocus(editor);
 		editor.replaceChildren();
 		phrases.forEach((phrase, index) => {
 			const row = document.createElement("div"); row.className = "phrase-row";
@@ -782,6 +827,7 @@ const renderPhraseField = (field) => {
 		add.addEventListener("click", () => { if (!getDisabledReason(field) && phrases.length < 64) { phrases.push("New phrase"); save(); draw(); } });
 		editor.append(add);
 		if (getDisabledReason(field)) for (const control of editor.querySelectorAll("input, button")) control.disabled = true;
+		restoreFocus(shell, focus);
 	};
 	hint.textContent = phrases.length + " phrase entries"; draw(); shell.append(editor, hint); return shell;
 };

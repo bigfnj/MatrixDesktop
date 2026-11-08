@@ -315,6 +315,49 @@ def check_picker_closes_on_rerender(page, _fixture):
     assert popover_hidden(page), "a popover whose anchor left the document stayed open"
 
 
+def focused(page):
+    return page.evaluate("""() => { const node = document.activeElement;
+        const shell = node?.closest('[data-field]'); const row = node?.closest('.list-row, .phrase-row');
+        const rows = shell ? [...shell.querySelectorAll('.list-row, .phrase-row')] : [];
+        return {tag: node?.tagName, field: shell?.dataset.field ?? null, text: shell ? node.textContent : '',
+                row: row ? rows.indexOf(row) : -1, rows: rows.length, value: node?.value ?? null}; }""")
+
+
+def check_focus_rerender(page, _fixture):
+    field(page, "isometric").locator("input").focus()
+    page.keyboard.press("Space")
+    now = focused(page)
+    assert now["field"] == "isometric", "control: the non-gating isometric checkbox lost focus: " + str(now)
+    field(page, "volumetric").locator("input").focus()
+    page.keyboard.press("Space")
+    now = focused(page)
+    assert now["field"] == "volumetric" and now["tag"] == "INPUT", "Space on the gating volumetric checkbox moved focus to " + str(now)
+    palette = field(page, "palette")
+    palette.locator(".list-row").nth(3).locator("button", has_text="×").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["row"], now["rows"], now["text"]) == ("palette", 2, 3, "×"), "removing the last stop did not land on the new last row's remove: " + str(now)
+    palette.locator(".add-row").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["rows"], now["text"]) == ("palette", 4, "Add stop"), "Add stop did not keep focus: " + str(now)
+    field(page, "effect").locator("select").focus()
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    now = focused(page)
+    assert (now["field"], now["value"]) == ("effect", "none"), "two ArrowDowns on the gating effect select did not step two options with focus kept: " + str(now)
+    choose_zmatrix(page)
+    phrases = field(page, "zmPhrases")
+    phrases.get_by_role("button", name="Add phrase").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["rows"], now["text"]) == ("zmPhrases", 2, "Add phrase"), "Add phrase did not keep focus: " + str(now)
+    phrases.locator(".phrase-row").nth(1).get_by_role("button", name="Remove").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["row"], now["rows"], now["text"]) == ("zmPhrases", 0, 1, "Remove"), "removing the last phrase did not land on the new last row's remove: " + str(now)
+
+
 def check_close_snapshot(page, _fixture):
     choose_zmatrix(page)
     saved(page)
@@ -419,6 +462,7 @@ CHECKS = [
     ("CFG chooser retains selected file text and cancellation", check_cfg_chooser),
     ("Late picker callbacks preserve disabled palette and stripe saved values", check_late_picker),
     ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
+    ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
     ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
