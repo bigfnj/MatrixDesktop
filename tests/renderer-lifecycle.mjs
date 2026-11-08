@@ -28,7 +28,8 @@ class Events {
 }
 globalThis.window = new Events();
 window.devicePixelRatio = 1;
-window.matchMedia = () => new Events();
+let mediaQueries = 0;
+window.matchMedia = () => { mediaQueries++; return new Events(); };
 globalThis.ResizeObserver = class {
 	static latest;
 	constructor(callback) { this.callback = callback; ResizeObserver.latest = this; }
@@ -57,7 +58,10 @@ await test("resource owner closes current and late handles exactly once", () => 
 await test("canvas size observes CSS changes and DPR without frame layout reads", () => {
 	let reads = 0, w = 101, h = 51;
 	const canvas = { get clientWidth() { reads++; return w; }, get clientHeight() { reads++; return h; } };
+	const queriesBefore = mediaQueries;
 	const tracker = createSize(canvas, 0.5);
+	// get() reads devicePixelRatio live, so a DPR media-query listener would only re-arm itself.
+	assert.equal(mediaQueries - queriesBefore, 0, "canvas size must not register a DPR media query");
 	assert.deepEqual(tracker.get(), [51, 26]);
 	const initialReads = reads;
 	for (let i = 0; i < 100; i++) tracker.get();
