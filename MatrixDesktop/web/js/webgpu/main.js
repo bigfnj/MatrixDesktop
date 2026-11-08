@@ -1,5 +1,6 @@
 import createCanvasSize from "../canvasSize.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { createShaderTime } from "../shaderTime.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
 
@@ -54,6 +55,9 @@ export default async (canvas, config) => {
 	let canvasContext;
 	let frameRequest;
 	let sizeTracker;
+	let gpuFailed = false;
+	let gpuErrors = 0;
+	let deviceLost = false;
 	const destroyContext = () => {
 		canvasContext?.unconfigure();
 		device?.destroy();
@@ -119,7 +123,24 @@ export default async (canvas, config) => {
 	if (!adapter) {
 		throw new Error("WebGPU not supported: no GPU adapter available");
 	}
-	device = await adapter.requestDevice();
+	// AUD-69: the default device limit is 8192 even when the adapter allows more, and a
+	// canvas past the device limit failed validation every frame while ready stayed true.
+	device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D } });
+	device.addEventListener("uncapturederror", (event) => {
+		if (cleanedUp) return;
+		gpuFailed = true; diagnostics.ready = false;
+		if (++gpuErrors <= 10) diagnostics.errors.push(`WebGPU validation: ${event.error.message}`);
+	});
+	// AUD-19: "destroyed" is our own teardown. Any other loss (a GPU process restart or a
+	// driver reset) leaves this device dead, so stop drawing and tell the page, which owns
+	// recovery (js/main.js).
+	device.lost.then((info) => {
+		if (cleanedUp || info.reason === "destroyed") return;
+		deviceLost = true; gpuFailed = true; diagnostics.ready = false;
+		diagnostics.errors.push(`WebGPU device lost (${info.reason}): ${info.message}`);
+		cancelAnimationFrame(frameRequest);
+		window.matrixRendererLost?.(`WebGPU device lost (${info.reason})`);
+	});
 	canvasContext = canvas.getContext("webgpu");
 
 	// console.table(device.limits);
@@ -155,8 +176,10 @@ export default async (canvas, config) => {
 	// goes into the time buffer each frame AND is handed to the rain pass, so a click stamp
 	// and the shader clock cannot come from different origins. `start` is set on the first
 	// rAF frame, so before then this reads 0 rather than NaN.
+	// AUD-64: the f32 seconds count from an origin that moves forward (js/shaderTime.js).
 	let start = NaN;
-	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : clock.seconds() - start / 1000);
+	const shaderTime = createShaderTime();
+	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : shaderTime.seconds(clock.seconds() - start / 1000));
 
 	const context = {
 		config,
@@ -170,22 +193,27 @@ export default async (canvas, config) => {
 		cameraSize,
 		canvas,
 		elapsedSeconds,
+		onTimeRebase: shaderTime.onRebase,
 	};
 
 	const effectName = config.effect in effects ? config.effect : "palette";
 	pipeline = await makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeEndPass]);
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
+	// AUD-47: fps 0 made the frame time Infinity, so nothing ever rendered and the canvas
+	// stayed black. Like UC3D and ZMatrix, it now draws one still frame, as once does.
+	const singleFrame = config.once || !(config.fps > 0);
 	let frames = 0;
 	let last = NaN;
 
 	let outputs;
 	let built = false;
 	const canvasSize = [0, 0];
-	sizeTracker = createCanvasSize(canvas, config.resolution);
+	sizeTracker = createCanvasSize(canvas, config.resolution, device.limits.maxTextureDimension2D);
 
 	const renderLoop = (now) => {
-		if (cleanedUp) return;
+		if (cleanedUp || deviceLost) return;
+		const wall = now;
 		now = clock.seconds(now) * 1000;
 		if (clock.paused) { frameRequest = requestAnimationFrame(renderLoop); return; }
 		if (isNaN(start)) {
@@ -196,7 +224,7 @@ export default async (canvas, config) => {
 			last = start;
 		}
 
-		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || config.once;
+		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame;
 		if (shouldRender) {
 			while (now - targetFrameTimeMilliseconds > last) {
 				last += targetFrameTimeMilliseconds;
@@ -217,7 +245,7 @@ export default async (canvas, config) => {
 			device.queue.copyExternalImageToTexture({ source: cameraCanvas }, { texture: cameraTex }, cameraSize);
 		}
 
-		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: (now - start) / 1000, frames }));
+		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: shaderTime.frame((now - start) / 1000, wall), frames }));
 		frames++;
 
 		const encoder = device.createCommandEncoder();
@@ -225,9 +253,9 @@ export default async (canvas, config) => {
 		// Eventually, when WebGPU allows it, we'll remove the endPass and just copy from our pipeline's output to the canvas texture.
 		// encoder.copyTextureToTexture({ texture: outputs?.primary }, { texture: canvasContext.getCurrentTexture() }, canvasSize);
 		device.queue.submit([encoder.finish()]);
-		diagnostics.frames = frames; diagnostics.ready = true; diagnostics.simulationTime = (now - start) / 1000;
+		diagnostics.frames = frames; diagnostics.ready = !gpuFailed; diagnostics.simulationTime = (now - start) / 1000;
 
-		if (!config.once) {
+		if (!singleFrame) {
 			frameRequest = requestAnimationFrame(renderLoop);
 		} else {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.

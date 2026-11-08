@@ -80,6 +80,16 @@ const createClickRipples = (canvas, enabled, initialTime = 0) => {
 				currentTime = time;
 			}
 		},
+		// AUD-64: the renderer moved shader time back by `shift` seconds (js/shaderTime.js).
+		// A stamp left behind would sit in the future and replay its ripple when time caught up.
+		shiftTime(shift) {
+			for (let i = 0; i < maxClickRipples; i++) {
+				clicks[i * 3 + 2] -= shift;
+				touches[i][2] -= shift;
+			}
+			currentTime -= shift;
+			changed = true;
+		},
 		setAspectRatio(value) {
 			const next = Number.isFinite(value) && value > 0 ? value : 1;
 			if (aspectRatio !== next) {

@@ -3,10 +3,12 @@ import createResourceOwner, { ownRegl } from "../resourceOwner.js";
 
 const numClicks = 5;
 
-export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas, elapsedSeconds = () => 0 }, inputs) => {
+export default ({ regl: nativeRegl, config, cameraTex, cameraAspectRatio, canvas, elapsedSeconds = () => 0, onTimeRebase }, inputs) => {
 	const owner = createResourceOwner();
 	const regl = ownRegl(owner, nativeRegl);
 	const clicks = Array(numClicks).fill([0, 0, -Infinity]).flat();
+	// AUD-64: click stamps follow the shader time origin when it moves (js/shaderTime.js).
+	onTimeRebase?.((shift) => { for (let i = 0; i < numClicks; i++) clicks[i * 3 + 2] -= shift; });
 	let aspectRatio = 1;
 
 	let index = 0;

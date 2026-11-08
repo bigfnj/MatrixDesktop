@@ -10,6 +10,7 @@ import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { createShaderTime, shaderTick } from "../shaderTime.js";
 
 const effects = {
 	none: null,
@@ -76,6 +77,7 @@ export default async (canvas, config) => {
 	let cleanedUp = false;
 	let regl;
 	let tick;
+	let contextLost = false;
 	const cleanup = () => {
 		if (cleanedUp) {
 			return;
@@ -128,6 +130,15 @@ export default async (canvas, config) => {
 	}
 
 	regl = createREGL({ canvas, pixelRatio: 1, extensions, optionalExtensions });
+	// AUD-19: on restore regl re-creates every texture empty, and the glyph atlases and
+	// palette are uploaded once, so a restored context draws black. Stay not ready from
+	// the loss on and tell the page, which owns recovery (js/main.js).
+	regl.on("lost", () => {
+		if (cleanedUp || contextLost) return;
+		contextLost = true; diagnostics.ready = false;
+		diagnostics.errors.push("WebGL context lost");
+		window.matrixRendererLost?.("WebGL context lost");
+	});
 
 	const cameraTex = regl.texture(cameraCanvas);
 	const lkg = await getLKG(config.useHoloplay);
@@ -136,9 +147,14 @@ export default async (canvas, config) => {
 	// All this takes place in a full screen quad.
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	let activeFrames = 0;
-	const withClock = regl({ context: { time: () => clock.seconds(), tick: () => activeFrames } });
+	// AUD-64: shaders get float32 time measured from an origin that moves forward (js/shaderTime.js).
+	const shaderTime = createShaderTime();
+	let shaderSeconds = 0;
+	// AUD-65: tick wraps before float32 loses integers (js/shaderTime.js).
+	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => shaderTick(activeFrames, config.cycleFrameSkip) } });
 	const effectName = config.effect in effects ? config.effect : "palette";
-	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas, elapsedSeconds: () => clock.seconds() };
+	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas,
+		elapsedSeconds: () => shaderTime.seconds(clock.seconds()), onTimeRebase: shaderTime.onRebase };
 	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };
 	const drawToScreen = regl({ uniforms: screenUniforms });
@@ -146,13 +162,16 @@ export default async (canvas, config) => {
 	if (cleanedUp) { for (const step of pipeline) step.cleanup?.(); regl.destroy(); return; }
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
+	// AUD-47: fps 0 made the frame time Infinity, so nothing ever rendered and the canvas
+	// stayed black. Like UC3D and ZMatrix, it now draws one still frame, as once does.
+	const singleFrame = config.once || !(config.fps > 0);
 	let last = NaN;
 	diagnostics.initialized = true;
 	diagnostics.dispose = cleanup;
 
 	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
-		if (clock.paused) return;
-		if (config.once) {
+		if (clock.paused || contextLost || regl._gl.isContextLost()) return;
+		if (singleFrame) {
 			tick.cancel();
 		}
 
@@ -162,7 +181,7 @@ export default async (canvas, config) => {
 			last = now;
 		}
 
-		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || config.once == true;
+		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame;
 
 		if (shouldRender) {
 			while (now - targetFrameTimeMilliseconds > last) {
@@ -180,6 +199,7 @@ export default async (canvas, config) => {
 				step.setSize(viewportWidth, viewportHeight);
 			}
 		}
+		shaderSeconds = shaderTime.frame(clock.seconds(), performance.now());
 		withClock(() => fullScreenQuad(() => {
 			for (const step of pipeline) {
 				step.execute(shouldRender);
@@ -189,7 +209,7 @@ export default async (canvas, config) => {
 		activeFrames++;
 		diagnostics.frames = activeFrames; diagnostics.ready = true;
 		diagnostics.simulationTime = clock.seconds();
-		if (config.once) {
+		if (singleFrame) {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
 			if (config.useCamera) stopCamera();
 		}

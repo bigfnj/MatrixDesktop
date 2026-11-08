@@ -38,6 +38,39 @@ INITIAL_PAUSE = """(() => {
 })();"""
 
 
+LOSS_HOOK = """(() => {
+  // Record the renderer's loss reports and swallow js/main.js's own hook, so its recovery
+  // reload cannot replace the page under this check.
+  const calls = [];
+  Object.defineProperty(window, 'matrixRendererLost', { configurable: true,
+    get() { return reason => calls.push(String(reason)); }, set() {} });
+  window.__matrixRendererLostCalls = calls;
+})();"""
+
+
+TIME_HOOK = """(() => {
+  // Move the page clock on demand and record what the shaders receive as time and tick.
+  const now = performance.now.bind(performance);
+  window.__clockOffset = 0;
+  performance.now = () => now() + window.__clockOffset;
+  window.__shaderUniforms = { time: [], tick: [] };
+  for (const Context of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+    if (!Context) continue;
+    const names = new WeakMap(), get = Context.prototype.getUniformLocation, set = Context.prototype.uniform1f;
+    Context.prototype.getUniformLocation = function(program, name) {
+      const location = get.call(this, program, name);
+      if ((name === 'time' || name === 'tick') && location) names.set(location, name);
+      return location;
+    };
+    Context.prototype.uniform1f = function(location, value) {
+      const name = location && names.get(location);
+      if (name) { const list = window.__shaderUniforms[name]; list.push(value); if (list.length > 256) list.shift(); }
+      return set.call(this, location, value);
+    };
+  }
+})();"""
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     regl_main_override = None
     def log_message(self, *args):
@@ -60,6 +93,97 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def capture(page):
     return Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
+
+
+def check_regl_context_loss(context, port):
+    """A lost WebGL context must stop claiming ready and report to the page hook once.
+
+    regl re-creates every texture empty on restore, so a restored context draws black;
+    the renderer must stay not ready (and stop counting frames) after the restore too.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(LOSS_HOOK)
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+        page.evaluate("window.__loseContext = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__loseContext.loseContext()")
+        try:
+            page.wait_for_function("!matrixRuntimeDiagnostics.ready", timeout=1000)
+        except Exception:
+            raise AssertionError("WebGL context loss left matrixRuntimeDiagnostics.ready true") from None
+        lost = page.evaluate("({ errors: matrixRuntimeDiagnostics.errors, calls: window.__matrixRendererLostCalls, frames: matrixRuntimeDiagnostics.frames })")
+        assert lost["errors"] == ["WebGL context lost"], f"context loss was not recorded: {lost['errors']}"
+        assert lost["calls"] == ["WebGL context lost"], f"page hook calls after the loss: {lost['calls']}"
+        page.evaluate("window.__loseContext.restoreContext()")
+        page.wait_for_timeout(1500)
+        restored = page.evaluate("({ ready: matrixRuntimeDiagnostics.ready, frames: matrixRuntimeDiagnostics.frames, calls: window.__matrixRendererLostCalls, contextLost: document.querySelector('canvas').getContext('webgl').isContextLost() })")
+        assert not restored["contextLost"], "the WebGL context did not restore, so the check proved nothing"
+        assert not restored["ready"], "ready came back after restore although the restored context draws black"
+        assert restored["frames"] == lost["frames"], f"frames advanced after the loss: {lost['frames']} -> {restored['frames']}"
+        assert restored["calls"] == ["WebGL context lost"], f"page hook calls after the restore: {restored['calls']}"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
+
+
+def check_regl_time_rebase(context, port):
+    """Four days of page time must not reach the float32 time uniform (AUD-64).
+
+    The jump arrives as one long gap between frames, which is how a hidden or suspended
+    page looks; tick must keep counting, or every glyph would re-seed as a first frame.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(TIME_HOOK)
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+        before = page.evaluate("window.__shaderUniforms.time.slice()")
+        assert before and max(before) < 60, f"time uniform before the jump: {before[-4:]}"
+        frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+        page.evaluate("window.__clockOffset = 4 * 86400 * 1000; window.__shaderUniforms.time.length = 0; window.__shaderUniforms.tick.length = 0")
+        page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 8", arg=frames)
+        after = page.evaluate("({ ...window.__shaderUniforms, clock: matrixRuntimeDiagnostics.simulationTime })")
+        assert after["clock"] > 4 * 86400 - 60, f"the page clock did not jump, so the check proved nothing: {after['clock']}"
+        assert after["time"] and max(after["time"]) < 700, f"time uniform after four days of page time: {after['time'][:4]}"
+        assert after["tick"] and min(after["tick"]) > 1, f"tick fell back to a first-frame value: {after['tick'][:8]}"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
+
+
+def check_regl_single_frame(context, port):
+    """fps=0 must draw one still frame, as UC3D and ZMatrix do, not a black canvas (AUD-47)."""
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        for fps in ("0", "30"):
+            page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&fps={fps}", wait_until="load")
+            page.wait_for_function("window.matrixRuntimeDiagnostics?.frames > 0", timeout=30000)
+            page.wait_for_timeout(2000)
+            frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+            image = capture(page).convert("L")
+            bright = sum(image.histogram()[41:]) / (image.width * image.height)
+            assert bright > 0.01, f"fps={fps} canvas is black: {bright:.2%} of pixels above luma 40"
+            page.wait_for_timeout(300)
+            later = page.evaluate("matrixRuntimeDiagnostics.frames")
+            if fps == "0":
+                assert frames == 1 and later == 1, f"fps=0 must draw exactly one frame: {frames} then {later}"
+            else:
+                assert later > frames, f"fps=30 control stopped animating at {frames} frames"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
 
 
 def main():
@@ -112,12 +236,13 @@ def main():
                     assert ImageChops.difference(paused, capture(page)).getbbox() is None, "paused original Matrix changed pixels"
                     page.evaluate("window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:false}}))")
                     page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 3", arg=frames)
-                    assert not errors, errors
                     page.evaluate("matrixRuntimeDiagnostics.dispose()")
                     frames = page.evaluate("matrixRuntimeDiagnostics.frames")
                     page.wait_for_timeout(100)
                     assert page.evaluate("matrixRuntimeDiagnostics.disposed && !matrixRuntimeDiagnostics.ready")
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames
+                    # AUD-55: checked after teardown, so errors raised by disposal are seen too.
+                    assert not errors, errors
                     print(f"PASS original Matrix {backend}: initial pause, shader initialization, mid-run pause, resume and disposal", flush=True)
                     if backend == "regl":
                         failed = context.new_page()
@@ -129,6 +254,12 @@ def main():
                         assert failed.locator(".notice b").count() == 0, "native failure text was interpreted as markup"
                         failed.close()
                         print("PASS native bootstrap failure remains visible as text and prevents renderer initialization", flush=True)
+                        check_regl_context_loss(context, server.server_port)
+                        print("PASS original Matrix regl context loss clears ready, reports once to the page and stays not ready after restore", flush=True)
+                        check_regl_time_rebase(context, server.server_port)
+                        print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
+                        check_regl_single_frame(context, server.server_port)
+                        print("PASS original Matrix regl fps=0 draws one still frame and an fps=30 control keeps animating", flush=True)
                 finally:
                     context.close()
             browser.close()

@@ -4,7 +4,7 @@ import { makeComputeTarget, makeUniformBuffer, loadShader, makeBindGroup, makePa
 
 const numTouches = 5;
 
-export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, timeBuffer, canvas, elapsedSeconds = () => 0 }) => {
+export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, timeBuffer, canvas, elapsedSeconds = () => 0, onTimeRebase }) => {
 	const owner = createResourceOwner();
 	const device = ownDevice(owner, nativeDevice);
 
@@ -15,6 +15,11 @@ export default ({ config, device: nativeDevice, cameraTex, cameraAspectRatio, ti
 
 	let index = 0;
 	let touchesChanged = true;
+	// AUD-64: touch stamps follow the shader time origin when it moves (js/shaderTime.js).
+	onTimeRebase?.((shift) => {
+		for (const touch of touches) touch[2] -= shift;
+		touchesChanged = true;
+	});
 
 	// MD-48 (upstream): see the regl mirrorPass. e.srcElement on a window-level listener
 	// divided by whatever element was clicked, so a click on the notice div produced

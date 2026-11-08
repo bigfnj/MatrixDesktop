@@ -97,12 +97,13 @@ def main():
                     page.set_viewport_size({"width": 480, "height": 270})
                     page.wait_for_function("document.querySelector('canvas').width === 480 && document.querySelector('canvas').height === 270")
                     assert max(ImageStat.Stat(canvas_image(page)).stddev) > 3, "resized scene lost its content"
-                    assert not errors, errors
                     page.evaluate("matrixRuntimeDiagnostics.dispose()")
                     disposed_frames = page.evaluate("matrixRuntimeDiagnostics.frames")
                     page.wait_for_timeout(150)
                     assert page.evaluate("matrixRuntimeDiagnostics.disposed && !matrixRuntimeDiagnostics.ready"), "disposal not reported"
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == disposed_frames, "disposed scene continued rendering"
+                    # AUD-55: checked after teardown, so errors raised by disposal are seen too.
+                    assert not errors, errors
                     reports.append({"backend": backend, "frames": disposed_frames, "checks": ["source", "pixels", "animation", "pause", "resume", "resize", "dispose"], "warnings": diagnostics["warnings"]})
                     print(f"PASS ZMatrix {backend}: rendered, animated, paused, resumed, resized and disposed", flush=True)
                 except Exception as error:
