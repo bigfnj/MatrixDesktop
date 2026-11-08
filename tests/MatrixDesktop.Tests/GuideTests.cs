@@ -32,6 +32,7 @@ internal static class GuideTests
         ("Every flag the guide documents really exists", GuideDocumentsNothingFictional),
         ("Defaults stated in the guide match the catalogue", GuideDefaultsMatchCatalog),
         ("Every wrapper flag the app accepts is documented in the guide", AppFlagsAreDocumented),
+        ("The guide's boolean rules match both parsers", BooleanRulesMatchBothParsers),
     ];
 
     private static string Resource(string name)
@@ -252,5 +253,97 @@ internal static class GuideTests
         Check.Equal(0, undocumented.Count,
             "the configurator can emit these wrapper flags but the argument guide never mentions them: " +
             $"[{string.Join(", ", undocumented)}]");
+    }
+
+    // Section 2's boolean rules, held to the two parsers they describe: the wrapper's
+    // FlagNormalization.ParseBool (reached through MatrixArgs.BuildQueryString) and config.js's
+    // isTrue. Both parsers changed in 336788d and this section did not, so for a while the guide
+    // told users that other values pass through unchanged and that the web app accepts exactly
+    // "true", while the wrapper already turned them into false.
+    private static void BooleanRulesMatchBothParsers()
+    {
+        var guide = Guide.Replace("\r\n", "\n");
+        var start = guide.IndexOf("\nBooleans\n", StringComparison.Ordinal);
+        var end = start < 0 ? -1 : guide.IndexOf("\nComma-separated lists\n", start, StringComparison.Ordinal);
+        Check.True(start >= 0 && end > start, "the guide's Booleans section was not found between its own headings");
+        var section = guide[start..end];
+        // Prose wraps at arbitrary words, so phrases are matched against the section on one line.
+        var prose = Regex.Replace(section, @"\s+", " ");
+
+        var isTrue = Regex.Match(ConfigJs, @"const isTrue = \(s\) => \[(?<list>[^\]]*)\]\.includes\(");
+        Check.True(isTrue.Success, "config.js no longer declares isTrue as a spelling list, so this test cannot read it");
+        var webTrue = Regex.Matches(isTrue.Groups["list"].Value, "\"(?<s>[^\"]*)\"").Select(m => m.Groups["s"].Value).ToArray();
+        Check.True(webTrue.Length >= 2, $"read only {webTrue.Length} spellings from isTrue, so comparing them would prove nothing");
+
+        string[] Spellings(string side)
+        {
+            var line = Regex.Match(section, $@"^\s*{side}\s*<=\s*(?<list>.+)$", RegexOptions.Multiline);
+            Check.True(line.Success, $"the guide's '{side} <=' spelling line is missing");
+            // "Recommended: true / false" names the canonical spelling on its own line.
+            return [.. line.Groups["list"].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries), side];
+        }
+        var guideTrue = Spellings("true");
+        var guideFalse = Spellings("false");
+
+        Check.SetEqual([.. guideTrue, ""], webTrue,
+            "the guide says the web app's own parser accepts the same true spellings as the wrapper plus an empty value");
+        foreach (var spelling in guideTrue.Concat(["YES", " on "]))
+        {
+            Check.True(MatrixDesktop.Shared.FlagNormalization.ParseBool(spelling, defaultWhenMissing: false),
+                $"the guide lists '{spelling}' as true, so the wrapper's ParseBool must accept it");
+            Check.Equal("camera=true", MatrixDesktop.MatrixArgs.BuildQueryString(["--camera", spelling]),
+                $"the guide lists '{spelling}' as true, so it must reach the web app as true");
+        }
+        foreach (var spelling in guideFalse)
+        {
+            Check.False(MatrixDesktop.Shared.FlagNormalization.ParseBool(spelling, defaultWhenMissing: true),
+                $"the guide lists '{spelling}' as false, so the wrapper's ParseBool must reject it");
+            Check.False(webTrue.Contains(spelling, StringComparer.OrdinalIgnoreCase),
+                $"the guide lists '{spelling}' as false, so the web app's isTrue must not accept it");
+            Check.Equal("camera=false", MatrixDesktop.MatrixArgs.BuildQueryString(["--camera", spelling]),
+                $"the guide lists '{spelling}' as false, so it must reach the web app as false");
+        }
+        Check.Equal("camera=true", MatrixDesktop.MatrixArgs.BuildQueryString(["--camera="]),
+            "the guide says an EMPTY value normalizes to true");
+        Check.Equal("volumetric=true", MatrixDesktop.MatrixArgs.BuildQueryString(["--volumetric"]),
+            "the guide says a bare boolean flag is treated as true");
+
+        // What the guide may say about any other value depends on what the wrapper does with it,
+        // so the pass-through wording fails here as soon as it stops being true, and vice versa.
+        var passesThrough = MatrixDesktop.MatrixArgs.BuildQueryString(["--camera", "maybe"]) == "camera=maybe";
+        var claimsPassThrough = Regex.IsMatch(prose, @"passed through|unchanged|exactly ""true""", RegexOptions.IgnoreCase);
+        var claimsConversion = prose.Contains("converted to false by the wrapper", StringComparison.OrdinalIgnoreCase);
+        Check.False(claimsPassThrough && !passesThrough,
+            "the guide says other values pass through unchanged and the web app accepts exactly \"true\", " +
+            "but the wrapper converts --camera maybe to camera=false before the web app sees it");
+        Check.False(claimsConversion && passesThrough,
+            "the guide says other values are converted to false by the wrapper, but --camera maybe passes through unchanged");
+        Check.True(claimsPassThrough || claimsConversion, "the guide must say what happens to any other value");
+        foreach (var other in new[] { "maybe", "2" })
+        {
+            Check.Equal("camera=false", MatrixDesktop.MatrixArgs.BuildQueryString(["--camera", other]),
+                $"the guide says --camera {other} is FALSE");
+        }
+
+        // The flags these rules cover. Found by behaviour rather than by reflecting on
+        // MatrixArgs.BoolKeys: a bare boolean flag becomes key=true, any other bare key is dropped.
+        var list = Regex.Match(prose, @"For every boolean web flag \((?<names>[^)]*)\)");
+        Check.True(list.Success, "the guide no longer lists the boolean web flags these rules apply to");
+        var listed = list.Groups["names"].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var booleans = ConfigJsParameters().Where(name => MatrixDesktop.MatrixArgs.BuildQueryString(["--" + name]) == name + "=true").ToArray();
+        Check.True(booleans.Length >= 9, $"found only {booleans.Length} boolean web flags, so the list comparison would cover almost nothing");
+        var unlisted = booleans.Except(listed, StringComparer.Ordinal).ToArray();
+        var notBoolean = listed.Except(booleans, StringComparer.Ordinal).ToArray();
+        Check.True(unlisted.Length == 0 && notBoolean.Length == 0,
+            $"the guide's boolean flag list disagrees with the flags the wrapper normalizes: unlisted [{string.Join(", ", unlisted)}], " +
+            $"listed but not boolean [{string.Join(", ", notBoolean)}]");
+
+        // "for the Matrix and UC3D flags": every listed flag outside ZMatrix is parsed by isTrue.
+        var otherParser = listed
+            .Where(name => !name.StartsWith("zm", StringComparison.Ordinal))
+            .Where(name => !Regex.IsMatch(ConfigJs, $@"^\t{Regex.Escape(name)}: \{{[^\n]*\bparser: isTrue\b", RegexOptions.Multiline))
+            .ToArray();
+        Check.Equal(0, otherParser.Length,
+            $"the guide says the Matrix and UC3D boolean flags use the web app's isTrue, but these do not: [{string.Join(", ", otherParser)}]");
     }
 }

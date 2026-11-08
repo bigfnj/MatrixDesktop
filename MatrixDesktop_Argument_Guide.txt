@@ -78,7 +78,12 @@ Numbers
   Example: "50%" becomes 50 (not 0.5). Avoid %.
 
 Booleans
-- For known boolean web flags (camera, volumetric, glyphFlip, clickRipples, loops, skipIntro, suppressWarnings, once, isometric):
+- For every boolean web flag (camera, volumetric, glyphFlip, clickRipples, loops,
+  skipIntro, suppressWarnings, once, isometric, shadedLines, sidewaysMovement,
+  mouseRotation, codeRotation, forwardMovement, randomForwardMovement,
+  showPictures, pictureMonochrome, pictureCaptions, showClock, clock12Hour,
+  desktopBackground, donorGlyphs, zmMonotonousCleanupEnabled,
+  zmRandomizedCleanupEnabled, zmOpaqueBackground):
   - Recommended: true / false
   - Also accepted via wrapper normalization, converted to true/false before the
     value reaches the web app:
@@ -90,10 +95,12 @@ Booleans
     Example: --camera=   is treated as camera=true
   - Bare boolean flags are treated as true.
     Example: --volumetric  is treated as volumetric=true
-  - Any other value is passed through to the web app unchanged, and the web app
-    accepts a boolean only when the text is exactly "true" (case-insensitive).
-    So --camera maybe and --camera 2 are both FALSE, silently. Stick to the
-    forms listed above.
+  - Any other value is converted to false by the wrapper before it reaches the
+    web app, so --camera maybe and --camera 2 are both FALSE, silently. Stick
+    to the forms listed above.
+  - The web app's own parser accepts the same true spellings and an empty value
+    for the Matrix and UC3D flags, so the page reads them the same way when it
+    is opened without the wrapper.
 
 Comma-separated lists
 - Color and palette/stripe values are passed as comma-separated lists without brackets.
