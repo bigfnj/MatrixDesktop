@@ -32,26 +32,25 @@ function script(bootstrap, expressionTokens = tokens) {
   return result;
 }
 function fixture(initial = { nativeGeneration: 1, label: "captured-old" }) {
-  const pending = [], listeners = new Map(), native = [], events = [];
+  const pending = [], listeners = new Map(), webview = [], events = [];
   const context = { location: { origin, search: configuration }, parent: {}, Number, Error,
     CustomEvent: class { constructor(type, detail) { this.type = type; Object.assign(this, detail); } },
     addEventListener(name, listener) { listeners.set(name, listener); },
     dispatchEvent(event) { events.push(event); },
-    chrome: { webview: { addEventListener(name, listener) { native.push(listener); } } },
+    // Records any web-message listener; the host never posts resources that way.
+    chrome: { webview: { addEventListener(name) { webview.push(name); } } },
     fetch(url, options) {
       assert.equal(url, "https://uc3d-media.local/__uc3d/bootstrap"); assert.equal(options.cache, "no-store");
       assert.equal(typeof listeners.get("message"), "function", "Parent message listener must exist before fetch starts");
-      assert.equal(native.length, 1, "Native message listener must exist before fetch starts");
       return new Promise(resolve => pending.push(resolve));
     },
   };
   context.window = context; vm.runInNewContext(script({ configuration, ...initial }), context);
-  return { context, events, pending,
+  return { context, events, pending, webview,
     message(bootstrap, from = "https://configurator.local", sourceWindow = context.parent) {
       assert.equal(typeof listeners.get("message"), "function", "Parent resource listener was not installed");
       listeners.get("message")({ data: { type: "matrix-native-resources", bootstrap: { configuration, ...bootstrap } }, origin: from, source: sourceWindow });
     },
-    nativeMessage(bootstrap) { assert.equal(native.length, 1); native[0]({ data: { type: "matrix-native-resources", bootstrap: { configuration, ...bootstrap } } }); },
     finish(bootstrap) {
       assert.equal(pending.length, 1, "Each document readiness must fetch the current native bootstrap");
       pending.shift()({ ok: true, json: async () => ({ configuration, ...bootstrap }) });
@@ -94,7 +93,7 @@ await test("older fetch completion cannot replace a newer pushed generation", as
 });
 await test("cross-scene generation ignores stale messages when ZMatrix metadata is absent", async () => {
   const race = fixture(); race.finish({ nativeGeneration: 1 }); await race.context.matrixHostBootstrapReady;
-  race.nativeMessage({ nativeGeneration: 5, images: ["uc3d"], wallpaper: null, zmatrixFonts: null });
+  race.message({ nativeGeneration: 5, images: ["uc3d"], wallpaper: null, zmatrixFonts: null });
   race.message({ nativeGeneration: 4, label: "stale" });
   assert.equal(race.context.matrixHostBootstrap.nativeGeneration, 5);
   assert.deepEqual(race.context.matrixHostBootstrap.images, ["uc3d"]);
@@ -123,7 +122,7 @@ await test("newer pushed resources from another configuration are ignored", asyn
   const fresh = fixture(); fresh.finish({ nativeGeneration: 2 }); await fresh.context.matrixHostBootstrapReady;
   const before = fresh.events.length;
   fresh.message({ nativeGeneration: 99, configuration: "?scene=uc3d" });
-  fresh.nativeMessage({ nativeGeneration: 100, configuration: "?scene=zmatrix&zmCharacters=other" });
+  fresh.message({ nativeGeneration: 100, configuration: "?scene=zmatrix&zmCharacters=other" });
   assert.equal(fresh.context.matrixHostBootstrap.nativeGeneration, 2, "A newer wrong-query push must not replace current resources");
   assert.equal(fresh.events.length, before, "A wrong-query push must not trigger an atlas reload");
 });
@@ -132,12 +131,21 @@ await test("current bootstrap fetch from another configuration rejects readiness
   await assert.rejects(fresh.context.matrixHostBootstrapReady, /Native resources belong to another configuration/);
   assert.equal(fresh.context.matrixHostBootstrap.nativeGeneration, 1);
 });
-await test("direct native updater ignores another configuration before publishing events", async () => {
+await test("initializer takes pushed resources only from the parent frame, never a web message", () => {
+  // The host's only web message is matrix-host-pointer; resources arrive by the direct
+  // updater below or by the configurator's frame postMessage.
+  assert.deepEqual(fixture().webview, [], "The initializer must not listen on chrome.webview");
+});
+function directUpdaterTokens() {
   const begin = source.indexOf("await core.ExecuteScriptAsync(");
   const finish = source.indexOf("private string ResourceUrl", begin);
   assert.ok(begin >= 0 && finish > begin, "The direct native updater expression must be present");
   const updaterTokens = [...source.slice(begin, finish).matchAll(/(\$?)"((?:\\.|[^"\\])*)"/gs)];
   assert.ok(updaterTokens.length > 0, "The direct native updater must contain executable C# string literals");
+  return updaterTokens;
+}
+await test("direct native updater ignores another configuration before publishing events", async () => {
+  const updaterTokens = directUpdaterTokens();
   const fresh = fixture(); fresh.finish({ nativeGeneration: 2 }); await fresh.context.matrixHostBootstrapReady;
   const before = fresh.events.length;
   vm.runInNewContext(script({ nativeGeneration: 99, configuration: "?scene=uc3d" }, updaterTokens), fresh.context);
@@ -145,6 +153,16 @@ await test("direct native updater ignores another configuration before publishin
   assert.equal(fresh.events.length, before);
   vm.runInNewContext(script({ nativeGeneration: 3, configuration }, updaterTokens), fresh.context);
   assert.equal(fresh.context.matrixHostBootstrap.nativeGeneration, 3); assert.equal(fresh.events.length, before + 1);
+});
+await test("direct native updater rejects an older generation when ZMatrix metadata is absent", async () => {
+  const updaterTokens = directUpdaterTokens();
+  const race = fixture(); race.finish({ nativeGeneration: 1 }); await race.context.matrixHostBootstrapReady;
+  const before = race.events.length;
+  vm.runInNewContext(script({ nativeGeneration: 5, configuration, images: ["uc3d"], wallpaper: null, zmatrixFonts: null }, updaterTokens), race.context);
+  vm.runInNewContext(script({ nativeGeneration: 4, configuration, label: "stale", wallpaper: null, zmatrixFonts: null }, updaterTokens), race.context);
+  assert.equal(race.context.matrixHostBootstrap.nativeGeneration, 5, "An older direct update must not replace a newer generation");
+  assert.deepEqual([...race.context.matrixHostBootstrap.images], ["uc3d"]);
+  assert.equal(race.events.length, before + 1, "Only the newer direct update may dispatch a resource event");
 });
 if (!passed && !failed) { console.error("No matching native bootstrap tests ran"); failed++; }
 console.log(`Native bootstrap tests: ${passed} passed, ${failed} failed`);

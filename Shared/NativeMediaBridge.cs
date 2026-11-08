@@ -262,7 +262,6 @@ internal sealed class NativeMediaBridge : IDisposable
             "window.matrixHostBootstrap=bootstrap;window.dispatchEvent(new CustomEvent('matrix-native-resources-updated',{detail:bootstrap}));return window.matrixHostBootstrap;};" +
             "if(!window.__matrixNativeMessages){window.__matrixNativeMessages=true;" +
             "const message=data=>{if(data?.type==='matrix-native-resources')apply(data.bootstrap);};" +
-            "window.chrome?.webview?.addEventListener('message',e=>message(e.data));" +
             "window.addEventListener('message',e=>{if(e.source===parent&&e.origin==='https://configurator.local')message(e.data);});}" +
             $"window.matrixHostBootstrapReady=fetch('{ResourceOrigin}/__uc3d/bootstrap',{{cache:'no-store'}})" +
             ".then(response=>{if(!response.ok)throw new Error('Native resource bootstrap failed ('+response.status+')');return response.json();})" +
