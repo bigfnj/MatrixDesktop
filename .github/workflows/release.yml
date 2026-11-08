@@ -18,9 +18,12 @@ jobs:
     # reproducible against a known toolchain, not whatever the label points at
     # on the day the tag was pushed.
     runs-on: windows-2025
-    timeout-minutes: 30
+    # Room for check-release-ci.ps1 to wait up to 35 minutes for CI on a commit
+    # pushed together with its tag, plus the build itself.
+    timeout-minutes: 60
     permissions:
       contents: write   # required to create GitHub Releases on a public repo
+      checks: read      # check-release-ci.ps1 reads CI's result for the tagged commit
 
     steps:
       - name: Checkout
@@ -32,6 +35,20 @@ jobs:
           # Keep the write-scoped token out of .git/config. The release step
           # receives it through the action's own env, not through git.
           persist-credentials: false
+
+      # Both checks run before anything is built, and the gate asserts that order
+      # (gate-lib.ps1, Get-ReleaseWorkflowOrderProblems). At v1.0.3 and v1.0.4 both
+      # csproj files and the guide header said 1.0.2 while the binaries were stamped
+      # from the tag, and ci.yml never runs on tags, so a tag on a red commit shipped.
+      - name: Check the tag against the version files
+        shell: pwsh
+        run: ./tests/check-release-version.ps1 -Tag $env:GITHUB_REF_NAME
+
+      - name: Require CI to have passed on the tagged commit
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./tests/check-release-ci.ps1 -Repository $env:GITHUB_REPOSITORY -Sha (git rev-parse HEAD)
 
       - name: Setup .NET SDK
         # actions/setup-dotnet v6.0.0 (Node 24), pinned for the same reason.

@@ -122,17 +122,143 @@ function Get-DumpsForPid {
         Where-Object { $_.Name -match $pattern -and $_.LastWriteTime -ge $cutoff })
 }
 
+# ---------------------------------------------------------------- release version and CI
+
+# A release states its version in three files: both csproj <Version> elements and the guide
+# header that --help-full and the configurator's ? button show. At tags v1.0.3 and v1.0.4 all
+# three said 1.0.2 while release.yml stamped the binaries from the tag, and a check that only
+# compared the files with each other passed at both. With -Tag (one leading 'v' stripped) each
+# file must equal the tag; without it the files must agree with each other. Problems name the
+# file, so an empty Problems list means consistent.
+function Get-ReleaseVersionReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [string]$Tag
+    )
+    $sources = [ordered]@{
+        'MatrixDesktop\MatrixDesktop.csproj'                         = '<Version>([^<]+)</Version>'
+        'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj' = '<Version>([^<]+)</Version>'
+        'MatrixDesktop_Argument_Guide.txt'                           = 'ARGUMENT GUIDE \(desktop wrapper v([0-9][^)]*)\)'
+    }
+    $versions = [ordered]@{}
+    $problems = @()
+    foreach ($relative in $sources.Keys) {
+        $path = Join-Path $RepoRoot $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $problems += "${relative}: not found"; continue }
+        $m = [regex]::Match([IO.File]::ReadAllText($path), $sources[$relative])
+        if (-not $m.Success) { $problems += "${relative}: no version matches $($sources[$relative])"; continue }
+        $versions[$relative] = $m.Groups[1].Value.Trim()
+    }
+    if ($Tag) {
+        $want = $Tag -creplace '^v', ''
+        foreach ($relative in $versions.Keys) {
+            if ($versions[$relative] -cne $want) { $problems += "${relative}: says $($versions[$relative]), the tag $Tag says $want" }
+        }
+    } else {
+        $values = @($versions.Values)
+        if (@($values | Where-Object { $_ -cne $values[0] }).Count -gt 0) {
+            $problems += 'the files disagree: ' + (@($versions.Keys | ForEach-Object { "$_ says $($versions[$_])" }) -join ', ')
+        }
+    }
+    return [pscustomobject]@{ Versions = $versions; Problems = $problems }
+}
+
+# The tag a version check compares against. An explicit -Tag wins. Otherwise the GitHub ref
+# name counts only when GITHUB_REF_TYPE says the run is for a tag: ci.yml runs the gate, and so
+# this check, on main pushes and pull requests, where the ref name is 'main' or '<n>/merge'.
+function Resolve-ReleaseTag {
+    param([string]$Tag)
+    if ($Tag) { return $Tag }
+    if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME) { return $env:GITHUB_REF_NAME }
+    return $null
+}
+
+# release.yml must compare the tag with the version files, and require CI's result on the
+# tagged commit, before it publishes anything; a check placed after the first publish, or
+# commented out, would let a mismatched or red commit ship. Asserts the ORDER of the lines
+# with their comments removed, not that the text appears somewhere.
+function Get-ReleaseWorkflowOrderProblems {
+    param([Parameter(Mandatory = $true)][string]$YamlText)
+    $patterns = [ordered]@{
+        'tag version check' = 'check-release-version\.ps1\b.*\s-Tag\b'
+        'CI result check'   = 'check-release-ci\.ps1\b'
+        'publish'           = '\bdotnet\s+publish\b'
+    }
+    $first = @{}
+    $lines = $YamlText -split "`r?`n"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        # A comment starts at a '#' that opens the line or follows whitespace, and trailing
+        # ones count: release.yml's 'checks: read  # check-release-ci.ps1 reads ...' sits
+        # above every step, so matching it passed the order check wherever the step went.
+        $code = $lines[$i] -replace '(^|\s)#.*$', ''
+        foreach ($key in $patterns.Keys) {
+            if (-not $first.ContainsKey($key) -and $code -match $patterns[$key]) { $first[$key] = $i + 1 }
+        }
+    }
+    $problems = @()
+    if (-not $first.ContainsKey('publish')) { $problems += "release.yml has no 'dotnet publish' line, so the order cannot be checked" }
+    foreach ($key in @('tag version check', 'CI result check')) {
+        if (-not $first.ContainsKey($key)) {
+            $problems += "release.yml never runs the $key"
+        } elseif ($first.ContainsKey('publish') -and $first[$key] -gt $first['publish']) {
+            $problems += "release.yml runs the $key at line $($first[$key]), after its first 'dotnet publish' at line $($first['publish'])"
+        }
+    }
+    return $problems
+}
+
+# release.yml runs on tags and ci.yml never does, so a tag on an untested or red commit used
+# to publish. The newest run of CI's job on that commit decides, as GitHub shows it on the
+# commit: 'ok', 'fail', 'pending' (queued or running) or 'missing' (CI never ran there).
+function Get-CiCheckVerdict {
+    param([AllowEmptyCollection()][object[]]$CheckRuns = @())
+    $runs = @($CheckRuns | Where-Object { $null -ne $_ } | Sort-Object -Property { [long]$_.id } -Descending)
+    if ($runs.Count -eq 0) { return [pscustomobject]@{ Outcome = 'missing'; Detail = 'no run of that check exists for the commit' } }
+    $latest = $runs[0]
+    if ($latest.status -ne 'completed') { return [pscustomobject]@{ Outcome = 'pending'; Detail = "run $($latest.id) is $($latest.status)" } }
+    if ($latest.conclusion -eq 'success') { return [pscustomobject]@{ Outcome = 'ok'; Detail = "run $($latest.id) concluded success" } }
+    return [pscustomobject]@{ Outcome = 'fail'; Detail = "run $($latest.id) concluded $($latest.conclusion)" }
+}
+
+# Whether tests\check-release-ci.ps1 polls again. A tag pushed together with its commit starts
+# the release while CI is queued or running, so 'pending' waits up to the timeout and
+# 'missing' waits a short grace for CI's run to appear. Returns 'pass', 'wait' or 'fail'.
+function Get-CiWaitDecision {
+    param(
+        [Parameter(Mandatory = $true)][string]$Outcome,
+        [double]$ElapsedMinutes,
+        [double]$TimeoutMinutes,
+        [double]$MissingGraceMinutes
+    )
+    if ($Outcome -eq 'ok') { return 'pass' }
+    if ($Outcome -eq 'pending' -and $ElapsedMinutes -lt $TimeoutMinutes) { return 'wait' }
+    if ($Outcome -eq 'missing' -and $ElapsedMinutes -lt $MissingGraceMinutes) { return 'wait' }
+    return 'fail'
+}
+
 # Runs one child harness with stdout and stderr redirected to $Log and "$Log.err", the way
 # every gate case runs, and classifies it. The self-tests call this same function with stub
-# scripts, so they exercise the gate's real redirection and verdict path.
+# scripts, so they exercise the gate's real redirection and verdict path. -Environment sets
+# variables for the child only ($null removes one) and restores them afterwards, because
+# Start-Process -Environment needs PowerShell 7.4.
 function Invoke-GateChildCase {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string]$ArgumentList,
         [Parameter(Mandatory = $true)][string]$Log,
-        [string]$Witness
+        [string]$Witness,
+        [hashtable]$Environment = @{}
     )
-    $run = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -PassThru -NoNewWindow `
-        -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
+    $saved = @{}
+    foreach ($name in $Environment.Keys) {
+        $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $Environment[$name], 'Process')
+    }
+    try {
+        $run = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
+    } finally {
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    }
     return Get-GateCaseVerdict -ExitCode $run.ExitCode -Log $Log -Witness $Witness
 }

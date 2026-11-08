@@ -898,45 +898,40 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     #
     # Asserts the two values are EQUAL, not that a version line exists: a regex that merely
     # matched "v1.0.something" would have passed happily on the stale 1.0.2.
+    #
+    # Agreement between the files was not enough either: at v1.0.3 and v1.0.4 all three said
+    # 1.0.2 and this check passed, while release.yml stamped the binaries from the tag. The
+    # comparison now lives in tests\check-release-version.ps1, which release.yml runs with
+    # -Tag before it builds; the gate runs the same script, in a child of this same shell, with
+    # no tag. Only a tag run (GITHUB_REF_TYPE=tag) reads the ref name, so main pushes and pull
+    # requests compare the files only.
     Test-Hdr 'tier 1: version consistency'
-    $guidePath = Join-Path $RepoRoot 'MatrixDesktop_Argument_Guide.txt'
-    $csprojPaths = @{
-        'MatrixDesktop'             = Join-Path $RepoRoot 'MatrixDesktop\MatrixDesktop.csproj'
-        'MatrixDesktopConfigurator' = Join-Path $RepoRoot 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj'
-    }
-    $missing = @($guidePath) + @($csprojPaths.Values) | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
-    if (@($missing).Count -gt 0) {
-        Test-Fail 'guide header version matches the project version' "not found: $($missing -join ', ')"
+    $versionScript = Join-Path $RepoRoot 'tests\check-release-version.ps1'
+    $versionLog = Join-Path $env:TEMP 'md-gate-release-version.log'
+    if (-not (Test-Path -LiteralPath $versionScript -PathType Leaf)) {
+        Test-Fail 'guide header version matches the project version' "missing: $versionScript"
     } else {
-        $versions = @{}
-        foreach ($name in $csprojPaths.Keys) {
-            $text = Get-Content -LiteralPath $csprojPaths[$name] -Raw
-            $m = [regex]::Match($text, '<Version>([^<]+)</Version>')
-            $versions[$name] = if ($m.Success) { $m.Groups[1].Value.Trim() } else { $null }
-        }
-        $guideText = Get-Content -LiteralPath $guidePath -Raw
-        $gm = [regex]::Match($guideText, 'ARGUMENT GUIDE \(desktop wrapper v([0-9][^)]*)\)')
-        $guideVersion = if ($gm.Success) { $gm.Groups[1].Value.Trim() } else { $null }
-
-        $problems = @()
-        foreach ($name in ($versions.Keys | Sort-Object)) {
-            if (-not $versions[$name]) { $problems += "$name.csproj has no <Version> element" }
-        }
-        if (-not $guideVersion) {
-            $problems += 'the guide header does not match "ARGUMENT GUIDE (desktop wrapper vX.Y.Z)", so its version cannot be read'
-        }
-        if ($problems.Count -eq 0) {
-            $distinct = @($versions.Values | Sort-Object -Unique)
-            if ($distinct.Count -ne 1) {
-                $problems += "the two csproj disagree: $(($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
-            } elseif ($guideVersion -ne $distinct[0]) {
-                $problems += "guide says v$guideVersion, csproj says $($distinct[0])"
-            }
-        }
-        if ($problems.Count -gt 0) {
-            Test-Fail 'guide header version matches the project version' ($problems -join '; ')
+        $versionArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $versionScript + '" -RepoRoot "' + $RepoRoot + '"'
+        $verdict = Invoke-GateChildCase -FilePath (Get-Process -Id $PID).Path -ArgumentList $versionArgs -Log $versionLog -Witness '(?m)^PASS release version'
+        $versionLines = @(Get-Content -LiteralPath $versionLog, "$versionLog.err" -ErrorAction SilentlyContinue)
+        if ($verdict.Outcome -eq 'ok') {
+            Test-Ok ('guide header version matches the project version (' + ((@($versionLines | Where-Object { $_ -like 'PASS release version*' }) | Select-Object -First 1) -replace '^PASS release version: ', '') + ')')
         } else {
-            Test-Ok "guide header version matches the project version (v$guideVersion in both csproj and the guide)"
+            Test-Fail 'guide header version matches the project version' $verdict.Detail
+            $versionLines | Where-Object { $_ -match '^FAIL' -or $verdict.ExitCode -ne 1 } | Select-Object -Last 20 |
+                ForEach-Object { Write-Host "               $_" -ForegroundColor Red }
+        }
+    }
+
+    $releaseYmlPath = Join-Path $RepoRoot '.github\workflows\release.yml'
+    if (-not (Test-Path -LiteralPath $releaseYmlPath -PathType Leaf)) {
+        Test-Fail 'release.yml checks the tag and CI before it publishes' "not found: $releaseYmlPath"
+    } else {
+        $orderProblems = @(Get-ReleaseWorkflowOrderProblems -YamlText ([IO.File]::ReadAllText($releaseYmlPath)))
+        if ($orderProblems.Count -gt 0) {
+            Test-Fail 'release.yml checks the tag and CI before it publishes' ($orderProblems -join '; ')
+        } else {
+            Test-Ok 'release.yml checks the tag and CI before it publishes'
         }
     }
 

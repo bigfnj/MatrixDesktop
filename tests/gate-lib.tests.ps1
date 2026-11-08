@@ -220,6 +220,142 @@ try {
     Invoke-TestCase 'AUD-27 (D) a missing dump folder means no dump' {
         Assert-Equal 0 @(Get-DumpsForPid -DumpDir (Join-Path $scratch 'no-dumps-here') -ProcessId 4242 -Since (Get-Date)).Count 'no folder, no dump'
     }
+
+    # ------------------------------------------------------------ AUD-28 release version and CI
+
+    $shellExe = (Get-Process -Id $PID).Path
+    $versionScript = Join-Path $here 'check-release-version.ps1'
+
+    function New-VersionTree {
+        param([string]$Name, [string]$Matrix, [string]$Configurator, [string]$Guide)
+        foreach ($dir in 'MatrixDesktop', 'MatrixDesktopConfigurator') {
+            New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $scratch $Name) $dir) | Out-Null
+        }
+        [void](New-StubFile "$Name\MatrixDesktop\MatrixDesktop.csproj" "<Project>`n  <PropertyGroup>`n    <Version>$Matrix</Version>`n  </PropertyGroup>`n</Project>`n")
+        [void](New-StubFile "$Name\MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj" "<Project>`n  <PropertyGroup>`n    <Version>$Configurator</Version>`n  </PropertyGroup>`n</Project>`n")
+        [void](New-StubFile "$Name\MatrixDesktop_Argument_Guide.txt" "MATRIXDESKTOP ARGUMENT GUIDE (desktop wrapper v$Guide)`n=====`n")
+        return (Join-Path $scratch $Name)
+    }
+
+    # Runs check-release-version.ps1 the way release.yml and the gate do, in a child of this
+    # shell, with only the given GitHub variables set (CI's own are removed for the child).
+    function Invoke-VersionCheck {
+        param([string]$Root, [string]$Tag, [hashtable]$GitHub = @{}, [string]$Label)
+        $environment = @{ GITHUB_REF_TYPE = $null; GITHUB_REF_NAME = $null }
+        foreach ($key in $GitHub.Keys) { $environment[$key] = $GitHub[$key] }
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $versionScript + '" -RepoRoot "' + $Root + '"'
+        if ($Tag) { $arguments += ' -Tag ' + $Tag }
+        $log = New-LogPath ('version-' + $Label)
+        $verdict = Invoke-GateChildCase -FilePath $shellExe -ArgumentList $arguments -Log $log -Environment $environment -Witness '(?m)^PASS release version'
+        $text = @(Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue) -join "`n"
+        return [pscustomobject]@{ ExitCode = $verdict.ExitCode; Outcome = $verdict.Outcome; Text = $text }
+    }
+
+    Invoke-TestCase 'AUD-28 (a) explicit tags: v1.2.0 passes, v9.9.9 names both csproj files and the guide' {
+        $root = New-VersionTree 'version-a' '1.2.0' '1.2.0' '1.2.0'
+        $match = Invoke-VersionCheck -Root $root -Tag 'v1.2.0' -Label 'a-match'
+        Assert-Equal 'ok' $match.Outcome "the matching tag passes ($($match.Text))"
+        $wrong = Invoke-VersionCheck -Root $root -Tag 'v9.9.9' -Label 'a-wrong'
+        Assert-Equal 1 $wrong.ExitCode "a tag that no file carries fails ($($wrong.Text))"
+        foreach ($file in 'MatrixDesktop\MatrixDesktop.csproj', 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj', 'MatrixDesktop_Argument_Guide.txt') {
+            if ($wrong.Text -notmatch ('(?m)^FAIL release version: ' + [regex]::Escape($file) + ': says 1\.2\.0, the tag v9\.9\.9 says 9\.9\.9')) {
+                throw "the failure does not name $file ($($wrong.Text))"
+            }
+        }
+    }
+
+    Invoke-TestCase 'AUD-28 (b) the v1.0.4 replay: files that agree at 1.0.2 pass alone and fail against the tag' {
+        $root = New-VersionTree 'version-b' '1.0.2' '1.0.2' '1.0.2'
+        $files = Invoke-VersionCheck -Root $root -Label 'b-files'
+        Assert-Equal 'ok' $files.Outcome "the files agree with each other, all the old check asked ($($files.Text))"
+        $tagged = Invoke-VersionCheck -Root $root -Tag 'v1.0.4' -Label 'b-tag'
+        Assert-Equal 1 $tagged.ExitCode "the release tag v1.0.4 does not match 1.0.2 ($($tagged.Text))"
+        Assert-Equal 3 ([regex]::Matches($tagged.Text, '(?m)^FAIL release version: .+: says 1\.0\.2, the tag v1\.0\.4 says 1\.0\.4')).Count "each of the three files is named ($($tagged.Text))"
+    }
+
+    Invoke-TestCase 'AUD-28 (c) branch and pull-request runs compare the files only; a tag run compares the tag' {
+        $root = New-VersionTree 'version-c' '1.2.0' '1.2.0' '1.2.0'
+        $branch = Invoke-VersionCheck -Root $root -GitHub @{ GITHUB_REF_TYPE = 'branch'; GITHUB_REF_NAME = 'main' } -Label 'c-branch'
+        Assert-Equal 'ok' $branch.Outcome "a main push is not a release ($($branch.Text))"
+        $pr = Invoke-VersionCheck -Root $root -GitHub @{ GITHUB_REF_TYPE = 'branch'; GITHUB_REF_NAME = '17/merge' } -Label 'c-pr'
+        Assert-Equal 'ok' $pr.Outcome "a pull request is not a release ($($pr.Text))"
+        $tagRun = Invoke-VersionCheck -Root $root -GitHub @{ GITHUB_REF_TYPE = 'tag'; GITHUB_REF_NAME = 'v9.9.9' } -Label 'c-tag'
+        Assert-Equal 1 $tagRun.ExitCode "a tag run without -Tag still compares its tag ($($tagRun.Text))"
+        $goodTagRun = Invoke-VersionCheck -Root $root -GitHub @{ GITHUB_REF_TYPE = 'tag'; GITHUB_REF_NAME = 'v1.2.0' } -Label 'c-tag-ok'
+        Assert-Equal 'ok' $goodTagRun.Outcome "a matching tag run passes ($($goodTagRun.Text))"
+    }
+
+    Invoke-TestCase 'AUD-28 (d) files that disagree fail without a tag, naming each version' {
+        $root = New-VersionTree 'version-d' '1.2.0' '1.2.0' '1.1.0'
+        $result = Invoke-VersionCheck -Root $root -Label 'd'
+        Assert-Equal 1 $result.ExitCode "the guide lags the csproj files ($($result.Text))"
+        if ($result.Text -notmatch 'MatrixDesktop_Argument_Guide\.txt says 1\.1\.0') { throw "the guide's version is not named ($($result.Text))" }
+    }
+
+    Invoke-TestCase 'AUD-28 (e) release.yml must run both checks, the version one with -Tag, before its first publish' {
+        $checks = "      - run: ./tests/check-release-version.ps1 -Tag `$env:GITHUB_REF_NAME`n      - run: ./tests/check-release-ci.ps1 -Repository x -Sha y`n"
+        $publish = "      - run: |`n          dotnet publish MatrixDesktop\MatrixDesktop.csproj -c Release`n"
+        Assert-Equal 0 @(Get-ReleaseWorkflowOrderProblems -YamlText ($checks + $publish)).Count 'both checks ahead of the publish'
+        $late = @(Get-ReleaseWorkflowOrderProblems -YamlText ($publish + $checks))
+        Assert-Equal 2 $late.Count "both checks after the publish ($($late -join '; '))"
+        $commented = @(Get-ReleaseWorkflowOrderProblems -YamlText (($checks -replace '(?m)^(\s*)- run: \./tests/check-release-version', '$1# - run: ./tests/check-release-version') + $publish))
+        Assert-Equal 1 $commented.Count "a commented-out version check does not count ($($commented -join '; '))"
+        $untagged = @(Get-ReleaseWorkflowOrderProblems -YamlText (($checks -replace ' -Tag \$env:GITHUB_REF_NAME', '') + $publish))
+        Assert-Equal 1 $untagged.Count "a version check without -Tag compares nothing with the tag ($($untagged -join '; '))"
+        Assert-Equal 1 @(Get-ReleaseWorkflowOrderProblems -YamlText $checks).Count 'no publish line means the order cannot be checked'
+        $header = "    permissions:`n      checks: read      # check-release-ci.ps1 reads CI's result`n"
+        $versionStep = "      - run: ./tests/check-release-version.ps1 -Tag `$env:GITHUB_REF_NAME`n"
+        $ciStep = "      - run: ./tests/check-release-ci.ps1 -Repository x -Sha y`n"
+        $trailing = @(Get-ReleaseWorkflowOrderProblems -YamlText ($header + $versionStep + $publish + $ciStep))
+        Assert-Equal 1 $trailing.Count "a trailing comment that names the CI script is not the step ($($trailing -join '; '))"
+    }
+
+    Invoke-TestCase 'AUD-28 (h) the real release.yml passes the order check, and fails it with the CI step moved below the publish' {
+        $releaseYml = Join-Path (Split-Path -Parent $here) '.github\workflows\release.yml'
+        $lines = @([IO.File]::ReadAllText($releaseYml) -split "`r?`n")
+        Assert-Equal 0 @(Get-ReleaseWorkflowOrderProblems -YamlText ($lines -join "`n")).Count 'release.yml as committed'
+        $starts = @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s{6}- name:') { $i } })
+        $block = $null
+        for ($k = 0; $k -lt $starts.Count; $k++) {
+            $end = if ($k + 1 -lt $starts.Count) { $starts[$k + 1] - 1 } else { $lines.Count - 1 }
+            if (@($lines[$starts[$k]..$end] | Where-Object { $_ -match '^\s*run:.*check-release-ci\.ps1' }).Count -gt 0) { $block = @($starts[$k], $end) }
+        }
+        if (-not $block) { throw 'release.yml has no step that runs check-release-ci.ps1' }
+        $rest = @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($i -lt $block[0] -or $i -gt $block[1]) { $lines[$i] } })
+        $moved = @(Get-ReleaseWorkflowOrderProblems -YamlText (($rest + $lines[$block[0]..$block[1]]) -join "`n"))
+        Assert-Equal 1 $moved.Count "the CI step moved to the end ($($moved -join '; '))"
+        if ($moved[0] -notmatch '^release\.yml runs the CI result check at line \d+, after its first') { throw "the problem does not name the CI result check ($($moved[0]))" }
+    }
+
+    Invoke-TestCase 'AUD-28 (f) the newest CI run on the tagged commit decides, and no run is a failure' {
+        function New-Run { param([long]$Id, [string]$Status, [string]$Conclusion) [pscustomobject]@{ id = $Id; status = $Status; conclusion = $Conclusion } }
+        Assert-Equal 'missing' (Get-CiCheckVerdict -CheckRuns @()).Outcome 'CI never ran on the commit'
+        Assert-Equal 'ok' (Get-CiCheckVerdict -CheckRuns @(New-Run 5 'completed' 'success')).Outcome 'a passing run'
+        Assert-Equal 'fail' (Get-CiCheckVerdict -CheckRuns @(New-Run 5 'completed' 'failure')).Outcome 'a failing run'
+        Assert-Equal 'fail' (Get-CiCheckVerdict -CheckRuns @(New-Run 5 'completed' 'cancelled')).Outcome 'a cancelled run is not a pass'
+        Assert-Equal 'pending' (Get-CiCheckVerdict -CheckRuns @(New-Run 5 'in_progress' '')).Outcome 'a running job'
+        Assert-Equal 'ok' (Get-CiCheckVerdict -CheckRuns @((New-Run 5 'completed' 'failure'), (New-Run 9 'completed' 'success'))).Outcome 'a re-run that passed supersedes the failure'
+        Assert-Equal 'fail' (Get-CiCheckVerdict -CheckRuns @((New-Run 9 'completed' 'failure'), (New-Run 5 'completed' 'success'))).Outcome 'a newer failure supersedes an older pass, in any order'
+        Assert-Equal 'wait' (Get-CiWaitDecision -Outcome 'pending' -ElapsedMinutes 5 -TimeoutMinutes 35 -MissingGraceMinutes 3) 'CI still running inside the timeout'
+        Assert-Equal 'fail' (Get-CiWaitDecision -Outcome 'pending' -ElapsedMinutes 35 -TimeoutMinutes 35 -MissingGraceMinutes 3) 'CI still running at the timeout'
+        Assert-Equal 'wait' (Get-CiWaitDecision -Outcome 'missing' -ElapsedMinutes 1 -TimeoutMinutes 35 -MissingGraceMinutes 3) 'CI may not have queued yet'
+        Assert-Equal 'fail' (Get-CiWaitDecision -Outcome 'missing' -ElapsedMinutes 3 -TimeoutMinutes 35 -MissingGraceMinutes 3) 'CI never ran on the commit'
+        Assert-Equal 'fail' (Get-CiWaitDecision -Outcome 'fail' -ElapsedMinutes 0 -TimeoutMinutes 35 -MissingGraceMinutes 3) 'a red commit fails at once'
+        Assert-Equal 'pass' (Get-CiWaitDecision -Outcome 'ok' -ElapsedMinutes 0 -TimeoutMinutes 35 -MissingGraceMinutes 3) 'a green commit passes'
+    }
+
+    Invoke-TestCase 'AUD-28 (g) the release scripts parse, and the CI check fails closed without a commit' {
+        foreach ($name in 'check-release-ci.ps1', 'check-release-version.ps1') {
+            $parseErrors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $here $name), [ref]$null, [ref]$parseErrors)
+            Assert-Equal 0 @($parseErrors).Count "$name parses ($(@($parseErrors) -join '; '))"
+        }
+        $log = New-LogPath 'ci-no-commit'
+        $verdict = Invoke-GateChildCase -FilePath $shellExe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $here 'check-release-ci.ps1') + '"') `
+            -Log $log -Environment @{ GITHUB_REPOSITORY = $null }
+        Assert-Equal 1 $verdict.ExitCode 'no repository or commit to ask about'
+        if (([IO.File]::ReadAllText($log)) -notmatch '(?m)^FAIL CI result: ') { throw "no FAIL CI result line ($([IO.File]::ReadAllText($log)))" }
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
