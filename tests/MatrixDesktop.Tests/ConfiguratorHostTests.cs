@@ -11,7 +11,31 @@ internal static class ConfiguratorHostTests
         ("A second configurator on the same store is refused", SecondConfiguratorRefused),
         ("The desktop snapshot help says wallpaper hosts use the wallpaper only", DesktopSnapshotHelp),
         ("Stop Test ends the Test host but not the processes it started", StopTestEndsOnlyTheHost),
+        ("A Test host that ends by itself sends one exit notice for the current test only", TestExitNotice),
     ];
+
+    private static void TestExitNotice()
+    {
+        // AUD-43. Killing mutations: drop EnableRaisingEvents in WatchExit (no notice arrives);
+        // drop the identity check in ClaimExited (a replaced host's notice clears the current one).
+        var info = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        info.ArgumentList.Add("--stand-in-test-host-child");
+        using var host = Process.Start(info)!;
+        var pid = host.Id;
+        using var noticed = new ManualResetEventSlim();
+        (Process? Process, int Pid) notice = (null, 0);
+        TestProcessStop.WatchExit(host, (process, id) => { notice = (process, id); noticed.Set(); });
+        try { host.Kill(); } catch { }
+        Check.True(noticed.Wait(10_000), "a Test host that ends by itself must produce an exit notice, or Stop Test stays enabled");
+        Check.True(ReferenceEquals(host, notice.Process) && notice.Pid == pid, "the notice names that process and its pid");
+
+        using var replaced = Process.GetCurrentProcess();
+        using var running = Process.GetCurrentProcess();
+        Process? current = running;
+        Check.False(TestProcessStop.ClaimExited(ref current, replaced), "a replaced Test host's exit notice is not for the running test");
+        Check.True(ReferenceEquals(current, running), "and must not clear it, or Stop could no longer end it");
+        Check.True(TestProcessStop.ClaimExited(ref current, running) && current is null, "the running Test host's own notice clears it");
+    }
 
     private static void StopTestEndsOnlyTheHost()
     {

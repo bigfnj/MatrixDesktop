@@ -653,6 +653,18 @@ public sealed class ConfiguratorForm : Form
             throw new InvalidOperationException("MatrixDesktop.exe did not start.");
         }
 
+        TestProcessStop.WatchExit(_testProcess, (exited, pid) =>
+        {
+            try
+            {
+                if (!IsDisposed) BeginInvoke(new Action(() => OnTestExited(exited, pid)));
+            }
+            catch (InvalidOperationException)
+            {
+                // The window is already gone.
+            }
+        });
+
         return new
         {
             processId = _testProcess.Id,
@@ -687,6 +699,27 @@ public sealed class ConfiguratorForm : Form
     {
         StopTestProcess();
         return new { stopped = true };
+    }
+
+    // The Test host ended by itself (usually its window was closed): tell the page, which
+    // ignores a pid other than the one it launched last.
+    private void OnTestExited(Process process, int pid)
+    {
+        if (_isShuttingDown || !TestProcessStop.ClaimExited(ref _testProcess, process))
+        {
+            return;
+        }
+
+        process.Dispose();
+        try
+        {
+            _ = _webView.CoreWebView2?.ExecuteScriptAsync(
+                $"window.configHost?.testExited?.({pid.ToString(System.Globalization.CultureInfo.InvariantCulture)});");
+        }
+        catch (Exception ex)
+        {
+            MatrixDesktop.Shared.Logger.Warn($"Could not tell the page that test process {pid} exited: {ex.Message}");
+        }
     }
 
     private void StopTestProcess()
