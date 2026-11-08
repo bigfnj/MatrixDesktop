@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Text;
 using System.Text.Json;
 using MatrixDesktop;
 using MatrixDesktop.Shared;
@@ -16,6 +17,11 @@ internal static class NativeBridgeTests
         ("Native bridge bootstrap marks only wallpaper, /s and /p hosts non-interactive", InteractiveFollowsHostKind),
         ("Native bridge ZMatrix startup prepares once", ZMatrixStartupPreparesOnce),
         ("Native bridge UC3D snapshot precedes show and survives startup", Uc3dSnapshotPrecedesShow),
+        ("Native bridge reuses the wallpaper and atlases across a colour-only ZMatrix edit", ColourEditReusesNativeWork),
+        ("Native bridge rebuilds only the native work whose input changed", ChangedInputsRebuild),
+        ("Native bridge refresh keeps the generation when nothing changed", UnchangedRefreshKeepsGeneration),
+        ("Native bridge refresh publishes a changed wallpaper", ChangedWallpaperRefreshPublishes),
+        ("Native bridge refresh rebuilds the atlases when font smoothing changes", SmoothingRefreshRebuildsAtlases),
     ];
 
     // MainForm's startup order: the constructor runs the before-show step, then
@@ -166,5 +172,127 @@ internal static class NativeBridgeTests
         bridge.Prepare(query, Virtual, 96);
         Require(captures.Screen == 1 && Bootstrap(bridge).GetProperty("desktopUrl").ValueKind == JsonValueKind.String,
             $"The before-show snapshot must survive startup with no second capture: {captures.Screen} captures.");
+    }
+
+    // Counting stand-ins for the ZMatrix native work. The atlas bytes follow the injected
+    // font-smoothing state, as a DEFAULT_QUALITY GDI raster does.
+    private sealed class Work
+    {
+        internal int Wallpaper, Normal, Special;
+        internal byte Fill = 4;
+        internal string Raster = "smoothing-a";
+        internal int Atlases => Normal + Special;
+    }
+
+    private static NativeMediaBridge ZMatrixBridge(Work work) => new(false, NativeHostKind.Wallpaper)
+    {
+        WallpaperCapture = bounds =>
+        {
+            work.Wallpaper++;
+            return new WallpaperBackground.Capture([work.Fill, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]);
+        },
+        AtlasFactory = (font, repertoire, special, dpi, path, prefix, url) =>
+        {
+            if (special) work.Special++; else work.Normal++;
+            var id = prefix + "-0";
+            return new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi },
+                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{font}|{string.Concat(repertoire)}") });
+        },
+        RasterEnvironment = () => work.Raster,
+    };
+
+    private static int Generation(NativeMediaBridge bridge) => Bootstrap(bridge).GetProperty("nativeGeneration").GetInt32();
+
+    private static byte[]? Served(NativeMediaBridge bridge, string url) => bridge.Resource(url[(url.LastIndexOf('/') + 1)..]);
+
+    // Every native resource url the bootstrap publishes, with the array served for it.
+    private static Dictionary<string, byte[]?> Served(NativeMediaBridge bridge)
+    {
+        var bootstrap = Bootstrap(bridge);
+        var urls = new List<string>();
+        if (bootstrap.GetProperty("wallpaper").ValueKind == JsonValueKind.Object) urls.Add(bootstrap.GetProperty("wallpaper").GetProperty("url").GetString()!);
+        foreach (var role in new[] { "normal", "special" })
+            foreach (var page in bootstrap.GetProperty("zmatrixFonts").GetProperty(role).GetProperty("pages").EnumerateArray())
+                urls.Add(page.GetProperty("url").GetString()!);
+        return urls.ToDictionary(url => url, url => Served(bridge, url));
+    }
+
+    private static void ColourEditReusesNativeWork()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        bridge.Prepare("scene=zmatrix&zmRedGain=0.5", Virtual);
+        var first = Served(bridge);
+        bridge.Prepare("scene=zmatrix&zmRedGain=0.6", Virtual);
+        var second = Served(bridge);
+        Require(work.Wallpaper == 1 && work.Atlases == 2, $"A colour-only edit must reuse the wallpaper and both atlases: wallpaper={work.Wallpaper}, atlases={work.Atlases}.");
+        Require(first.Count == 3 && second.Count == first.Count && second.All(pair => pair.Value is not null && first.TryGetValue(pair.Key, out var bytes) && ReferenceEquals(pair.Value, bytes)),
+            "The edited generation must serve the same wallpaper and atlas arrays under the same ids.");
+        var bootstrap = Bootstrap(bridge);
+        var generation = bootstrap.GetProperty("nativeGeneration").GetInt32();
+        var wallpaper = bootstrap.GetProperty("wallpaper").GetProperty("generation").GetInt32();
+        var fonts = bootstrap.GetProperty("zmatrixFonts").GetProperty("generation").GetInt32();
+        Require(generation == 2 && wallpaper == generation && fonts == generation,
+            $"Reused resources must be published under the current generation: native={generation}, wallpaper={wallpaper}, fonts={fonts}.");
+    }
+
+    private static void ChangedInputsRebuild()
+    {
+        var font = "&zmFont=" + Uri.EscapeDataString("{\"height\":-12}");
+        var work = new Work();
+        using (var bridge = ZMatrixBridge(work))
+        {
+            bridge.Prepare("scene=zmatrix", Virtual);
+            bridge.Prepare("scene=zmatrix" + font, Virtual);
+            Require(work.Normal == 2 && work.Special == 1, $"A regular-font edit must rebuild only the regular atlas: normal={work.Normal}, special={work.Special}.");
+            var reads = work.Wallpaper;
+            bridge.Prepare("scene=zmatrix" + font, Small);
+            Require(work.Wallpaper == reads + 1, $"A bounds change must re-read the wallpaper once: {work.Wallpaper - reads} reads.");
+        }
+        var colour = new Work();
+        using (var bridge = ZMatrixBridge(colour))
+        {
+            bridge.Prepare("scene=zmatrix&zmBackgroundMode=Color", Virtual);
+            Require(colour.Wallpaper == 0 && Bootstrap(bridge).GetProperty("wallpaper").ValueKind == JsonValueKind.Null,
+                $"Colour mode must not capture a wallpaper the page never decodes: {colour.Wallpaper} reads.");
+        }
+    }
+
+    private static void UnchangedRefreshKeepsGeneration()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        bridge.Prepare("scene=zmatrix", Virtual);
+        var published = bridge.RefreshAsync("scene=zmatrix", Virtual, 96).GetAwaiter().GetResult();
+        Require(work.Wallpaper == 2, $"A refresh must re-read the wallpaper: {work.Wallpaper} reads.");
+        Require(!published && Generation(bridge) == 1,
+            $"A refresh that changes nothing must keep generation 1 and not publish, or the page discards its raster: published={published}, generation={Generation(bridge)}.");
+    }
+
+    private static void ChangedWallpaperRefreshPublishes()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        bridge.Prepare("scene=zmatrix", Virtual);
+        var before = Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!;
+        work.Fill = 9;
+        var published = bridge.RefreshAsync("scene=zmatrix", Virtual, 96).GetAwaiter().GetResult();
+        var after = Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!;
+        Require(published && Generation(bridge) == 2, $"A changed wallpaper must be published as generation 2: published={published}, generation={Generation(bridge)}.");
+        Require(after != before && Served(bridge, after) is [9, ..], "The changed wallpaper must be served under a new id.");
+    }
+
+    private static void SmoothingRefreshRebuildsAtlases()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        bridge.Prepare("scene=zmatrix", Virtual);
+        work.Raster = "smoothing-b";
+        var published = bridge.RefreshAsync("scene=zmatrix", Virtual, 96).GetAwaiter().GetResult();
+        Require(work.Atlases == 4 && published && Generation(bridge) == 2,
+            $"A font-smoothing change must rebuild and publish both atlases: atlases={work.Atlases}, published={published}, generation={Generation(bridge)}.");
+        var fonts = Served(bridge).Where(pair => pair.Key.Contains("/font-", StringComparison.Ordinal)).ToArray();
+        Require(fonts.Length == 2 && fonts.All(pair => pair.Value is not null && Encoding.UTF8.GetString(pair.Value).StartsWith("smoothing-b|", StringComparison.Ordinal)),
+            "The published atlases must be the rasters built under the new smoothing settings.");
     }
 }

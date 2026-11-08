@@ -129,6 +129,8 @@ public sealed class MainForm : Form
     internal Task RefreshNativeResourcesAsync() => _isShuttingDown ? Task.CompletedTask
         : _mediaBridge.RefreshAsync(_startupQueryString, CaptureBounds, DeviceDpi);
 
+    internal bool NativeResourcesRefreshable => _mediaBridge.Refreshable;
+
     internal void PostHostPointer(DesktopPointerBridge.Pointer pointer)
     {
         if (_isShuttingDown || _webView.CoreWebView2 is null) return;
