@@ -281,6 +281,8 @@ internal sealed class NativeMediaBridge : IDisposable
         wallpaper = _wallpaper,
         zmatrixFonts = _zmatrixFonts,
         preview = _preview,
+        // No input reaches these windows, so the page must not wait for a click.
+        interactive = _hostKind is not (NativeHostKind.Wallpaper or NativeHostKind.Screensaver or NativeHostKind.ScreensaverPreview),
         warnings = _warnings,
     });
 

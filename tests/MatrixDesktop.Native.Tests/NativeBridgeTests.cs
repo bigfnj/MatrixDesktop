@@ -13,6 +13,7 @@ internal static class NativeBridgeTests
         ("Native bridge replaces an invalid ZMatrix character list with the page's default", InvalidCharactersUseDefault),
         ("Native bridge takes the UC3D desktop from the wallpaper for wallpaper and preview hosts", DesktopSourceFollowsHostKind),
         ("Native bridge refresh re-reads a wallpaper-sourced UC3D desktop only", RefreshRereadsWallpaperDesktop),
+        ("Native bridge bootstrap marks only wallpaper, /s and /p hosts non-interactive", InteractiveFollowsHostKind),
     ];
 
     private static readonly Rectangle Small = new(0, 0, 32, 32);
@@ -108,6 +109,28 @@ internal static class NativeBridgeTests
             bridge.Prepare(query, Virtual);
             bridge.RefreshAsync(query, Virtual, 96).GetAwaiter().GetResult();
             Require(screen.Screen + screen.Wallpaper == 1, $"A refresh must keep a screen snapshot: {screen.Screen + screen.Wallpaper} reads.");
+        }
+    }
+
+    private static void InteractiveFollowsHostKind()
+    {
+        // The configurator builds its preview bridge with preview: true and no host kind.
+        foreach (var (name, bridge, interactive) in new[]
+        {
+            ("configurator preview", new NativeMediaBridge(true), true),
+            ("fullscreen, windowed or borderless", new NativeMediaBridge(false, HostKind(HostLaunchKind.Standard, false)), true),
+            ("wallpaper", new NativeMediaBridge(false, HostKind(HostLaunchKind.Standard, true)), false),
+            ("screensaver (/s)", new NativeMediaBridge(false, HostKind(HostLaunchKind.Screensaver, false)), false),
+            ("screensaver preview (/p)", new NativeMediaBridge(false, HostKind(HostLaunchKind.ScreensaverPreview, false)), false),
+        })
+        {
+            using (bridge)
+            {
+                bridge.Prepare("scene=matrix", Small);
+                var value = Bootstrap(bridge).GetProperty("interactive");
+                Require(value.ValueKind == (interactive ? JsonValueKind.True : JsonValueKind.False),
+                    $"The {name} bootstrap must carry interactive={interactive.ToString().ToLowerInvariant()}, got {value}.");
+            }
         }
     }
 }
