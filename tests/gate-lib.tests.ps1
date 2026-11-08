@@ -140,6 +140,30 @@ try {
         Assert-Equal 'ok' $present.Outcome 'exit 0 with the witness is a pass'
     }
 
+    # ------------------------------------------------------------ AUD-29 native stderr
+
+    Invoke-TestCase 'AUD-29 native stderr under ErrorActionPreference Stop is an exit code, not a crash' {
+        $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+        if (-not $nodeCmd) { return 'CANNOT VERIFY AUD-29: node is not on PATH for the stderr stand-in' }
+        Assert-Equal 'Stop' $ErrorActionPreference 'the self-test runs under the gate''s preference'
+        # node stands in for a Python without Playwright: '-c import playwright' makes it write
+        # to stderr and exit 1, which crashed 5.1 before the fallback could be reached.
+        Assert-Equal $nodeCmd.Source (Find-GatePython -Candidates @('', 'no-such-python-md-gate', $nodeCmd.Source)) `
+            'a candidate that writes stderr falls through to the without-Playwright fallback'
+        $jsDir = Join-Path $scratch 'js'
+        New-Item -ItemType Directory -Path $jsDir | Out-Null
+        [void](New-StubFile 'js\good.js' "export const ok = 1;`n")
+        [void](New-StubFile 'js\broken-one.js' "export function ( {`n")
+        [void](New-StubFile 'js\broken-two.js' "const = ;`n")
+        $bad = @(Get-UnparsableJsModules -Node $nodeCmd.Source -Files @(Get-ChildItem -LiteralPath $jsDir -Filter *.js -File))
+        Assert-Equal 'broken-one.js,broken-two.js' (($bad | Sort-Object) -join ',') 'node --check names every broken module'
+        $unused = 99996
+        while (Get-Process -Id $unused -ErrorAction SilentlyContinue) { $unused += 4 }
+        $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        Assert-Equal 128 (Invoke-NativeQuiet -FilePath $taskKill -ArgumentList @('/PID', "$unused", '/T', '/F')) `
+            'taskkill reports a missing process by its exit code'
+    }
+
     # ------------------------------------------------------------ AUD-27 crash dumps
 
     function New-DumpFolder {

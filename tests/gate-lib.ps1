@@ -46,6 +46,61 @@ function Get-GateCaseVerdict {
     return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "exit $ExitCode; $where" }
 }
 
+# ---------------------------------------------------------------- native commands
+
+# Windows PowerShell 5.1 turns each line a native command writes to a redirected stderr into
+# an ErrorRecord, and under the gate's ErrorActionPreference Stop the first one throws
+# (NativeCommandError) before the caller can read the exit code. PowerShell 7.2+ never
+# applies the preference to native stderr, so only the documented full-gate shell crashed.
+# Runs the command with both streams discarded and returns its exit code; -1 if it never ran.
+function Invoke-NativeQuiet {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @()
+    )
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = -1
+    & $FilePath @ArgumentList 2>$null | Out-Null
+    return $global:LASTEXITCODE
+}
+
+# The interpreter for the Python cases: the first candidate that imports Playwright, else
+# the last one found without it, else $null.
+function Find-GatePython {
+    param([string[]]$Candidates)
+    $withoutPlaywright = $null
+    foreach ($candidate in $Candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        $found = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $found) { continue }
+        if ((Invoke-NativeQuiet -FilePath $found.Source -ArgumentList @('-c', 'import playwright')) -eq 0) { return $found.Source }
+        $withoutPlaywright = $found.Source
+    }
+    return $withoutPlaywright
+}
+
+# Runs node --check on a .mjs copy of each file (run-gate.ps1 explains why not the .js) and
+# returns the names of every file that does not parse, not just the first.
+function Get-UnparsableJsModules {
+    param(
+        [Parameter(Mandatory = $true)][string]$Node,
+        [Parameter(Mandatory = $true)][IO.FileInfo[]]$Files
+    )
+    $bad = @()
+    $mjsDir = Join-Path ([IO.Path]::GetTempPath()) ('md-gate-mjs-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $mjsDir | Out-Null
+    try {
+        foreach ($js in $Files) {
+            $probe = Join-Path $mjsDir ($js.BaseName + '.mjs')
+            Copy-Item -LiteralPath $js.FullName -Destination $probe -Force
+            if ((Invoke-NativeQuiet -FilePath $Node -ArgumentList @('--check', $probe)) -ne 0) { $bad += $js.Name }
+        }
+    } finally {
+        Remove-Item -LiteralPath $mjsDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $bad
+}
+
 # ---------------------------------------------------------------- crash dumps
 
 # CrashDumpWriter names each dump '<label>-<stamp>-pid<ProcessId>.dmp' and prunes the shared

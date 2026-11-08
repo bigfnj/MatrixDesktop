@@ -270,7 +270,7 @@ function Stop-GateProcess {
     } catch { }
     $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
     if (Test-Path -LiteralPath $taskKill -PathType Leaf) {
-        & $taskKill /PID $Process.Id /T /F 2>&1 | Out-Null
+        [void](Invoke-NativeQuiet -FilePath $taskKill -ArgumentList @('/PID', "$($Process.Id)", '/T', '/F'))
         try { [void]$Process.WaitForExit(5000) } catch { }
     } else {
         try { $Process.Kill(); [void]$Process.WaitForExit(5000) } catch { }
@@ -423,8 +423,12 @@ try {
         Test-Unchecked 'release build' 'skipped by -SkipBuild'
     } else {
         $buildLog = Join-Path $env:TEMP 'md-gate-build.log'
-        & dotnet build (Join-Path $RepoRoot 'MatrixDesktopApp.sln') -c Release --nologo -v:minimal *>&1 |
-            Tee-Object -FilePath $buildLog | Out-Null
+        # A child scope with Continue, so stderr cannot throw under 5.1 (gate-lib.ps1,
+        # Invoke-NativeQuiet). Not Start-Process: its -Wait also waits for descendants, and
+        # dotnet build leaves MSBuild nodes and the compiler server running.
+        & { $ErrorActionPreference = 'Continue'
+            & dotnet build (Join-Path $RepoRoot 'MatrixDesktopApp.sln') -c Release --nologo -v:minimal *>&1 |
+                Tee-Object -FilePath $buildLog | Out-Null }
         if ($LASTEXITCODE -ne 0) {
             Test-Fail 'release build' "dotnet build exited $LASTEXITCODE; see $buildLog"
         } else {
@@ -503,24 +507,13 @@ try {
     } else {
         $jsFiles = @(Get-ChildItem -LiteralPath $webRoot -Recurse -Filter *.js -File |
             Where-Object { $_.FullName -notmatch '\\lib\\' })
-        $badJs = @()
-        # Each file is copied to a .mjs before checking. This is not cosmetic: verified on
-        # node v24.16.0, 'node --check broken.js' exits 0 and silently passes a file whose
-        # last line is 'function ( {', because the CommonJS-then-ESM detection path
-        # swallows the SyntaxError. The identical content as .mjs exits 1 and names the
-        # line. Checking these as .js would be a gate that cannot fail.
-        $mjsDir = Join-Path $env:TEMP ('md-gate-mjs-' + [Guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Force -Path $mjsDir | Out-Null
-        try {
-            foreach ($js in $jsFiles) {
-                $probe = Join-Path $mjsDir ($js.BaseName + '.mjs')
-                Copy-Item -LiteralPath $js.FullName -Destination $probe -Force
-                & node --check $probe 2>$null
-                if ($LASTEXITCODE -ne 0) { $badJs += $js.Name }
-            }
-        } finally {
-            Remove-Item -LiteralPath $mjsDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        # Each file is copied to a .mjs before checking (Get-UnparsableJsModules, gate-lib.ps1).
+        # This is not cosmetic: verified on node v24.16.0, 'node --check broken.js' exits 0
+        # and silently passes a file whose last line is 'function ( {', because the
+        # CommonJS-then-ESM detection path swallows the SyntaxError. The identical content as
+        # .mjs exits 1 and names the line. Checking these as .js would be a gate that cannot
+        # fail.
+        $badJs = @(Get-UnparsableJsModules -Node $node.Source -Files $jsFiles)
         if ($badJs.Count -gt 0) {
             Test-Fail 'web javascript parses' "$($badJs.Count) file(s) failed node --check: $($badJs -join ', ')"
         } else {
@@ -606,17 +599,9 @@ try {
     # alone would report CANNOT VERIFY forever and this check would never once run locally.
     # TOOLBOX_PYTHON is the machine's provisioned venv; CI sets neither and falls through to
     # its own 'python', where the workflow installs playwright first.
-    $py = $null
-    $pyWithoutPlaywright = $null
-    foreach ($candidate in @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if (-not $found) { continue }
-        & $found.Source -c 'import playwright' 2>$null
-        if ($LASTEXITCODE -eq 0) { $py = $found.Source; break }
-        if (-not $py) { $pyWithoutPlaywright = $found.Source }
-    }
-    if (-not $py -and $pyWithoutPlaywright) { $py = $pyWithoutPlaywright }
+    # Find-GatePython (gate-lib.ps1) probes each candidate through Invoke-NativeQuiet, because
+    # a candidate without Playwright writes to stderr and that crashed Windows PowerShell 5.1.
+    $py = Find-GatePython -Candidates @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')
     $smokeScript = Join-Path $RepoRoot 'tests\web-smoke.py'
     $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
     if (-not $py) {
@@ -996,7 +981,8 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
         $symbolHarness = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
         $symbolLog = Join-Path $env:TEMP 'md-gate-published-symbols.log'
-        & $symbolHarness --verify-published-symbols (Join-Path $GatePublishDir 'MatrixDesktop.dll') (Join-Path $GatePublishDir 'MatrixDesktopConfigurator.dll') *> $symbolLog
+        & { $ErrorActionPreference = 'Continue'
+            & $symbolHarness --verify-published-symbols (Join-Path $GatePublishDir 'MatrixDesktop.dll') (Join-Path $GatePublishDir 'MatrixDesktopConfigurator.dll') *> $symbolLog }
         if ($LASTEXITCODE -ne 0) {
             Test-Fail 'published exception stacks carry source lines' "see $symbolLog"
             Get-Content -LiteralPath $symbolLog | Where-Object { $_ -match '^FAIL' } | ForEach-Object { Write-Host $_ }
@@ -1379,6 +1365,20 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     Write-Host ''
     Write-Host ("GATE PASSED ({0} checks)" -f $script:Pass) -ForegroundColor Green
     exit 0
+} catch {
+    # An exception that escaped every check used to end the run with exit 1 and no summary,
+    # which reads as a product failure. It is a harness error unless a real failure was
+    # already recorded, and either way it names the line that threw.
+    $where = if ($_.InvocationInfo) { $_.InvocationInfo.PositionMessage } else { '' }
+    if ($script:Fail -gt 0) {
+        Write-Host ''
+        Write-Host "HARNESS ERROR after $($script:Fail) recorded failure(s): $($_.Exception.Message)" -ForegroundColor Magenta
+        if ($where) { Write-Host $where -ForegroundColor Magenta }
+        Write-Host 'GATE FAILED:' -ForegroundColor Red
+        foreach ($f in $script:Failures) { Write-Host "  - $f" -ForegroundColor Red }
+        exit 1
+    }
+    Stop-Harness "unhandled exception: $($_.Exception.Message) $where"
 } finally {
     Pop-Location
 }
