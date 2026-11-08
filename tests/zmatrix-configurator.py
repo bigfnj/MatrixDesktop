@@ -407,6 +407,27 @@ def check_rename(page, _fixture):
     assert page.locator("#statusLine").inner_text() == "Preset renamed.", page.locator("#statusLine").inner_text()
 
 
+def check_test_exited(page, _fixture):
+    stop, status = page.locator("#stopButton"), page.locator("#statusLine")
+    launches = "window.__smokeReplies.filter(r=>r.type==='testCommand').length"
+    page.locator("#testButton").click()
+    page.wait_for_function("!document.querySelector('#stopButton').disabled")
+    pid = page.evaluate("window.__smokeReplies.filter(r=>r.type==='testCommand').at(-1).payload.processId")
+    assert pid == 123 and "Launched test process 123" in status.inner_text(), "launch witness: " + status.inner_text()
+    page.evaluate("pid=>configHost.testExited(pid)", pid - 1)
+    assert stop.is_enabled(), "a stale test exit notice disabled Stop Test"
+    assert "Launched test process 123" in status.inner_text(), "a stale test exit notice replaced the status"
+    page.evaluate("pid=>configHost.testExited(pid)", pid)
+    assert stop.is_disabled(), "the running test's exit notice left Stop Test enabled"
+    assert status.inner_text() == "Test window closed.", status.inner_text()
+    page.locator("#testButton").click()
+    page.wait_for_function(launches + "===2 && !document.querySelector('#stopButton').disabled")
+    stop.click()
+    page.wait_for_function("document.querySelector('#statusLine').textContent==='Test process stopped.'")
+    page.evaluate("pid=>configHost.testExited(pid)", pid)
+    assert status.inner_text() == "Test process stopped.", "a notice for a stopped test replaced its status: " + status.inner_text()
+
+
 def check_limits(page, fixture):
     choose_zmatrix(page)
     original = fixture["defaultDraft"]["zmCharacters"]
@@ -455,6 +476,7 @@ CHECKS = [
     ("Preview ignores obsolete and hidden asynchronous query replies", check_preview_race),
     ("Screensaver action labels match the controls the docs name", check_doc_labels),
     ("Rename changes only the preset name and keeps its saved values", check_rename),
+    ("Stop Test follows the host's exit notice for the running test only", check_test_exited),
 ]
 PRESET_CHECKS = {check_rename}
 

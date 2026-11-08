@@ -11,7 +11,9 @@ const state = {
 	filter: "",
 	// dirty and testRunning used to live here. Both were written and never read once:
 	// the save indicator is driven by setSaveState's argument, and the Stop Test button's
-	// own disabled property is the single source of truth for whether a test is running.
+	// own disabled property says whether a test is running. A launch enables it and keeps
+	// the pid on the button; Stop, or the host's configHost.testExited(pid) for that same
+	// pid when the test window closes on its own, disables it again.
 	// Keeping a second copy of state that nothing consults is how the two get to disagree.
 	requestId: 0,
 	pending: new Map(),
@@ -83,6 +85,14 @@ window.configHost = {
 		} else {
 			pending.reject(new Error(message.payload?.message || "Configurator request failed"));
 		}
+	},
+	// The host reports a test window that exited on its own. Only the last launched pid
+	// counts, so a late notice for an earlier or already stopped test changes nothing.
+	testExited(pid) {
+		if (!el.stopButton.dataset.pid || el.stopButton.dataset.pid !== String(pid)) return;
+		delete el.stopButton.dataset.pid;
+		el.stopButton.disabled = true;
+		setStatus("Test window closed.");
 	},
 };
 
@@ -1311,6 +1321,7 @@ const bindEvents = () => {
 	el.testButton.addEventListener("click", async () => {
 		try {
 			const result = await requestHost("testCommand", { draft: state.draft });
+			el.stopButton.dataset.pid = String(result.processId);
 			el.stopButton.disabled = false;
 			setStatus(`Launched test process ${result.processId}.`, "ok");
 		} catch (error) {
@@ -1321,6 +1332,7 @@ const bindEvents = () => {
 	el.stopButton.addEventListener("click", async () => {
 		try {
 			await requestHost("stopTest");
+			delete el.stopButton.dataset.pid;
 			el.stopButton.disabled = true;
 			setStatus("Test process stopped.", "ok");
 		} catch (error) {
