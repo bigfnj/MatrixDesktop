@@ -853,6 +853,17 @@ const renderPhraseField = (field) => {
 	hint.textContent = phrases.length + " phrase entries"; draw(); shell.append(editor, hint); return shell;
 };
 
+// One list of installed font families serves every font-name box. It is built once, outside
+// the field surface: renderFields clears the surface on every filter keystroke, gating change
+// and list edit, and used to rebuild two copies of the list each time.
+const fontListId = "installed-font-families";
+const renderFontList = (names) => {
+	const list = document.createElement("datalist");
+	list.id = fontListId;
+	for (const name of names) list.append(new Option(name, name));
+	document.body.append(list);
+};
+
 const renderFontField = (field) => {
 	const shell = createFieldShell(field, "wide-field");
 	const editor = document.createElement("details"); editor.className = "font-editor";
@@ -878,9 +889,7 @@ const renderFontField = (field) => {
 			if (input.type === "number") { input.min = String(option.min); input.max = String(option.max); input.step = "1"; }
 			else {
 				input.maxLength = 31;
-				const list = document.createElement("datalist"); list.id = field.id + "-families";
-				for (const name of state.fontNames || []) list.append(new Option(name, name));
-				input.setAttribute("list", list.id); label.append(list);
+				input.setAttribute("list", fontListId);
 			}
 			input.addEventListener("input", () => {
 				const valid = input.type === "number" ? input.value !== "" && Number.isFinite(Number(input.value))
@@ -1472,7 +1481,7 @@ const init = async () => {
 	try {
 		const payload = await requestHost("loadState");
 		state.metadata = payload.metadata;
-		state.fontNames = payload.fonts || [];
+		renderFontList(payload.fonts || []);
 		state.defaultDraft = payload.defaultDraft;
 		state.presets = payload.state?.userPresets || [];
 		state.selectedPresetId = payload.state?.selectedPresetId || null;

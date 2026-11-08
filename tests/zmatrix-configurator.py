@@ -428,6 +428,22 @@ def check_accessible_names(page, fixture):
             "clicking the " + key + " label did not focus its " + control
 
 
+FONT_NAMES = ["Fixture Font " + str(index) for index in range(50)]
+
+
+def check_font_list(page, _fixture):
+    lists = page.evaluate("[...document.querySelectorAll('[data-font-field=name]')].map(input => input.list?.options.length ?? null)")
+    assert lists == [len(FONT_NAMES)] * 2, "the two font-name boxes do not each offer the installed fonts: " + str(lists)
+    page.evaluate("window.__fontList = document.querySelector('[data-field=zmFont] [data-font-field=name]').list")
+    for text in ("font", ""):  # two full re-renders of the field surface
+        page.locator("#fieldFilter").fill(text)
+    now = page.evaluate("""() => ({options: document.querySelectorAll('datalist option').length,
+        connected: window.__fontList.isConnected,
+        shared: [...document.querySelectorAll('[data-font-field=name]')].map(input => input.list === window.__fontList)})""")
+    assert now["connected"] and now["shared"] == [True, True], "re-rendering replaced the font list instead of reusing it: " + str(now)
+    assert now["options"] == len(FONT_NAMES), "the page holds " + str(now["options"]) + " font options for " + str(len(FONT_NAMES)) + " fonts"
+
+
 def check_close_snapshot(page, _fixture):
     choose_zmatrix(page)
     saved(page)
@@ -534,6 +550,7 @@ CHECKS = [
     ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
     ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
     ("Field controls have accessible names and their labels operate them", check_accessible_names),
+    ("Font-name boxes share one installed-font list across re-renders", check_font_list),
     ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
@@ -581,6 +598,8 @@ def main():
                 page_fixture = dict(fixture)
                 if function is check_preview_race:
                     page_fixture["preview"] = {"available": True, "origin": origin + "/preview/"}
+                if function is check_font_list:
+                    page_fixture["fonts"] = FONT_NAMES
                 page.add_init_script(STUB.replace("__STATE__", json.dumps(page_fixture, ensure_ascii=False)))
                 try:
                     page.goto(origin + "/index.html", wait_until="load")
