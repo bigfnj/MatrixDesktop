@@ -766,9 +766,78 @@ def check_plug_me_in(browser, origin):
         page.close()
 
 
+def check_noninteractive_software_start(browser, origin):
+    """Wallpaper, screensaver and preview hosts cannot click: they must start, not block."""
+    name = "a non-interactive host on SwiftShader starts rendering instead of blocking"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    try:
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+        renderer = page.evaluate("() => { const gl = document.createElement('canvas').getContext('webgl'); "
+                                 "const info = gl?.getExtension('WEBGL_debug_renderer_info'); "
+                                 "return info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : ''; }")
+    finally:
+        page.close()
+    if "swiftshader" not in renderer.lower():
+        fail(name, f"witness failed: this Chromium renders with '{renderer}', not SwiftShader, so the notice path is unreachable")
+        return
+
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    warnings = []
+    page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
+    try:
+        page.add_init_script("window.matrixHostBootstrap = { interactive: false }; "
+                             "window.matrixHostBootstrapReady = Promise.resolve(window.matrixHostBootstrap);")
+        page.goto(f"{origin}/index.html?numColumns=40", wait_until="load")
+        page.wait_for_function(READY, timeout=20000)
+        first = page.evaluate("window.matrixRuntimeDiagnostics.frames")
+        page.wait_for_timeout(700)
+        seen = page.evaluate("() => ({ frames: window.matrixRuntimeDiagnostics.frames, "
+                             "pill: document.querySelector('.blue.pill') != null, "
+                             "display: getComputedStyle(document.querySelector('canvas')).display })")
+        problems = []
+        if seen["pill"]:
+            problems.append("the blocking notice is shown")
+        if seen["display"] == "none":
+            problems.append("the canvas is hidden")
+        if seen["frames"] <= first:
+            problems.append(f"frames did not advance ({first} -> {seen['frames']})")
+        if not any("hardware acceleration" in text.lower() for text in warnings):
+            problems.append("no console warning says hardware acceleration is disabled")
+        if problems:
+            fail(name, "; ".join(problems))
+        else:
+            ok(name, f"frames {first} -> {seen['frames']}")
+    except Exception as exc:
+        fail(name, f"no ready renderer with frames > 2 behind interactive:false: {type(exc).__name__}")
+    finally:
+        page.close()
+
+    for label, script in (("no bootstrap", None),
+                          ("interactive:true", "window.matrixHostBootstrap = { interactive: true };")):
+        name = f"an interactive host ({label}) on SwiftShader still shows the blocking notice"
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        try:
+            if script:
+                page.add_init_script(script)
+            page.goto(f"{origin}/index.html?numColumns=40", wait_until="load")
+            try:
+                page.wait_for_function("document.querySelector('.blue.pill') != null", timeout=10000)
+                held = page.evaluate("() => getComputedStyle(document.querySelector('canvas')).display === 'none' "
+                                     "&& window.matrixRuntimeDiagnostics == null")
+            except Exception:
+                held = False
+            if held:
+                ok(name)
+            else:
+                fail(name, "no .blue.pill over a hidden canvas with no renderer started")
+        finally:
+            page.close()
+
+
 def check_startup_paths(browser, origin):
     check_config_error_boundary(browser, origin)
     check_plug_me_in(browser, origin)
+    check_noninteractive_software_start(browser, origin)
 
 
 def main():
