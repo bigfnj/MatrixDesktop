@@ -68,17 +68,35 @@ STUB = """
       return {state: structuredClone(host)};
     },
   };
+  // ConfiguratorForm answers buildCommand, importCommand and testCommand synchronously on its UI
+  // thread, one at a time in arrival order, and sends every reply through ExecuteScriptAsync in
+  // that order, so the C# harness requests for them queue here. Run concurrently, a slow harness
+  // start answered an older command last and the page kept the command of an edit it had already
+  // replaced. buildWebQuery is not queued: the host awaits the media bridge for it.
+  // A body is serialized when the page posts it, as WebView2 does: payload.draft is the page's
+  // live draft, which a later edit changes while the request waits its turn.
+  // check_host_reply_order holds this queue to the host's order.
+  const askHost = async body => {
+    const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body});
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  };
+  let hostQueue = Promise.resolve();
+  const askHostInOrder = msg => {
+    const body = JSON.stringify(msg);
+    const answer = hostQueue.then(() => askHost(body));
+    hostQueue = answer.catch(() => {});
+    return answer;
+  };
   window.chrome = window.chrome || {};
   window.chrome.webview = { postMessage: async msg => {
     window.__smokeMessages.push(structuredClone(msg));
     try {
       let payload = {};
       if (msg.type === 'loadState') payload = state;
-      else if (['buildCommand','buildWebQuery','importCommand','testCommand'].includes(msg.type)) {
-        const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(msg)});
-        if (!response.ok) throw new Error(await response.text());
-        payload = await response.json();
-      } else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
+      else if (['buildCommand','importCommand','testCommand'].includes(msg.type)) payload = await askHostInOrder(msg);
+      else if (msg.type === 'buildWebQuery') payload = await askHost(JSON.stringify(msg));
+      else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
       else if (msg.type === 'loadHelp') payload = {text:window.__helpText??null};
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
@@ -644,13 +662,21 @@ def check_font_list(page, _fixture):
 
 
 def check_filter_actions(page, _fixture):
-    for text, shown in (("screensaver", True), ("RESTORE SCREEN", True), ("cursor", True), ("palette", False), ("", True)):
+    # The second case is the restore button's own label cut mid-word and upper-cased: partial, in
+    # another case and naming that button only. Taken from the page, it follows a rename as the
+    # filter does; AUD-61 relabelled "Restore screensaver" (cut: 'RESTORE SCREEN') to the docs' name.
+    label = lambda selector: " ".join(page.locator(selector).inner_text().split())
+    restore, use = label("#restoreScreensaverButton"), label("#screensaverButton")
+    partial = restore[:-5].upper()
+    assert len(partial) > 8 and partial != partial.lower() and partial.lower() not in use.lower(), \
+        "witness: " + repr(partial) + " must be a case-changed part of the restore label only: " + repr([restore, use])
+    for text, shown in (("screensaver", True), (partial, True), ("cursor", True), ("palette", False), ("", True)):
         page.locator("#fieldFilter").fill(text)
         now = page.evaluate("""() => ({buttons: ['#screensaverButton', '#restoreScreensaverButton'].map(id => document.querySelector(id)?.isConnected ?? false),
             empty: Boolean(document.querySelector('.empty-hint')), grids: document.querySelectorAll('#section-launch .field-grid').length,
             fields: document.querySelectorAll('#section-launch .field').length})""")
         assert now["buttons"] == [shown, shown], "filter " + repr(text) + (" lost" if shown else " kept") + " the screensaver actions: " + str(now)
-        if text in ("screensaver", "RESTORE SCREEN"):
+        if text in ("screensaver", partial):
             assert not now["empty"] and now["grids"] == 0, "an action-only match showed an empty hint or an empty field grid: " + str(now)
             assert page.locator("#screensaverButton").is_visible() and page.locator("#restoreScreensaverButton").is_visible()
         if text == "cursor":
@@ -1081,7 +1107,13 @@ def hex_rows(rows):
 
 
 def wait_command(page, text):
-    page.wait_for_function("text=>document.querySelector('#commandOutput').value.includes(text)", arg=text)
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    try:
+        page.wait_for_function("text=>document.querySelector('#commandOutput').value.includes(text)", arg=text)
+    except PlaywrightTimeout as error:
+        # A bare timeout cannot tell a stale reply (an older command shown) from a failed build (empty, error status).
+        raise AssertionError("the command never showed " + repr(text) + "; it shows " + repr(page.locator("#commandOutput").input_value())
+                             + " with status " + repr(page.locator("#statusLine").inner_text())) from error
     return page.locator("#commandOutput").input_value()
 
 
@@ -1114,8 +1146,55 @@ def check_effective_defaults(page, fixture):
     assert saved(page)["numColumns"] == 80, "Columns 80 on operator was not kept"
 
 
+# Holds the answer to the first stripes buildCommand at the page's fetch, outside the stub, as a
+# slow harness start would. The witness records how long it was held and how many builds the
+# page had posted when it was let go.
+HOLD_STRIPES_BUILD = """hold => {
+  const realFetch = window.fetch.bind(window);
+  window.__heldBuild = null;
+  window.fetch = async (url, init) => {
+    const response = await realFetch(url, init);
+    const message = url === '/__host' ? JSON.parse(init.body) : null;
+    if (!window.__heldBuild && message?.type === 'buildCommand' && message.payload?.draft?.effect === 'stripes') {
+      const witness = window.__heldBuild = {held: 0, builds: 0};
+      const started = performance.now();
+      await new Promise(resolve => setTimeout(resolve, hold));
+      witness.held = performance.now() - started;
+      witness.builds = window.__smokeMessages.filter(m => m.type === 'buildCommand').length;
+    }
+    return response;
+  };
+}"""
+
+
+def check_host_reply_order(page, _fixture):
+    # This holds the STUB to ConfiguratorForm's order contract; it is not a page guarantee.
+    # app.js updateCommand shows whichever buildCommand reply comes last and has no stale-reply
+    # guard, because the host answers buildCommand synchronously and replies in arrival order.
+    # The stripes build's answer is held at the page's fetch while the pride edit posts the next
+    # build, so a stub that forwards the two concurrently delivers pride first and the stale
+    # stripes reply last. Concurrent forwarding once timed out the AUD-13 check above.
+    hold = 1500
+    builds = "window.__smokeMessages.filter(m=>m.type==='buildCommand').length"
+    answered = "window.__smokeReplies.filter(r=>r.type==='buildCommand').length"
+    page.wait_for_function(builds + ">0 && " + answered + "===" + builds)  # init's build has settled
+    start = page.evaluate(builds)
+    page.evaluate(HOLD_STRIPES_BUILD, hold)
+    field(page, "effect").locator("select").select_option("stripes")
+    page.wait_for_function(builds + "===" + str(start + 1))
+    field(page, "effect").locator("select").select_option("pride")
+    page.wait_for_function(answered + "===" + str(start + 2))
+    page.wait_for_timeout(200)  # both replies received
+    witness = page.evaluate("window.__heldBuild")
+    assert witness and witness["held"] >= hold - 50, "witness: the stripes build's answer was not held back: " + str(witness)
+    assert witness["builds"] == start + 2, "witness: the pride build was not posted while the stripes answer was held: " + str(witness)
+    command = page.locator("#commandOutput").input_value()
+    assert "--effect pride" in command, "a slow earlier command reply replaced the latest edit's command: " + command
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
+    ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
     ("ZMatrix catalog renders every structured control", check_catalog),
     ("ZMatrix editor changes survive real C# command import", check_editors),
     ("ZMatrix scene and cleanup dependencies retain disabled values", check_gating),
