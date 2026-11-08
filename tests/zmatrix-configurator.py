@@ -536,7 +536,21 @@ def check_actions(page, _fixture):
     page.wait_for_function("window.__smokeMessages.filter(m=>m.type==='restoreScreensaver').length===1")
 
 
+def check_preview_unavailable(page, fixture):
+    assert not fixture["preview"]["available"], "this check needs the default fixture, which has no web assets"
+    button = page.locator("#previewButton")
+    title = button.get_attribute("title") or ""
+    assert button.is_disabled(), "the preview button is enabled although there are no web assets"
+    assert "web assets not found" in title, "the disabled preview button does not say why: " + repr(title)
+    # A disabled button dispatches no click, even a programmatic one, so no click handler can explain it.
+    status = page.locator("#statusLine").inner_text()
+    button.evaluate("node => node.click()")
+    assert page.locator("#statusLine").inner_text() == status, "a click on the disabled preview button reached a handler"
+
+
 def check_preview_race(page, _fixture):
+    title = page.locator("#previewButton").get_attribute("title") or ""
+    assert page.locator("#previewButton").is_enabled() and "not found" not in title, "control: an available preview is reported missing: " + repr(title)
     choose_zmatrix(page)
     page.wait_for_function("document.querySelector('#previewFrame').src.includes('scene=zmatrix')")
     page.evaluate("window.__holdPreviewReplies=true;window.__heldPreviewReplies=[]")
@@ -612,6 +626,7 @@ CHECKS = [
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
     ("Preview ignores obsolete and hidden asynchronous query replies", check_preview_race),
+    ("Preview button says why it is disabled without web assets", check_preview_unavailable),
 ]
 
 

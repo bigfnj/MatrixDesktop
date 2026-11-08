@@ -36,7 +36,6 @@ const el = {
 	saveAsPresetButton: document.querySelector("#saveAsPresetButton"),
 	renamePresetButton: document.querySelector("#renamePresetButton"),
 	deletePresetButton: document.querySelector("#deletePresetButton"),
-	groupNav: document.querySelector("#groupNav"),
 	fieldFilter: document.querySelector("#fieldFilter"),
 	sectionJump: document.querySelector("#sectionJump"),
 	fieldSurface: document.querySelector("#fieldSurface"),
@@ -120,7 +119,6 @@ const makeSwatchButton = (color, { disabled = false, label = "color" } = {}) => 
 	return button;
 };
 
-const allFields = () => state.metadata.groups.flatMap((group) => group.fields);
 const defaultValueFor = (field) => state.draft.scene === "uc3d" && state.draft.uc3dControls === "legacy" && field.id === "bloomStrength"
 	? field.defaultValue : state.metadata.sceneDefaults?.[state.draft.scene]?.[field.id] ?? field.defaultValue;
 const editedSceneFields = new Set();
@@ -248,7 +246,9 @@ const setPreviewVisible = (visible) => {
 	document.body.classList.toggle("preview-hidden", !state.previewVisible);
 	if (el.previewButton) {
 		el.previewButton.textContent = state.previewVisible ? "Hide preview" : "Show preview";
-		el.previewButton.title = state.previewVisible ? "Hide the live preview pane" : "Show the live preview pane";
+		// Without web assets the button stays disabled, and its title is the only place the reason shows.
+		el.previewButton.title = !state.previewAvailable ? "Matrix web assets not found next to the configurator"
+			: state.previewVisible ? "Hide the live preview pane" : "Show the live preview pane";
 	}
 	if (state.previewVisible) {
 		state.previewLastUrl = ""; // force a refresh on next push
@@ -1436,10 +1436,6 @@ const bindEvents = () => {
 
 	if (el.previewButton) {
 		el.previewButton.addEventListener("click", () => {
-			if (!state.previewAvailable) {
-				setStatus("Live preview unavailable: matrix web assets not found next to the configurator.", "error");
-				return;
-			}
 			setPreviewVisible(!state.previewVisible);
 			setStatus(state.previewVisible ? "Preview shown." : "Preview hidden.", "ok");
 		});
@@ -1489,10 +1485,7 @@ const init = async () => {
 		const preview = payload.preview || {};
 		state.previewAvailable = Boolean(preview.available && preview.origin);
 		state.previewOrigin = preview.origin || null;
-		if (!state.previewAvailable && el.previewButton) {
-			el.previewButton.disabled = true;
-			el.previewButton.title = "Matrix web assets not found next to the configurator";
-		}
+		if (!state.previewAvailable && el.previewButton) el.previewButton.disabled = true;
 
 		bindEvents();
 		setDirty(false);

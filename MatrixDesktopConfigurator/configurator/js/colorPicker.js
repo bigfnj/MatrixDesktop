@@ -11,7 +11,7 @@
 
 export const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
-export const rgbToHsv = ({ r, g, b }) => {
+const rgbToHsv = ({ r, g, b }) => {
 	r = clamp01(r); g = clamp01(g); b = clamp01(b);
 	const max = Math.max(r, g, b);
 	const min = Math.min(r, g, b);
@@ -27,7 +27,7 @@ export const rgbToHsv = ({ r, g, b }) => {
 	return { h, s: max === 0 ? 0 : d / max, v: max };
 };
 
-export const hsvToRgb = ({ h, s, v }) => {
+const hsvToRgb = ({ h, s, v }) => {
 	h = ((h % 360) + 360) % 360;
 	s = clamp01(s);
 	v = clamp01(v);
