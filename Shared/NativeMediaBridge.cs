@@ -131,8 +131,8 @@ internal sealed class NativeMediaBridge : IDisposable
         catch (Exception error) { _warnings.Add($"Wallpaper background unavailable: {error.Message}"); }
         try
         {
-            var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray());
-            var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"]);
+            var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray(), phrases: false);
+            var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"], phrases: true);
             var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal);
             var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
             var regularAtlas = GdiGlyphAtlas.Create(DecodeStructured(options.GetValueOrDefault("zmFont")), characters, false, dpi, asset,
@@ -145,10 +145,19 @@ internal sealed class NativeMediaBridge : IDisposable
         catch (Exception error) { _warnings.Add($"Native ZMatrix fonts unavailable: {error.Message}"); }
     }
 
-    private static string[] ReadTextArray(string? json, string[] fallback)
+    // 2026-11-08: the list rules of zmatrix/settings.js (BMP only, no C0 or DEL, the size
+    // limits). config.js silently replaces a rejected list with its default, so the atlas
+    // must do the same, or the page requests glyphs this atlas never rasterised.
+    private static string[] ReadTextArray(string? json, string[] fallback, bool phrases)
     {
-        if (string.IsNullOrWhiteSpace(json)) return fallback;
-        return JsonSerializer.Deserialize<string[]>(DecodeStructured(json)!) ?? throw new InvalidOperationException("A ZMatrix text list is invalid.");
+        if (string.IsNullOrWhiteSpace(json) || !global::Shared.StructuredArgumentCodec.TryDecode(json, out var decoded)) return fallback;
+        string?[]? values;
+        try { values = JsonSerializer.Deserialize<string?[]>(decoded); }
+        catch (Exception error) when (error is JsonException or InvalidOperationException) { return fallback; }
+        if (values is null || values.Any(text => text is null || text.Any(c => c < 0x20 || c == 0x7f || char.IsSurrogate(c)))) return fallback;
+        var texts = values.Select(text => text!).ToArray();
+        if (phrases) return texts.Length > 64 || texts.Any(text => text.Length is < 1 or > 256) || texts.SelectMany(text => text).Distinct().Count() > 1024 ? fallback : texts;
+        return texts.Length is < 1 or > 512 || texts.Any(text => text.Length != 1) ? fallback : texts;
     }
 
     private static string? DecodeStructured(string? value)
@@ -204,21 +213,7 @@ internal sealed class NativeMediaBridge : IDisposable
         if (_core is null || _disposed) return;
         var core = _core;
         if (_scriptId is not null) core.RemoveScriptToExecuteOnDocumentCreated(_scriptId);
-        var json = JsonSerializer.Serialize(new
-        {
-            nativeGeneration = _generation,
-            configuration = _configuration.Length == 0 ? "" : "?" + _configuration.TrimStart('?'),
-            images = _files.Values.Where(f => f.Id.StartsWith("image-", StringComparison.Ordinal))
-                .Select(f => new { id = f.Id, url = ResourceUrl(f.Id), caption = f.Caption, group = f.Group, groups = f.Groups ?? [f.Group] }),
-            desktopUrl = _desktop is null ? null : ResourceUrl("desktop"),
-            audioUrl = _files.ContainsKey("music") ? ResourceUrl("music") : null,
-            effectsUrl = _files.ContainsKey("effects") ? ResourceUrl("effects") : null,
-            glyphUrl = _files.ContainsKey("glyphs") ? ResourceUrl("glyphs") : null,
-            wallpaper = _wallpaper,
-            zmatrixFonts = _zmatrixFonts,
-            preview = _preview,
-            warnings = _warnings,
-        });
+        var json = BootstrapJson();
         // Snapshot before awaiting WebView2 registration. Child documents fetch this
         // current snapshot rather than depending on a frame's captured init script.
         _bootstrapJson = Encoding.UTF8.GetBytes(json);
@@ -245,6 +240,23 @@ internal sealed class NativeMediaBridge : IDisposable
     }
 
     private string ResourceUrl(string id) => ResourceOrigin + "/__uc3d/" + id;
+
+    // The document's bootstrap. Internal so the native harness can read it without a WebView.
+    internal string BootstrapJson() => JsonSerializer.Serialize(new
+    {
+        nativeGeneration = _generation,
+        configuration = _configuration.Length == 0 ? "" : "?" + _configuration.TrimStart('?'),
+        images = _files.Values.Where(f => f.Id.StartsWith("image-", StringComparison.Ordinal))
+            .Select(f => new { id = f.Id, url = ResourceUrl(f.Id), caption = f.Caption, group = f.Group, groups = f.Groups ?? [f.Group] }),
+        desktopUrl = _desktop is null ? null : ResourceUrl("desktop"),
+        audioUrl = _files.ContainsKey("music") ? ResourceUrl("music") : null,
+        effectsUrl = _files.ContainsKey("effects") ? ResourceUrl("effects") : null,
+        glyphUrl = _files.ContainsKey("glyphs") ? ResourceUrl("glyphs") : null,
+        wallpaper = _wallpaper,
+        zmatrixFonts = _zmatrixFonts,
+        preview = _preview,
+        warnings = _warnings,
+    });
 
     private void OnResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
