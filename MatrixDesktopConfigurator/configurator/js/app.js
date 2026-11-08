@@ -67,7 +67,6 @@ const el = {
 	closeExportButton: document.querySelector("#closeExportButton"),
 	themeButton: document.querySelector("#themeButton"),
 	previewButton: document.querySelector("#previewButton"),
-	previewPane: document.querySelector("#previewPane"),
 	previewFrame: document.querySelector("#previewFrame"),
 	helpButton: document.querySelector("#helpButton"),
 	helpModal: document.querySelector("#helpModal"),

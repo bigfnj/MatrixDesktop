@@ -1192,6 +1192,37 @@ def check_host_reply_order(page, _fixture):
     assert "--effect pride" in command, "a slow earlier command reply replaced the latest edit's command: " + command
 
 
+EL_LITERAL = re.compile(r"^const el = \{(.*?)^\};", re.M | re.S)
+EL_KEY = re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*:", re.M)
+EL_USE = re.compile(r"(?<![\w$.])el\b(?:\??\.([A-Za-z_$][\w$]*))?")
+
+
+def check_el_lookups(page, _fixture):
+    # R2-16: each element app.js looks up in its el literal has a reader, so a lookup left behind
+    # when its last reader goes (AUD-45 dropped el.groupNav and missed el.previewPane) fails here.
+    # el is module scoped and read as el.KEY; any other use (el[name], a spread, el passed on)
+    # reads keys this scan cannot see, so it fails too. The served app.js is scanned, so an
+    # --app-js mutant is what is read.
+    source = page.evaluate("fetch('js/app.js').then(response => response.text())")
+    literal = EL_LITERAL.search(source)
+    assert literal, "witness: app.js has no 'const el = {' literal to scan"
+    keys = EL_KEY.findall(literal.group(1))
+    assert len(keys) >= 30 and len(set(keys)) == len(keys), "witness: the el literal scan found " + str(len(keys)) + " keys: " + str(keys)
+    reads, dynamic = set(), []
+    for match in EL_USE.finditer(source):
+        if literal.start() <= match.start() < literal.end():
+            continue
+        if match.group(1):
+            reads.add(match.group(1))
+        else:
+            dynamic.append(source.count("\n", 0, match.start()) + 1)
+    assert not dynamic, "app.js uses el other than as el.KEY at line(s) " + str(dynamic) + ", so its reads cannot be counted"
+    unread = [key for key in keys if key not in reads]
+    assert not unread, "el looks up elements nothing reads: " + ", ".join(unread)
+    unknown = sorted(reads - set(keys))
+    assert not unknown, "app.js reads el keys the literal does not look up: " + ", ".join(unknown)
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1224,6 +1255,7 @@ CHECKS = [
     ("Export .ps1 shows the script for manual copy when the clipboard is busy", check_export_fallback),
     ("Test status shows the command the host launched", check_test_status),
     ("Preview button says why it is disabled without web assets", check_preview_unavailable),
+    ("Every element app.js looks up has a reader", check_el_lookups),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
