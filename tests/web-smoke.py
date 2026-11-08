@@ -1162,6 +1162,59 @@ def check_refused_webgl_context(browser, origin):
         ok(name, ", ".join(seen))
 
 
+def check_no_favicon_request(browser, origin):
+    """index.html declares an empty icon, so the browser never asks for /favicon.ico (R2-56).
+
+    web/ ships no favicon, so every app launch logged net::ERR_FILE_NOT_FOUND for it beside the
+    errors that matter. The headless shell never fetches favicons and Playwright's request events
+    miss the browser's own fetch, so this check runs the full Chromium build headless and reads
+    CDP. The same page with its icon link stripped must make the request, or a pass means nothing.
+    """
+    import re
+
+    name = "index.html makes no /favicon.ico request"
+    try:
+        full = browser.browser_type.launch(channel="chromium", args=["--use-gl=angle", "--use-angle=swiftshader",
+                                                                     "--enable-unsafe-swiftshader"])
+    except Exception as exc:
+        fail(name, f"the full Chromium build would not start ({type(exc).__name__}), and the headless shell never "
+                   "requests a favicon; install it with: python -m playwright install chromium")
+        return
+
+    def strip_icon(route):
+        response = route.fetch()
+        route.fulfill(response=response, body=re.sub(r'\s*<link rel="icon"[^>]*>', "", response.text()))
+
+    requested = {}
+    try:
+        # The shipped page first: a favicon that failed once may not be fetched again.
+        for label in ("as shipped", "icon link stripped"):
+            page = full.new_page(viewport={"width": 480, "height": 360})
+            seen = requested[label] = []
+            try:
+                if label != "as shipped":
+                    page.route("**/index.html*", strip_icon)
+                cdp = page.context.new_cdp_session(page)
+                cdp.on("Network.requestWillBeSent", lambda e, seen=seen: seen.append(e["request"]["url"])
+                       if e["request"]["url"].split("?")[0].endswith("/favicon.ico") else None)
+                cdp.send("Network.enable")
+                page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+                for _ in range(12):  # the fetch follows the load event within milliseconds
+                    if seen:
+                        break
+                    page.wait_for_timeout(250)
+            finally:
+                page.close()
+    finally:
+        full.close()
+    if requested["as shipped"]:
+        fail(name, f"the shipped page requested {requested['as shipped'][0]}")
+    elif not requested["icon link stripped"]:
+        fail(name, "witness failed: without its icon link the page made no /favicon.ico request either")
+    else:
+        ok(name, f"the stripped page requested it {len(requested['icon link stripped'])}x")
+
+
 def check_startup_paths(browser, origin):
     check_config_error_boundary(browser, origin)
     check_plug_me_in(browser, origin)
@@ -1169,6 +1222,7 @@ def check_startup_paths(browser, origin):
     check_context_loss_recovery(browser, origin)
     check_image_effect_offline(browser, origin)
     check_refused_webgl_context(browser, origin)
+    check_no_favicon_request(browser, origin)
 
 
 def main():
