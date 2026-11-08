@@ -105,6 +105,11 @@ function Stop-Harness {
     exit 3
 }
 
+# Decision logic shared with the gate's self-tests (tests\gate-lib.tests.ps1).
+$GateLib = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'gate-lib.ps1'
+if (-not (Test-Path -LiteralPath $GateLib -PathType Leaf)) { Stop-Harness "gate library missing: $GateLib" }
+. $GateLib
+
 $GatePublishDir = Join-Path $RepoRoot 'artifacts\gate\win-x64-fd'
 $ShotDir = Join-Path $RepoRoot 'artifacts\gate\shots'
 # 2026-10-23: a live installed MatrixDesktop can share WebView2's browser process
@@ -265,7 +270,7 @@ function Stop-GateProcess {
     } catch { }
     $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
     if (Test-Path -LiteralPath $taskKill -PathType Leaf) {
-        & $taskKill /PID $Process.Id /T /F 2>&1 | Out-Null
+        [void](Invoke-NativeQuiet -FilePath $taskKill -ArgumentList @('/PID', "$($Process.Id)", '/T', '/F'))
         try { [void]$Process.WaitForExit(5000) } catch { }
     } else {
         try { $Process.Kill(); [void]$Process.WaitForExit(5000) } catch { }
@@ -394,11 +399,6 @@ function Get-LogRecordsForPid {
     return @($out | Where-Object { $_.Pid -eq $ProcessId -and $_.Ts -ge $Since.AddSeconds(-3) })
 }
 
-function Get-DumpCount {
-    if (-not (Test-Path -LiteralPath $DumpDir)) { return 0 }
-    return @(Get-ChildItem -LiteralPath $DumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
-}
-
 # ---------------------------------------------------------------- run
 
 Push-Location $RepoRoot
@@ -423,8 +423,12 @@ try {
         Test-Unchecked 'release build' 'skipped by -SkipBuild'
     } else {
         $buildLog = Join-Path $env:TEMP 'md-gate-build.log'
-        & dotnet build (Join-Path $RepoRoot 'MatrixDesktopApp.sln') -c Release --nologo -v:minimal *>&1 |
-            Tee-Object -FilePath $buildLog | Out-Null
+        # A child scope with Continue, so stderr cannot throw under 5.1 (gate-lib.ps1,
+        # Invoke-NativeQuiet). Not Start-Process: its -Wait also waits for descendants, and
+        # dotnet build leaves MSBuild nodes and the compiler server running.
+        & { $ErrorActionPreference = 'Continue'
+            & dotnet build (Join-Path $RepoRoot 'MatrixDesktopApp.sln') -c Release --nologo -v:minimal *>&1 |
+                Tee-Object -FilePath $buildLog | Out-Null }
         if ($LASTEXITCODE -ne 0) {
             Test-Fail 'release build' "dotnet build exited $LASTEXITCODE; see $buildLog"
         } else {
@@ -503,24 +507,13 @@ try {
     } else {
         $jsFiles = @(Get-ChildItem -LiteralPath $webRoot -Recurse -Filter *.js -File |
             Where-Object { $_.FullName -notmatch '\\lib\\' })
-        $badJs = @()
-        # Each file is copied to a .mjs before checking. This is not cosmetic: verified on
-        # node v24.16.0, 'node --check broken.js' exits 0 and silently passes a file whose
-        # last line is 'function ( {', because the CommonJS-then-ESM detection path
-        # swallows the SyntaxError. The identical content as .mjs exits 1 and names the
-        # line. Checking these as .js would be a gate that cannot fail.
-        $mjsDir = Join-Path $env:TEMP ('md-gate-mjs-' + [Guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Force -Path $mjsDir | Out-Null
-        try {
-            foreach ($js in $jsFiles) {
-                $probe = Join-Path $mjsDir ($js.BaseName + '.mjs')
-                Copy-Item -LiteralPath $js.FullName -Destination $probe -Force
-                & node --check $probe 2>$null
-                if ($LASTEXITCODE -ne 0) { $badJs += $js.Name }
-            }
-        } finally {
-            Remove-Item -LiteralPath $mjsDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        # Each file is copied to a .mjs before checking (Get-UnparsableJsModules, gate-lib.ps1).
+        # This is not cosmetic: verified on node v24.16.0, 'node --check broken.js' exits 0
+        # and silently passes a file whose last line is 'function ( {', because the
+        # CommonJS-then-ESM detection path swallows the SyntaxError. The identical content as
+        # .mjs exits 1 and names the line. Checking these as .js would be a gate that cannot
+        # fail.
+        $badJs = @(Get-UnparsableJsModules -Node $node.Source -Files $jsFiles)
         if ($badJs.Count -gt 0) {
             Test-Fail 'web javascript parses' "$($badJs.Count) file(s) failed node --check: $($badJs -join ', ')"
         } else {
@@ -606,17 +599,9 @@ try {
     # alone would report CANNOT VERIFY forever and this check would never once run locally.
     # TOOLBOX_PYTHON is the machine's provisioned venv; CI sets neither and falls through to
     # its own 'python', where the workflow installs playwright first.
-    $py = $null
-    $pyWithoutPlaywright = $null
-    foreach ($candidate in @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if (-not $found) { continue }
-        & $found.Source -c 'import playwright' 2>$null
-        if ($LASTEXITCODE -eq 0) { $py = $found.Source; break }
-        if (-not $py) { $pyWithoutPlaywright = $found.Source }
-    }
-    if (-not $py -and $pyWithoutPlaywright) { $py = $pyWithoutPlaywright }
+    # Find-GatePython (gate-lib.ps1) probes each candidate through Invoke-NativeQuiet, because
+    # a candidate without Playwright writes to stderr and that crashed Windows PowerShell 5.1.
+    $py = Find-GatePython -Candidates @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')
     $smokeScript = Join-Path $RepoRoot 'tests\web-smoke.py'
     $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
     if (-not $py) {
@@ -690,6 +675,7 @@ try {
         Test-Unchecked 'screensaver foreground wait and ownership' 'Python is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D original WebGL calibration' 'Python with Playwright is unavailable'
+        Test-Unchecked 'UC3D calibration reports a hidden WebGPU adapter as unverified' 'Python with Playwright is unavailable'
         Test-Unchecked 'ZMatrix WebGL smoke' 'Python with Playwright is unavailable'
         Test-Unchecked 'ZMatrix configurator controls and imports' 'Python with Playwright is unavailable'
         Test-Unchecked 'original Matrix host playback' 'Python with Playwright is unavailable'
@@ -701,6 +687,10 @@ try {
             @{ Name = 'screensaver foreground wait and ownership'; Script = 'tests\screensaver-focus.test.py'; Arguments = '' },
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' },
+            # AUD-59: with no WebGPU adapter the calibration must report unverified coverage
+            # (exit 2 and its witness), as README says, not a product failure (exit 1).
+            @{ Name = 'UC3D calibration reports a hidden WebGPU adapter as unverified'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer webgpu --only amount-500'
+                Environment = @{ MD_UC3D_HIDE_WEBGPU_ADAPTER = '1' }; ExpectCannotVerify = '(?m)^\s*CANNOT VERIFY WebGPU'; Forbidden = '(?m)^\s*PASS webgpu' },
             @{ Name = 'ZMatrix WebGL smoke'; Script = 'tests\zmatrix-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'ZMatrix configurator controls and imports'; Script = 'tests\zmatrix-configurator.py'; Arguments = '' },
             @{ Name = 'UC3D real browser audio pause'; Script = 'tests\uc3d-audio-browser.py'; Arguments = '' },
@@ -712,15 +702,50 @@ try {
                 Test-Fail $case.Name "missing: $path"
                 continue
             }
-            $run = Start-Process -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Wait -PassThru -NoNewWindow `
-                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-            if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
-            elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
+            # Exit 2 is UNCHECKED only with a printed cannot-verify witness: argparse usage
+            # errors and a missing script also exit 2, and those are harness failures. A case
+            # with ExpectCannotVerify passes only on that exit (Invoke-GatePythonCase).
+            $verdict = Invoke-GatePythonCase -Python $py -ScriptPath $path -Case $case -Log $log
+            if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
+            elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
             else {
-                Test-Fail $case.Name "exit $($run.ExitCode); see $log"
+                Test-Fail $case.Name $verdict.Detail
                 foreach ($line in @(Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40)) {
                     Write-Host ("    " + $line)
                 }
+            }
+        }
+    }
+
+    # The gate's own decision logic, run under both shells the gate supports. Windows
+    # PowerShell 5.1 is the documented full-gate shell and pwsh is what CI runs, and the two
+    # differ in ways that only show up at runtime (native stderr, -AsHashtable and so on).
+    Test-Hdr 'tier 1: gate self-tests'
+    $gateShells = @(
+        @{ Label = 'Windows PowerShell 5.1'; Path = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') },
+        @{ Label = 'PowerShell 7'; Path = $(if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source } else { $null }) }
+    )
+    foreach ($selfTest in @(
+        @{ Name = 'gate decision library'; Script = 'tests\gate-lib.tests.ps1'; Witness = '(?m)^GATE-LIB SELF-TEST PASSED \(\d+ cases' }
+    )) {
+        $selfTestPath = Join-Path $RepoRoot $selfTest.Script
+        foreach ($gateShell in $gateShells) {
+            $selfTestName = "$($selfTest.Name) under $($gateShell.Label)"
+            if (-not $gateShell.Path -or -not (Test-Path -LiteralPath $gateShell.Path -PathType Leaf)) {
+                Test-Unchecked $selfTestName "$($gateShell.Label) is not installed"
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $selfTestPath -PathType Leaf)) { Test-Fail $selfTestName "missing: $selfTestPath"; continue }
+            $selfTestArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $selfTestPath + '"'
+            if ($py) { $selfTestArgs += ' -Python "' + $py + '"' }
+            $selfTestLog = Join-Path $env:TEMP ('md-gate-' + ($selfTestName -replace '[^A-Za-z0-9]+', '-') + '.log')
+            $verdict = Invoke-GateChildCase -FilePath $gateShell.Path -ArgumentList $selfTestArgs -Log $selfTestLog -Witness $selfTest.Witness
+            if ($verdict.Outcome -eq 'ok') { Test-Ok $selfTestName }
+            elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $selfTestName $verdict.Detail }
+            else {
+                Test-Fail $selfTestName $verdict.Detail
+                Get-Content -LiteralPath $selfTestLog, "$selfTestLog.err" -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match '^(FAIL|CANNOT VERIFY)' } | ForEach-Object { Write-Host "               $_" -ForegroundColor Red }
             }
         }
     }
@@ -879,45 +904,40 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     #
     # Asserts the two values are EQUAL, not that a version line exists: a regex that merely
     # matched "v1.0.something" would have passed happily on the stale 1.0.2.
+    #
+    # Agreement between the files was not enough either: at v1.0.3 and v1.0.4 all three said
+    # 1.0.2 and this check passed, while release.yml stamped the binaries from the tag. The
+    # comparison now lives in tests\check-release-version.ps1, which release.yml runs with
+    # -Tag before it builds; the gate runs the same script, in a child of this same shell, with
+    # no tag. Only a tag run (GITHUB_REF_TYPE=tag) reads the ref name, so main pushes and pull
+    # requests compare the files only.
     Test-Hdr 'tier 1: version consistency'
-    $guidePath = Join-Path $RepoRoot 'MatrixDesktop_Argument_Guide.txt'
-    $csprojPaths = @{
-        'MatrixDesktop'             = Join-Path $RepoRoot 'MatrixDesktop\MatrixDesktop.csproj'
-        'MatrixDesktopConfigurator' = Join-Path $RepoRoot 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj'
-    }
-    $missing = @($guidePath) + @($csprojPaths.Values) | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
-    if (@($missing).Count -gt 0) {
-        Test-Fail 'guide header version matches the project version' "not found: $($missing -join ', ')"
+    $versionScript = Join-Path $RepoRoot 'tests\check-release-version.ps1'
+    $versionLog = Join-Path $env:TEMP 'md-gate-release-version.log'
+    if (-not (Test-Path -LiteralPath $versionScript -PathType Leaf)) {
+        Test-Fail 'guide header version matches the project version' "missing: $versionScript"
     } else {
-        $versions = @{}
-        foreach ($name in $csprojPaths.Keys) {
-            $text = Get-Content -LiteralPath $csprojPaths[$name] -Raw
-            $m = [regex]::Match($text, '<Version>([^<]+)</Version>')
-            $versions[$name] = if ($m.Success) { $m.Groups[1].Value.Trim() } else { $null }
-        }
-        $guideText = Get-Content -LiteralPath $guidePath -Raw
-        $gm = [regex]::Match($guideText, 'ARGUMENT GUIDE \(desktop wrapper v([0-9][^)]*)\)')
-        $guideVersion = if ($gm.Success) { $gm.Groups[1].Value.Trim() } else { $null }
-
-        $problems = @()
-        foreach ($name in ($versions.Keys | Sort-Object)) {
-            if (-not $versions[$name]) { $problems += "$name.csproj has no <Version> element" }
-        }
-        if (-not $guideVersion) {
-            $problems += 'the guide header does not match "ARGUMENT GUIDE (desktop wrapper vX.Y.Z)", so its version cannot be read'
-        }
-        if ($problems.Count -eq 0) {
-            $distinct = @($versions.Values | Sort-Object -Unique)
-            if ($distinct.Count -ne 1) {
-                $problems += "the two csproj disagree: $(($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
-            } elseif ($guideVersion -ne $distinct[0]) {
-                $problems += "guide says v$guideVersion, csproj says $($distinct[0])"
-            }
-        }
-        if ($problems.Count -gt 0) {
-            Test-Fail 'guide header version matches the project version' ($problems -join '; ')
+        $versionArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $versionScript + '" -RepoRoot "' + $RepoRoot + '"'
+        $verdict = Invoke-GateChildCase -FilePath (Get-Process -Id $PID).Path -ArgumentList $versionArgs -Log $versionLog -Witness '(?m)^PASS release version'
+        $versionLines = @(Get-Content -LiteralPath $versionLog, "$versionLog.err" -ErrorAction SilentlyContinue)
+        if ($verdict.Outcome -eq 'ok') {
+            Test-Ok ('guide header version matches the project version (' + ((@($versionLines | Where-Object { $_ -like 'PASS release version*' }) | Select-Object -First 1) -replace '^PASS release version: ', '') + ')')
         } else {
-            Test-Ok "guide header version matches the project version (v$guideVersion in both csproj and the guide)"
+            Test-Fail 'guide header version matches the project version' $verdict.Detail
+            $versionLines | Where-Object { $_ -match '^FAIL' -or $verdict.ExitCode -ne 1 } | Select-Object -Last 20 |
+                ForEach-Object { Write-Host "               $_" -ForegroundColor Red }
+        }
+    }
+
+    $releaseYmlPath = Join-Path $RepoRoot '.github\workflows\release.yml'
+    if (-not (Test-Path -LiteralPath $releaseYmlPath -PathType Leaf)) {
+        Test-Fail 'release.yml checks the tag and CI before it publishes' "not found: $releaseYmlPath"
+    } else {
+        $orderProblems = @(Get-ReleaseWorkflowOrderProblems -YamlText ([IO.File]::ReadAllText($releaseYmlPath)))
+        if ($orderProblems.Count -gt 0) {
+            Test-Fail 'release.yml checks the tag and CI before it publishes' ($orderProblems -join '; ')
+        } else {
+            Test-Ok 'release.yml checks the tag and CI before it publishes'
         }
     }
 
@@ -938,6 +958,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         '-p:DebugType=embedded'
         '-p:DebugSymbols=true'
     )
+    # What the publish command line below (and release.yml's) sets without a -p: flag, plus
+    # the SDK default it relies on. The publish-profile parity check reads both lists.
+    $PublishImplied = @{ Configuration = 'Release'; RuntimeIdentifier = 'win-x64'; SelfContained = 'false'; PublishTrimmed = 'false' }
 
     $publishOk = $true
     foreach ($proj in 'MatrixDesktop\MatrixDesktop.csproj', 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj') {
@@ -962,7 +985,8 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
         $symbolHarness = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
         $symbolLog = Join-Path $env:TEMP 'md-gate-published-symbols.log'
-        & $symbolHarness --verify-published-symbols (Join-Path $GatePublishDir 'MatrixDesktop.dll') (Join-Path $GatePublishDir 'MatrixDesktopConfigurator.dll') *> $symbolLog
+        & { $ErrorActionPreference = 'Continue'
+            & $symbolHarness --verify-published-symbols (Join-Path $GatePublishDir 'MatrixDesktop.dll') (Join-Path $GatePublishDir 'MatrixDesktopConfigurator.dll') *> $symbolLog }
         if ($LASTEXITCODE -ne 0) {
             Test-Fail 'published exception stacks carry source lines' "see $symbolLog"
             Get-Content -LiteralPath $symbolLog | Where-Object { $_ -match '^FAIL' } | ForEach-Object { Write-Host $_ }
@@ -974,6 +998,21 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             Test-Fail 'payload carries no .pdb or .xml' ("{0} file(s), {1:N0} bytes: {2}" -f $junk.Count, $bytes, (($junk | Select-Object -First 4 | ForEach-Object { $_.Name }) -join ', '))
         } else {
             Test-Ok 'payload carries no .pdb or .xml'
+        }
+
+        # The shipped build uses the OS ICU data. InvariantGlobalization in a csproj or a
+        # publish flag would turn that off for every user without any test noticing.
+        $invariant = @()
+        foreach ($runtimeConfig in 'MatrixDesktop.runtimeconfig.json', 'MatrixDesktopConfigurator.runtimeconfig.json') {
+            $runtimeConfigPath = Join-Path $GatePublishDir $runtimeConfig
+            # A missing file is already a FAIL in the required-files check above.
+            if (-not (Test-Path -LiteralPath $runtimeConfigPath -PathType Leaf)) { continue }
+            if ('true' -eq "$(Get-RuntimeConfigOption -Path $runtimeConfigPath -Name 'System.Globalization.Invariant')") { $invariant += $runtimeConfig }
+        }
+        if ($invariant.Count -gt 0) {
+            Test-Fail 'published apps keep ICU globalization' "System.Globalization.Invariant is true in $($invariant -join ', ')"
+        } else {
+            Test-Ok 'published apps keep ICU globalization (no System.Globalization.Invariant in either runtimeconfig.json)'
         }
 
         if (Test-Path -LiteralPath (Join-Path $RepoRoot 'LICENSE') -PathType Leaf) {
@@ -1017,6 +1056,27 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 }
             }
         }
+    }
+
+    # README recommends the framework-dependent publish profiles for local builds, and
+    # release.yml loads no profile, so a property set only in a profile makes the local build
+    # differ silently from the shipped one. Both profiles set InvariantGlobalization until
+    # AUD-63. Each property must come from a -p: flag above, the publish command line itself
+    # ($PublishImplied) or the matching csproj (Get-PublishProfileParityProblems, gate-lib.ps1).
+    $profileProblems = @()
+    $profileCount = 0
+    foreach ($project in 'MatrixDesktop', 'MatrixDesktopConfigurator') {
+        $relativeProfile = "$project\Properties\PublishProfiles\Portable-win-x64-framework-dependent.pubxml"
+        $profilePath = Join-Path $RepoRoot $relativeProfile
+        if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) { $profileProblems += "${relativeProfile}: not found"; continue }
+        $profileProblems += @(Get-PublishProfileParityProblems -ProfilePath $profilePath -CsprojPath (Join-Path $RepoRoot "$project\$project.csproj") `
+            -PublishFlags $PublishFlags -Implied $PublishImplied -Label $relativeProfile)
+        $profileCount++
+    }
+    if ($profileProblems.Count -gt 0) {
+        Test-Fail 'local publish profiles build what ships' ($profileProblems -join '; ')
+    } else {
+        Test-Ok "local publish profiles build what ships ($profileCount framework-dependent profiles checked)"
     }
 
     if ($Tier1Only) {
@@ -1065,11 +1125,11 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
                 foreach ($caseName in $cases.Keys) {
                     $launchedAt = Get-Date
-                    $dumpsBefore = Get-DumpCount
                     # -1 means "not observed". Initialised out here because it is assigned at
                     # the end of the try below, and under StrictMode an early throw would
                     # otherwise make the reaped check blow up instead of reporting UNCHECKED.
                     $webviewKids = -1
+                    $publishDirsBefore = @(Get-ChildItem -LiteralPath (Split-Path $exe -Parent) -Directory -Force | ForEach-Object { $_.Name })
                     $started = Start-GateApp -Exe $exe -AppArgs $cases[$caseName]
                     $proc = $started.Process
                     $closeMethod = 'not-attempted'
@@ -1127,13 +1187,6 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                             }
                         }
 
-                        $userData = Join-Path (Split-Path $exe -Parent) 'userdata'
-                        if (Test-Path -LiteralPath $userData) {
-                            Test-Fail "smoke [$caseName] leaves no userdata beside the exe" "found $userData"
-                        } else {
-                            Test-Ok "smoke [$caseName] leaves no userdata beside the exe"
-                        }
-
                         $webviewKids = Get-WebViewDescendantCount -RootPid $proc.Id
                     } finally {
                         $closeMethod = Stop-GateProcess $proc
@@ -1153,6 +1206,25 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         } else {
                             Test-Ok "smoke [$caseName] log clean, $($records.Count) record(s) for pid $($proc.Id)"
                         }
+                    }
+
+                    # WEBVIEW2_USER_DATA_FOLDER (set above for the whole gate) replaces the folder
+                    # the app requests, so a wrong request leaves nothing on disk to find: the
+                    # app's own record is checked instead (AUD-54, Get-WebViewProfileVerdict). A
+                    # missing record is a FAIL. The publish folder is compared before and after
+                    # the case, so any folder the app itself creates beside the exe still fails.
+                    $profileVerdict = Get-WebViewProfileVerdict -Records $records `
+                        -Requested (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'MatrixDesktop\WebView2') -Effective $env:WEBVIEW2_USER_DATA_FOLDER
+                    if ($profileVerdict.Outcome -eq 'ok') {
+                        Test-Ok "smoke [$caseName] requests its WebView2 profile under LocalAppData"
+                    } else {
+                        Test-Fail "smoke [$caseName] requests its WebView2 profile under LocalAppData" $profileVerdict.Detail
+                    }
+                    $newPublishDirs = @(Get-NewTopLevelDirectories -Path (Split-Path $exe -Parent) -Before $publishDirsBefore)
+                    if ($newPublishDirs.Count -gt 0) {
+                        Test-Fail "smoke [$caseName] creates no folder beside the exe" "new in $(Split-Path $exe -Parent): $($newPublishDirs -join ', ')"
+                    } else {
+                        Test-Ok "smoke [$caseName] creates no folder beside the exe"
                     }
 
                     if ($closeMethod -eq 'WM_CLOSE') {
@@ -1178,8 +1250,11 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         Test-Ok "smoke [$caseName] webview children reaped ($webviewKids before close, 0 after)"
                     }
 
-                    if ((Get-DumpCount) -gt $dumpsBefore) {
-                        Test-Fail "smoke [$caseName] wrote no crash dump" "new dump in $DumpDir"
+                    # Attributed by pid and launch time (gate-lib.ps1): a folder-wide count
+                    # cannot rise once CrashDumpWriter's retention cap is reached.
+                    $caseDumps = @(Get-DumpsForPid -DumpDir $DumpDir -ProcessId $proc.Id -Since $launchedAt)
+                    if ($caseDumps.Count -gt 0) {
+                        Test-Fail "smoke [$caseName] wrote no crash dump" "pid $($proc.Id) wrote $($caseDumps[0].FullName)"
                     } else {
                         Test-Ok "smoke [$caseName] wrote no crash dump"
                     }
@@ -1297,14 +1372,17 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 continue
             }
             $path = Join-Path $RepoRoot $case.Script
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Test-Fail $case.Name "missing: $path"
+                continue
+            }
             $log = Join-Path $ShotDir (($case.Name -replace ' ', '-') + '.log')
-            $run = Start-Process -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Wait -PassThru -NoNewWindow `
-                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-            if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
-            elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
+            $verdict = Invoke-GateChildCase -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Log $log
+            if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
+            elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
             else {
-                Test-Fail $case.Name "exit $($run.ExitCode); see $log"
-                Get-Content -LiteralPath $log, "$log.err" | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
+                Test-Fail $case.Name $verdict.Detail
+                Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
             }
         }
     }
@@ -1340,6 +1418,20 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     Write-Host ''
     Write-Host ("GATE PASSED ({0} checks)" -f $script:Pass) -ForegroundColor Green
     exit 0
+} catch {
+    # An exception that escaped every check used to end the run with exit 1 and no summary,
+    # which reads as a product failure. It is a harness error unless a real failure was
+    # already recorded, and either way it names the line that threw.
+    $where = if ($_.InvocationInfo) { $_.InvocationInfo.PositionMessage } else { '' }
+    if ($script:Fail -gt 0) {
+        Write-Host ''
+        Write-Host "HARNESS ERROR after $($script:Fail) recorded failure(s): $($_.Exception.Message)" -ForegroundColor Magenta
+        if ($where) { Write-Host $where -ForegroundColor Magenta }
+        Write-Host 'GATE FAILED:' -ForegroundColor Red
+        foreach ($f in $script:Failures) { Write-Host "  - $f" -ForegroundColor Red }
+        exit 1
+    }
+    Stop-Harness "unhandled exception: $($_.Exception.Message) $where"
 } finally {
     Pop-Location
 }

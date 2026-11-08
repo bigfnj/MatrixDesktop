@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -152,6 +153,116 @@ class PortablePresetOwnershipTests(unittest.TestCase):
             self.assertEqual(successful_case(None, exe, "finished"), "finished")
             self.assertEqual(events, ["owned process reaped"])
             self.assertFalse(preset.exists() or backup.exists(), "GUI smoke left files absent before the successful case")
+
+
+class ProfileOwnershipTests(unittest.TestCase):
+    """AUD-26: every launch's private WebView2 profile is deleted when the case reaps it."""
+
+    def launch(self, artifacts):
+        process = OwnedProcess()
+
+        def popen(command, env=None, **kwargs):
+            # The real application creates the profile; the stand-in does the same.
+            state = Path(env["WEBVIEW2_USER_DATA_FOLDER"]) / "EBWebView" / "Default"
+            state.mkdir(parents=True)
+            (state / "Preferences").write_text("{}", encoding="utf-8")
+            return process
+
+        driver = Mock()
+        driver.chromium.connect_over_cdp.return_value = object()
+        response = io.BytesIO(json.dumps({"webSocketDebuggerUrl": "ws://synthetic"}).encode())
+        with patch.object(native, "ARTIFACTS", artifacts), \
+             patch.object(native.subprocess, "Popen", side_effect=popen), \
+             patch.object(native.urllib.request, "urlopen", return_value=response):
+            native.open_application(driver, Path("synthetic-not-executed.exe"), [], "profile")
+        profiles = list(artifacts.glob("profile-profile-*"))
+        self.assertEqual(len(profiles), 1, "the launch did not create exactly one private profile")
+        return process, profiles[0]
+
+    def test_stop_application_deletes_the_profile_whether_or_not_the_app_already_exited(self):
+        # Killing mutations: delete the cleanup (both subtests fail); run it only after the
+        # already-exited early return (only already_exited=True fails).
+        for already_exited in (False, True):
+            with self.subTest(already_exited=already_exited):
+                with tempfile.TemporaryDirectory() as directory:
+                    process, profile = self.launch(Path(directory))
+                    if already_exited:
+                        # close_window succeeded, so the case's finally finds a reaped app.
+                        process.alive, process.returncode = False, 0
+                    native.stop_application(process)
+                    self.assertFalse(profile.exists(), f"profile survived stop_application: {profile}")
+
+    def test_profile_removal_retries_while_webview_children_hold_files(self):
+        # Killing mutation: a single attempt; the transient PermissionError leaves the profile.
+        with tempfile.TemporaryDirectory() as directory:
+            process, profile = self.launch(Path(directory))
+            real_rmtree, calls = native.shutil.rmtree, []
+
+            def held_once(path):
+                calls.append(path)
+                if len(calls) == 1:
+                    raise PermissionError("held by msedgewebview2")
+                real_rmtree(path)
+
+            with patch.object(native.shutil, "rmtree", side_effect=held_once), patch.object(native.time, "sleep"):
+                native.stop_application(process)
+            self.assertFalse(profile.exists(), "a transient sharing violation left the profile behind")
+            self.assertEqual(len(calls), 2)
+
+    def test_removal_that_keeps_failing_warns_instead_of_raising(self):
+        with tempfile.TemporaryDirectory() as directory:
+            process, profile = self.launch(Path(directory))
+            output = io.StringIO()
+            with patch.object(native.shutil, "rmtree", side_effect=PermissionError("held")), \
+                 patch.object(native.time, "sleep"), patch("sys.stdout", output):
+                native.stop_application(process)
+            self.assertIn(f"WARN could not remove WebView2 profile {profile}", output.getvalue())
+
+    def test_prune_removes_only_profiles_older_than_a_day(self):
+        # Killing mutation: drop the age filter; a concurrent run's fresh profile is deleted.
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = Path(directory)
+            old, fresh, other = artifacts / "profile-old-1", artifacts / "profile-fresh-2", artifacts / "pictures"
+            for path in (old, fresh, other):
+                (path / "keep").mkdir(parents=True)
+            two_days_ago = native.time.time() - 2 * 24 * 3600
+            for path in (old, other):
+                os.utime(path, (two_days_ago, two_days_ago))
+            with patch.object(native, "ARTIFACTS", artifacts), patch("sys.stdout", io.StringIO()):
+                native.prune_stale_profiles()
+            self.assertEqual(sorted(path.name for path in artifacts.iterdir()), ["pictures", "profile-fresh-2"])
+
+
+class DefaultMediaGrantTests(unittest.TestCase):
+    """AUD-10: the default launch's media check must be able to fail under per-file picture IDs."""
+
+    @staticmethod
+    def probe(served):
+        def statuses(ids):
+            return [200 if media_id in served else 404 for media_id in ids]
+        return statuses
+
+    def test_a_hashed_picture_grant_fails_although_image_0_is_404(self):
+        # Killing mutation: drop the image-list assertion and probe a fixed 'image-0' again.
+        # Under per-file IDs that probe answers 404 for a granted picture, so the check passes.
+        picture = "image-3f2a9c6d1e0b4a57"
+        bootstrap = {"images": [{"id": picture, "url": "https://uc3d-media.local/__uc3d/" + picture}]}
+        with self.assertRaisesRegex(AssertionError, "granted pictures: \\['image-3f2a9c6d1e0b4a57'\\]"):
+            native.assert_no_optional_media(bootstrap, self.probe({picture}))
+
+    def test_a_served_fixed_name_resource_fails(self):
+        with self.assertRaisesRegex(AssertionError, "'music': 200"):
+            native.assert_no_optional_media({"images": []}, self.probe({"music"}))
+
+    def test_no_grant_and_no_served_media_passes(self):
+        probed = []
+
+        def statuses(ids):
+            probed.extend(ids)
+            return [404] * len(ids)
+
+        native.assert_no_optional_media({"images": []}, statuses)
+        self.assertEqual(probed, ["desktop", "music", "effects", "glyphs"])
 
 
 if __name__ == "__main__":
