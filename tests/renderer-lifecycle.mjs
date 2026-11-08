@@ -8,7 +8,7 @@ import { wantsWebGPU } from "../MatrixDesktop/web/js/rendererChoice.js";
 import makeConfig from "../MatrixDesktop/web/js/config.js";
 import getLKG from "../MatrixDesktop/web/js/regl/lkgHelper.js";
 import { makePipeline, loadTexture } from "../MatrixDesktop/web/js/webgpu/utils.js";
-import { createShaderTime, rebaseLimits } from "../MatrixDesktop/web/js/shaderTime.js";
+import { createShaderTime, rebaseLimits, shaderTick } from "../MatrixDesktop/web/js/shaderTime.js";
 import createClickRipples from "../MatrixDesktop/web/js/clickRipples.js";
 
 const root = new URL("../MatrixDesktop/web/", import.meta.url);
@@ -287,6 +287,25 @@ await test("rain and mirror passes move their click stamps with the shader time 
 		const moved = [...stamps()];
 		assert(moved.includes(1.25) && !moved.includes(5.5), `${label} must move its click stamp with the origin: ${moved}`);
 		pass.cleanup();
+	}
+});
+
+await test("regl tick stays exact in float32 past 2^24 frames and cycles glyphs on the same frames", () => {
+	assert.deepEqual([0, 1, 2, 3].map((frames) => shaderTick(frames, 3)), [0, 1, 2, 3], "the first frames must be unchanged");
+	// rainPass.symbol.frag.glsl: mod(tick, cycleFrameSkip) == 0., where GLSL mod(x, y) is
+	// x - y * floor(x / y), each step rounded to float32.
+	const f = Math.fround, cycles = (tick, skip) => { const x = f(tick); return f(x - f(skip * Math.floor(f(x / skip)))) === 0; };
+	for (const skip of [3, 8]) {
+		const period = skip * 2 ** 20, firstWrap = Math.ceil((2 ** 24 - 2) / period);
+		for (let wrap = firstWrap; wrap < firstWrap + 64; wrap++) {
+			for (let frames = 2 + wrap * period - 2 * skip; frames < 2 + wrap * period + 2 * skip; frames++) {
+				const tick = shaderTick(frames, skip), label = `skip ${skip}, frame ${frames}`;
+				assert.equal(f(tick), tick, `the tick must be exact in float32 (${label}: ${tick})`);
+				assert(tick > 1, `only the first frames may read as a first frame (${label})`);
+				assert.equal(cycles(tick, skip), frames % skip === 0, `glyphs must cycle on the frames the exact counter does (${label})`);
+				assert.equal(tick % 2, frames % 2, `the ping-pong side must alternate as before (${label})`);
+			}
+		}
 	}
 });
 

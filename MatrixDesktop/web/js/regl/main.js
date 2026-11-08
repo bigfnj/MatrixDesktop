@@ -10,7 +10,7 @@ import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
 import { createPlaybackClock } from "../hostPlayback.js";
-import { createShaderTime } from "../shaderTime.js";
+import { createShaderTime, shaderTick } from "../shaderTime.js";
 
 const effects = {
 	none: null,
@@ -150,7 +150,8 @@ export default async (canvas, config) => {
 	// AUD-64: shaders get float32 time measured from an origin that moves forward (js/shaderTime.js).
 	const shaderTime = createShaderTime();
 	let shaderSeconds = 0;
-	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => activeFrames } });
+	// AUD-65: tick wraps before float32 loses integers (js/shaderTime.js).
+	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => shaderTick(activeFrames, config.cycleFrameSkip) } });
 	const effectName = config.effect in effects ? config.effect : "palette";
 	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas,
 		elapsedSeconds: () => shaderTime.seconds(clock.seconds()), onTimeRebase: shaderTime.onRebase };

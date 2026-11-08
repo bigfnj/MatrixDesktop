@@ -38,3 +38,15 @@ export const createShaderTime = (limits = rebaseLimits) => {
 		},
 	};
 };
+
+// AUD-65: regl feeds the frame counter to the shaders as the float32 tick uniform, and
+// rainPass.symbol.frag.glsl cycles glyphs when mod(tick, cycleFrameSkip) == 0. Float32 holds
+// every integer only up to 2^24 (78 h at 60 Hz, 32 h at 144 Hz); past that, Operator and
+// Palimpsest glyphs cycle 3x too fast, then 5x and 8x. The counter wraps at cycleFrameSkip *
+// 2^20, a multiple of both the skip and 2 (the ping-pong buffers pick a side by tick % 2),
+// and 0 and 1 stay unique to the first frames, which the shaders treat as tick <= 1.
+export const shaderTick = (frames, cycleFrameSkip = 1) => {
+	if (frames < 2) return frames;
+	const skip = Number.isInteger(cycleFrameSkip) && cycleFrameSkip >= 1 && cycleFrameSkip < 16 ? cycleFrameSkip : 1;
+	return 2 + ((frames - 2) % (skip * 2 ** 20));
+};
