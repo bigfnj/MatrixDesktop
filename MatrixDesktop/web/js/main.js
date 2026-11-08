@@ -1,6 +1,7 @@
 import makeConfig from "./config.js";
 import { wantsWebGPU } from "./rendererChoice.js";
 import { stopCamera } from "./camera.js";
+import loadBackend from "./rendererLoader.js";
 
 const canvas = document.createElement("canvas");
 document.body.appendChild(canvas);
@@ -35,25 +36,9 @@ const isRunningSwiftShader = () => {
 	}
 };
 
-const loadRenderer = async (canvas, config, useWebGPU) => {
-	if (useWebGPU) {
-		try {
-			const webgpuModule = await import("./webgpu/main.js");
-			await webgpuModule.default(canvas, config);
-			return;
-		} catch (err) {
-			if (["uc3d", "zmatrix"].includes(config.scene)) {
-				// Shader and device failures in this optional scene must remain visible;
-				// a working WebGL replacement would otherwise conceal a broken WebGPU pass.
-				throw err;
-			}
-			console.warn("WebGPU renderer failed, falling back to regl:", err);
-			stopCamera();
-		}
-	}
-	const reglModule = await import("./regl/main.js");
-	await reglModule.default(canvas, config);
-};
+// The REGL fallback after a WebGPU failure gets a fresh canvas (see rendererLoader.js);
+// hostPlayback.js looks the canvas up per message, so nothing else holds the old one.
+const loadRenderer = (canvas, config, useWebGPU) => loadBackend(canvas, config, useWebGPU, { stopCamera });
 
 const showError = (error) => {
 	stopCamera();

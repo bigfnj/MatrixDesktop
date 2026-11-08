@@ -125,6 +125,44 @@ await test("inherited Object property names in the query are ignored like any un
 	}
 });
 
+await test("WebGPU-to-REGL fallback draws on a fresh canvas and keeps the WebGPU error", async () => {
+	const { default: loadRenderer } = await import("../MatrixDesktop/web/js/rendererLoader.js");
+	const doc = { createElement: (tag) => makeCanvas(tag) };
+	const makeCanvas = (tag = "canvas") => ({ tag, ownerDocument: doc, claimed: null, replacedBy: null,
+		getContext(type) { if (this.claimed != null && this.claimed !== type) return null; this.claimed = type; return {}; },
+		replaceWith(node) { this.replacedBy = node; } });
+	const pipelineError = Object.assign(new Error("invalid WGSL in palettePass"), { name: "GPUPipelineError" });
+	const webgpu = async () => ({ default: async (canvas) => { canvas.getContext("webgpu"); throw pipelineError; } });
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		let drawnOn = null, stops = 0;
+		const original = makeCanvas();
+		const result = await loadRenderer(original, { scene: "matrix" }, true, { importWebGPU: webgpu, stopCamera: () => stops++,
+			importRegl: async () => ({ default: async (canvas) => {
+				assert.notEqual(canvas.getContext("webgl"), null, "REGL received a canvas WebGPU had already claimed");
+				drawnOn = canvas; globalThis.matrixRuntimeDiagnostics = { backend: "regl" };
+			} }) });
+		assert.notEqual(drawnOn, original);
+		assert.equal(drawnOn.tag, "canvas");
+		assert.equal(original.replacedBy, drawnOn, "the fresh canvas must take the claimed canvas's place in the page");
+		assert.equal(result, drawnOn);
+		assert.equal(stops, 1);
+		assert.equal(globalThis.matrixRuntimeDiagnostics.requestedRendererError, "invalid WGSL in palettePass");
+		await assert.rejects(loadRenderer(makeCanvas(), { scene: "matrix" }, true, { importWebGPU: webgpu,
+			importRegl: async () => ({ default: async () => { throw new Error("no WebGL"); } }) }),
+			/no WebGL \(after WebGPU failed: invalid WGSL in palettePass\)/);
+		const kept = makeCanvas();
+		assert.equal(await loadRenderer(kept, { scene: "matrix" }, true, { importWebGPU: async () => ({ default: async () => {} }),
+			importRegl: async () => { throw new Error("REGL must not load after WebGPU started"); } }), kept);
+		await assert.rejects(loadRenderer(makeCanvas(), { scene: "uc3d" }, true, { importWebGPU: webgpu,
+			importRegl: async () => { throw new Error("UC3D must not fall back"); } }), /invalid WGSL/);
+	} finally {
+		console.warn = warn;
+		delete globalThis.matrixRuntimeDiagnostics;
+	}
+});
+
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {
 	let disconnects = 0;
 	const run = (behavior) => getLKG(true, { timeoutMs: 5, loadCore: async () => ({ Client: class {
