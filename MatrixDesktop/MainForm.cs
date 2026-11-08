@@ -21,10 +21,13 @@ public sealed class MainForm : Form
     private readonly EventHandler _displaySettingsChangedHandler;
     private readonly AppOptions _appOptions;
     private readonly HostLaunchPlan _launchPlan;
-    private readonly bool _managedLifecycle;
     internal bool IsWallpaper => _appOptions is not null && _appOptions.WindowMode == WindowMode.Wallpaper && _launchPlan is not null && !_launchPlan.IsScreensaver && !_launchPlan.IsPreview;
     private System.Drawing.Rectangle CaptureBounds => IsWallpaper || _launchPlan.IsPreview ? SystemInformation.VirtualScreen : Bounds;
     internal event EventHandler? RendererReady;
+    // Raised after a WebView2 process failed, outside WebView2's own callback; the host decides.
+    internal event EventHandler<RendererFailureKind>? RendererFailed;
+    // Set by FailStartup before its dialog and close; the host reads it in FormClosed.
+    internal bool StartupFailed { get; private set; }
 
     // Best-effort foreground enforcement on startup.
     // Windows may refuse focus stealing in some cases, so we retry briefly.
@@ -37,6 +40,9 @@ public sealed class MainForm : Form
     // Stored so we can detach on shutdown.
     private EventHandler<CoreWebView2NewWindowRequestedEventArgs>? _newWindowRequestedHandler;
     private EventHandler<CoreWebView2NavigationStartingEventArgs>? _navigationStartingHandler;
+    private EventHandler<CoreWebView2ProcessFailedEventArgs>? _processFailedHandler;
+    // The page this surface navigated to, so a lost renderer can be sent back to it.
+    private string? _rendererTarget;
 
     private bool _isShuttingDown;
     private bool _webViewInitializationStarted;
@@ -47,12 +53,11 @@ public sealed class MainForm : Form
 
     private static string? _cachedUserDataFolder;
 
-    public MainForm(string[]? args) : this(new HostLaunchPlan(args ?? []), managedLifecycle: false) { }
-
-    internal MainForm(HostLaunchPlan launchPlan, bool managedLifecycle = true)
+    // MatrixApplicationContext is the only owner: it creates every surface and owns the session
+    // and power events, routing them through PlaybackPolicy into SetHostPausedAsync.
+    internal MainForm(HostLaunchPlan launchPlan)
     {
         _launchPlan = launchPlan;
-        _managedLifecycle = managedLifecycle;
         Text = "Matrix Digital Rain";
         TryApplyWindowIcon();
 
@@ -80,7 +85,7 @@ public sealed class MainForm : Form
 
         // If monitors are added/removed or resolution changes while the app is running,
         // resize to keep spanning the full virtual desktop.
-        // Routed through the same helper as the session and power handlers. It kept its own
+        // Routed through MarshalToUiThread. It kept its own
         // inline BeginInvoke, which checked only IsDisposed and swallowed the failure with no
         // log, so a display change racing the close vanished silently: the exact failure mode
         // the marshalling work was meant to remove.
@@ -111,16 +116,20 @@ public sealed class MainForm : Form
         }
     }
 
-    internal async Task SetHostPausedAsync(bool paused, string reason)
+    // suspend comes from PlaybackPolicy.SuspendsRenderer. A pause that does not suspend only
+    // freezes the page, and brings back a renderer an earlier suspend hid (unlock while still
+    // manually paused), so the frozen frame stays on the desktop.
+    internal async Task SetHostPausedAsync(bool paused, bool suspend, string reason)
     {
         if (_isShuttingDown || IsDisposed) return;
-        if (!paused) _webView.CoreWebView2?.Resume();
+        var suspendRenderer = paused && suspend;
+        if (!suspendRenderer) _webView.CoreWebView2?.Resume();
         if (_webView.CoreWebView2 is not null)
         {
             var state = System.Text.Json.JsonSerializer.Serialize(new { paused, reason });
             await _webView.CoreWebView2.ExecuteScriptAsync($"window.matrixHostPlaybackState={state};window.dispatchEvent(new CustomEvent('matrix-host-state',{{detail:window.matrixHostPlaybackState}}));");
         }
-        if (paused) await TrySuspendWebViewAsync(reason);
+        if (suspendRenderer) await TrySuspendWebViewAsync(reason);
         else { _webView.Visible = true; _isSuspended = false; }
     }
 
@@ -197,72 +206,22 @@ public sealed class MainForm : Form
         {
             // SystemEvents can fail in some restricted environments; ignore.
         }
-
-        // v1.0: pause the WebView when the workstation locks or the machine
-        // sleeps. This stops the GL animation loop + audio + timers, which
-        // matters on laptops (battery) and any system where the user expects
-        // the rain not to keep rendering while they're away.
-        //
-        // The guard is not just tidiness. Nothing prevented a second subscription if the
-        // handle were ever recreated, and only one unsubscribe happens on teardown, so the
-        // surplus subscription would keep this form alive and fire against a disposed
-        // WebView.
-        // Tracked per event, not as one flag for both. A single flag set after two
-        // subscriptions describes neither: if the first += succeeded and the second threw,
-        // the flag stayed false, the catch swallowed it, and the successful subscription was
-        // never removed. SystemEvents is static and holds a strong reference, so that rooted
-        // the form for the life of the process and kept firing against a disposed WebView.
-        if (!_sessionSwitchAttached && !_managedLifecycle && !IsWallpaper && !_launchPlan.IsPreview)
-        {
-            try
-            {
-                SystemEvents.SessionSwitch += OnSessionSwitch;
-                _sessionSwitchAttached = true;
-            }
-            catch
-            {
-                // SystemEvents subscription can fail in services / sandboxed environments.
-            }
-        }
-
-        if (!_powerModeAttached && !_managedLifecycle && !IsWallpaper && !_launchPlan.IsPreview)
-        {
-            try
-            {
-                SystemEvents.PowerModeChanged += OnPowerModeChanged;
-                _powerModeAttached = true;
-            }
-            catch
-            {
-                // Not fatal; the session handler above may still be live.
-            }
-        }
     }
 
-    private bool _sessionSwitchAttached;
-    private bool _powerModeAttached;
     private bool _isSuspended;
 
-    // _isSuspended alone cannot serialise these: it is assigned only AFTER the await, and
-    // the await hands the UI thread back to the pump. Windows really does deliver two
-    // suspend-class events together (PowerModes.Suspend plus SessionLock on sleep-with-lock,
-    // RemoteDisconnect plus SessionLock on an RDP drop), so without an in-flight flag the
-    // second action would hide the WebView, race the first, and could finish by restoring
-    // visibility while the first one reports a successful suspend. That leaves a visible
-    // window over a suspended renderer, with _isSuspended true so nothing retries.
+    // _isSuspended alone cannot serialise suspends: it is assigned only AFTER the await, and
+    // the await hands the UI thread back to the pump. The caller is SetHostPausedAsync, which
+    // MatrixApplicationContext.ReconcilePauseAsync drives one call at a time; this flag keeps a
+    // second suspend from hiding the WebView mid-flight and finishing by restoring visibility
+    // over a suspended renderer, with _isSuspended true so nothing retries.
     private bool _suspendInFlight;
 
     // SystemEvents raises its events on a private thread it owns, NOT on the UI thread.
-    // Measured on this machine: UI thread id 2, handler thread id 4. So every one of these
-    // handlers must marshal before it touches the form or the WebView, exactly as
-    // _displaySettingsChangedHandler above already does with BeginInvoke.
-    //
-    // Before this fix the handlers called _webView.Visible and CoreWebView2.TrySuspendAsync
-    // straight from that thread. With Control.CheckForIllegalCrossThreadCalls off, which is
-    // the default when no debugger is attached, the write silently proceeded as an
-    // unsynchronised cross-thread access to an apartment-bound COM object. With the check
-    // on it threw InvalidOperationException, which the handler's own catch swallowed as a
-    // WARN. Either way the feature did not work and said nothing.
+    // Measured on this machine: UI thread id 2, handler thread id 4. So the
+    // DisplaySettingsChanged handler must marshal before it touches the form or the WebView.
+    // Session and power events belong to MatrixApplicationContext, which marshals them
+    // through its coordinator window.
     private void MarshalToUiThread(Action action, string reason)
     {
         try
@@ -279,36 +238,6 @@ public sealed class MainForm : Form
             // Shutdown races are expected here: the handle can go away between the check
             // and the post. Anything else is worth a line.
             Shared.Logger.Warn($"Could not marshal '{reason}' to the UI thread: {ex.Message}");
-        }
-    }
-
-    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
-    {
-        switch (e.Reason)
-        {
-            case SessionSwitchReason.SessionLock:
-            case SessionSwitchReason.ConsoleDisconnect:
-            case SessionSwitchReason.RemoteDisconnect:
-                MarshalToUiThread(async void () => await TrySuspendWebViewAsync($"session {e.Reason}"), $"session {e.Reason}");
-                break;
-            case SessionSwitchReason.SessionUnlock:
-            case SessionSwitchReason.ConsoleConnect:
-            case SessionSwitchReason.RemoteConnect:
-                MarshalToUiThread(() => TryResumeWebView($"session {e.Reason}"), $"session {e.Reason}");
-                break;
-        }
-    }
-
-    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
-    {
-        switch (e.Mode)
-        {
-            case PowerModes.Suspend:
-                MarshalToUiThread(async void () => await TrySuspendWebViewAsync("power suspend"), "power suspend");
-                break;
-            case PowerModes.Resume:
-                MarshalToUiThread(() => TryResumeWebView("power resume"), "power resume");
-                break;
         }
     }
 
@@ -346,33 +275,12 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Shared.Logger.Warn($"Failed to suspend WebView (reason='{reason}'): {ex.Message}");
+            // The hide above already happened; nothing else would ever show the renderer again.
+            try { if (!_isShuttingDown) _webView.Visible = true; } catch { /* shutdown race */ }
         }
         finally
         {
             _suspendInFlight = false;
-        }
-    }
-
-    private void TryResumeWebView(string reason)
-    {
-        // Guarded like the suspend side. The handlers are detached in OnHandleDestroyed,
-        // which runs AFTER OnFormClosing has already disposed the WebView, so a session
-        // unlock arriving in that window would otherwise touch a disposed COM object.
-        if (_isShuttingDown) return;
-
-        try
-        {
-            if (_webView.CoreWebView2 is not null)
-            {
-                _webView.CoreWebView2.Resume();
-            }
-            _webView.Visible = true;
-            _isSuspended = false;
-            Shared.Logger.Info($"WebView resumed (reason='{reason}').");
-        }
-        catch (Exception ex)
-        {
-            Shared.Logger.Warn($"Failed to resume WebView (reason='{reason}'): {ex.Message}");
         }
     }
 
@@ -399,20 +307,6 @@ public sealed class MainForm : Form
             {
                 // Ignore.
             }
-        }
-
-        // Unhook the v1.0 power/session listeners so they don't fire against
-        // a destroyed form's WebView.
-        if (_sessionSwitchAttached)
-        {
-            try { SystemEvents.SessionSwitch -= OnSessionSwitch; } catch { /* ignore */ }
-            _sessionSwitchAttached = false;
-        }
-
-        if (_powerModeAttached)
-        {
-            try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch { /* ignore */ }
-            _powerModeAttached = false;
         }
 
         // Ensure foreground enforcer is stopped to prevent timer ticks during disposal
@@ -744,17 +638,19 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Shared.Logger.Error("MainForm_Shown failed; closing form.", ex);
-            try
-            {
-                MessageBox.Show(
-                    $"MatrixDesktop failed to start:\n{ex.Message}",
-                    "MatrixDesktop",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
-            catch { /* dialog itself may fail in degraded states */ }
-            try { Close(); } catch { /* form may already be closing */ }
+            FailStartup($"MatrixDesktop failed to start:\n{ex.Message}");
         }
+    }
+
+    // Every renderer-start failure ends here. StartupFailed is set before the dialog and the
+    // close, so the host can tell a failed start (exit: this dialog already explained it) from
+    // a surface it should rebuild. Wallpaper mode used to rebuild it, dialog and all, every 500 ms.
+    private void FailStartup(string message)
+    {
+        StartupFailed = true;
+        try { MessageBox.Show(message, "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        catch { /* dialog itself may fail in degraded states */ }
+        try { Close(); } catch { /* form may already be closing */ }
     }
 
     private async Task InitializeWebViewAsync()
@@ -773,13 +669,9 @@ public sealed class MainForm : Form
         catch (WebView2RuntimeNotFoundException)
         {
             if (_isShuttingDown || IsDisposed) return;
-            MessageBox.Show(
+            FailStartup(
                 "Microsoft Edge WebView2 Runtime is not installed on this machine.\n\n" +
-                "Install the Evergreen WebView2 Runtime and re-run this app.",
-                "MatrixDesktop",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
+                "Install the Evergreen WebView2 Runtime and re-run this app.");
         }
         catch (COMException ex) when (ex.HResult == CatastrophicFailureHResult)
         {
@@ -789,8 +681,7 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             if (_isShuttingDown || IsDisposed) return;
-            MessageBox.Show(ex.ToString(), "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            Close();
+            FailStartup(ex.ToString());
         }
     }
 
@@ -809,6 +700,10 @@ public sealed class MainForm : Form
         await Task.Yield();
         await _webView.EnsureCoreWebView2Async();
         if (_isShuttingDown || IsDisposed) return;
+        string effectiveProfile;
+        try { effectiveProfile = _webView.CoreWebView2.Environment.UserDataFolder; }
+        catch (Exception error) { effectiveProfile = $"(unavailable: {error.Message})"; }
+        Shared.Logger.Info(HostStorage.ProfileRecord(_webView.CreationProperties?.UserDataFolder, effectiveProfile));
 
         // Slightly reduce background features we don't need for an offline local app.
         // (This reduces "browser-y" behavior and a bit of overhead.)
@@ -841,6 +736,23 @@ public sealed class MainForm : Form
         };
         _webView.CoreWebView2.NavigationStarting += _navigationStartingHandler;
 
+        // A failed renderer or browser process left the page blank for good. Log what failed and
+        // let the host respond after this callback returns: the response may navigate or close
+        // this WebView, which must not happen inside WebView2's own event.
+        _processFailedHandler = (_, failure) =>
+        {
+            Shared.Logger.Warn($"WebView2 process failed: {DescribeProcessFailure(failure)}.");
+            var kind = failure.ProcessFailedKind switch
+            {
+                CoreWebView2ProcessFailedKind.BrowserProcessExited => RendererFailureKind.BrowserProcessExited,
+                CoreWebView2ProcessFailedKind.RenderProcessExited => RendererFailureKind.RenderProcessExited,
+                CoreWebView2ProcessFailedKind.RenderProcessUnresponsive => RendererFailureKind.RenderProcessUnresponsive,
+                _ => RendererFailureKind.Other,
+            };
+            MarshalToUiThread(() => { if (!_isShuttingDown) RendererFailed?.Invoke(this, kind); }, "renderer process failure");
+        };
+        _webView.CoreWebView2.ProcessFailed += _processFailedHandler;
+
         string webRoot;
         try
         {
@@ -848,14 +760,10 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            FailStartup(
                 "Unable to prepare bundled web assets for WebView2.\n\n" +
                 $"Source folder:\n{Path.Combine(AppContext.BaseDirectory, "web")}\n\n" +
-                $"Error:\n{ex}",
-                "MatrixDesktop",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
+                $"Error:\n{ex}");
             return;
         }
 
@@ -881,7 +789,27 @@ public sealed class MainForm : Form
                 ScreensaverWindowPolicy.RendererReady(_launchPlan,
                     () => RendererReady?.Invoke(this, EventArgs.Empty), TryBeginForegroundEnforce);
         };
+        _rendererTarget = target;
         _webView.CoreWebView2.Navigate(target);
+    }
+
+    private static string DescribeProcessFailure(CoreWebView2ProcessFailedEventArgs failure)
+    {
+        var text = $"kind={failure.ProcessFailedKind}";
+        try { text += $", reason={failure.Reason}, exitCode={failure.ExitCode}, process='{failure.ProcessDescription}'"; }
+        catch (Exception error) { text += $" (details unavailable: {error.Message})"; }
+        return text;
+    }
+
+    // Sends a surface whose renderer was lost back to its page. False when it cannot, so the
+    // host treats the surface as lost instead of leaving it blank.
+    internal bool ReloadRenderer()
+    {
+        if (_isShuttingDown || IsDisposed || _webView.CoreWebView2 is null) return false;
+        // Before the first navigation there is nothing to reload: that navigation is still ahead.
+        if (_rendererTarget is null) return true;
+        try { _webView.CoreWebView2.Navigate(_rendererTarget); return true; }
+        catch (Exception error) { Shared.Logger.Warn($"Could not reload the renderer: {error.Message}"); return false; }
     }
 
     private async Task RetryWebViewInitializationAfterCatastrophicFailureAsync(COMException firstException)
@@ -896,16 +824,12 @@ public sealed class MainForm : Form
         }
         catch (Exception retryException)
         {
-            MessageBox.Show(
+            FailStartup(
                 "WebView2 failed to initialize and a retry with a fresh local profile also failed.\n\n" +
                 $"Original profile:\n{originalProfile}\n\n" +
                 $"Retry profile:\n{retryProfile}\n\n" +
                 $"First failure:\n{firstException}\n\n" +
-                $"Retry failure:\n{retryException}",
-                "MatrixDesktop",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
+                $"Retry failure:\n{retryException}");
         }
     }
 
@@ -969,6 +893,12 @@ public sealed class MainForm : Form
             {
                 try { core.NavigationStarting -= _navigationStartingHandler; } catch { }
                 _navigationStartingHandler = null;
+            }
+
+            if (_processFailedHandler is not null)
+            {
+                try { core.ProcessFailed -= _processFailedHandler; } catch { }
+                _processFailedHandler = null;
             }
         }
         catch
@@ -1107,21 +1037,8 @@ public sealed class MainForm : Form
 
     private static string GetWritableAppDataFolder(string childFolder)
     {
-        foreach (var basePath in GetAppDataBasePaths())
-        {
-            if (string.IsNullOrWhiteSpace(basePath))
-            {
-                continue;
-            }
-
-            var path = Path.Combine(basePath, "MatrixDesktop", childFolder);
-            if (TryEnsureWritableFolder(path))
-            {
-                return path;
-            }
-        }
-
-        throw new IOException("No writable AppData or temp folder was available.");
+        return HostStorage.SelectWritableFolder(GetAppDataBasePaths(), childFolder, Shared.Logger.Warn)
+            ?? throw new IOException("No writable AppData or temp folder was available.");
     }
 
     private static string[] GetAppDataBasePaths()
@@ -1237,21 +1154,5 @@ public sealed class MainForm : Form
         var normalizedLeft = Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
         var normalizedRight = Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
         return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool TryEnsureWritableFolder(string path)
-    {
-        try
-        {
-            Directory.CreateDirectory(path);
-            var probe = Path.Combine(path, ".write_test");
-            File.WriteAllText(probe, "ok");
-            File.Delete(probe);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }

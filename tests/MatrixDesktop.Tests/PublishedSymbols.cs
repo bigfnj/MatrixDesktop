@@ -60,6 +60,7 @@ internal static class PublishedSymbols
                 failures++;
                 Console.WriteLine($"FAIL  published exception stack has source lines: {path}: {exception.Message}");
             }
+            if (Path.GetFileNameWithoutExtension(path) == "MatrixDesktop") failures += HostWiring.Verify(path);
         }
         return failures == 0 ? 0 : 1;
     }

@@ -18,10 +18,17 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     private MainForm? _form;
     private nint _parent;
     private bool _exiting, _recovering, _reconciling, _reconcileRequested, _ready;
-    private long _retryAt;
+    private long _retryAt, _readySince;
     private int _retryCount;
+    private readonly RendererFailurePolicy _rendererFailures = new();
     private uint _screensaverInputTick;
     private readonly DesktopPointerBridge? _pointer;
+    private WallpaperInstanceGuard? _instance;
+    private static readonly TimeSpan TakeoverBound = TimeSpan.FromSeconds(10);
+
+    // True once the context has ended, including inside its own constructor; HostLoop then
+    // disposes it instead of starting a message loop nothing could end.
+    internal bool ExitRequested => _exiting;
 
     internal MatrixApplicationContext(HostLaunchPlan plan)
     {
@@ -34,12 +41,15 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             {
                 if (!_exiting && !_playback.Paused) _form?.PostHostPointer(pointer);
             }));
-        ApplyPriority();
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        // Priority before TryCreateSurface in both branches (WebView2 children inherit the
+        // class), and after CreateTray so a refused class can show its balloon.
         if (_wallpaper)
         {
+            if (!TakeWallpaperOwnership()) return;
             CreateTray();
+            ApplyPriority();
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             _timer.Tick += OnTick;
             _timer.Start();
@@ -47,9 +57,40 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         }
         else
         {
+            ApplyPriority();
             if (plan.IsPreview || plan.IsScreensaver) { _timer.Interval = 100; _timer.Tick += OnTick; _timer.Start(); }
             TryCreateSurface();
         }
+    }
+
+    // The newest wallpaper launch wins: a running one in this session and scope is asked to exit
+    // and this launch continues once it has. If it does not hand over in time it keeps the
+    // desktop, and this launch says so and ends (HostLoop disposes a context ended here).
+    private bool TakeWallpaperOwnership()
+    {
+        var scope = WallpaperInstanceGuard.Scope(Environment.GetEnvironmentVariable);
+        _instance = WallpaperInstanceGuard.Acquire(scope, TakeoverBound);
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.TimedOut)
+        {
+            var message = $"Another MatrixDesktop wallpaper did not exit within {TakeoverBound.TotalSeconds:0} seconds, so this launch stopped. End the running MatrixDesktop in Task Manager, then launch it again.";
+            Shared.Logger.Warn(message);
+            try { MessageBox.Show(message, "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            catch { /* the dialog itself may fail in degraded states */ }
+            ExitThread();
+            return false;
+        }
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.Unavailable)
+        {
+            Shared.Logger.Warn($"The wallpaper single-instance guard is unavailable ({_instance.Problem}); this launch cannot replace another running wallpaper.");
+            return true;
+        }
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.TookOver) Shared.Logger.Info($"Took over from the running wallpaper (scope {scope}).");
+        _instance.ListenForTakeover(() => _coordinator.Post(() =>
+        {
+            Shared.Logger.Info("A newer wallpaper launch took over; exiting.");
+            ExitThread();
+        }));
+        return true;
     }
 
     private void CreateTray()
@@ -74,6 +115,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             catch (Exception error) { Report(error.Message); }
         };
         menu.Items.Add(autostart);
+        // The shortcut can change outside this process (the configurator, Explorer, another launch).
+        menu.Opening += (_, _) => autostart.Checked = AutostartService.Enabled;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _tray = new NotifyIcon { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone(),
@@ -93,7 +136,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             _form = form;
             _ready = false;
             form.FormClosed += OnSurfaceClosed;
-            form.RendererReady += (_, _) => { _ready = true; _ = ReconcilePauseAsync(); };
+            form.RendererReady += (_, _) => { _ready = true; _readySince = Environment.TickCount64; _ = ReconcilePauseAsync(); };
+            form.RendererFailed += OnRendererFailed;
             if (_wallpaper || _plan.IsPreview)
             {
                 _ = form.Handle;
@@ -101,7 +145,6 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             }
             form.Show();
             if (_plan.IsScreensaver) _screensaverInputTick = LastInputTick();
-            _retryCount = 0;
             _playback.Set(PauseReason.ShellRecovery, false);
             if (_tray is not null) _tray.Text = "MatrixDesktop wallpaper";
             Shared.Logger.Info($"Renderer host ready: wallpaper={_wallpaper}, preview={_plan.IsPreview}, parentClass={DesktopWindowHost.ClassOf(_parent)}, parent=0x{_parent:X}, child=0x{form.Handle:X}.");
@@ -110,7 +153,18 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         {
             Shared.Logger.Warn($"Renderer host could not attach: {error.Message}");
             if (_form is not null) { var old = _form; _form = null; old.FormClosed -= OnSurfaceClosed; old.Dispose(); }
-            if (!_wallpaper) { Report(error.Message); ExitThread(); return; }
+            if (!_wallpaper)
+            {
+                Report(error.Message);
+                // A standard launch has no tray to report through; /s only logs and /p stays silent.
+                if (!_exiting && _plan.Kind == HostLaunchKind.Standard)
+                {
+                    try { MessageBox.Show($"MatrixDesktop failed to start:\n{error.Message}", "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                    catch { /* the dialog itself may fail in degraded states */ }
+                }
+                ExitThread();
+                return;
+            }
             _playback.Set(PauseReason.ShellRecovery, true);
             _retryAt = Environment.TickCount64 + Math.Min(10000, 500 * (1 << Math.Min(4, _retryCount++)));
             if (_tray is not null) _tray.Text = "MatrixDesktop: waiting for desktop";
@@ -119,11 +173,38 @@ internal sealed class MatrixApplicationContext : ApplicationContext
 
     private void OnSurfaceClosed(object? sender, FormClosedEventArgs e)
     {
+        var startupFailed = sender is MainForm { StartupFailed: true };
         _form = null;
         _ready = false;
         if (_exiting || _recovering) return;
-        if (_wallpaper) { _retryAt = Environment.TickCount64 + 500; SetPause(PauseReason.ShellRecovery, true); }
-        else ExitThread();
+        var decision = SurfaceClosePolicy.Decide(_wallpaper, startupFailed, _retryCount);
+        if (decision.Exit) { ExitThread(); return; }
+        _retryCount++;
+        _retryAt = Environment.TickCount64 + decision.RetryAfterMs;
+        SetPause(PauseReason.ShellRecovery, true);
+    }
+
+    // A failed WebView2 process left the surface blank until an unrelated shell event. A reload
+    // stays inside the surface; a lost or exhausted renderer is rebuilt after the same capped
+    // backoff as any lost wallpaper surface, and ends every other host.
+    private void OnRendererFailed(object? sender, RendererFailureKind kind)
+    {
+        if (_exiting || sender is not MainForm surface || !ReferenceEquals(surface, _form)) return;
+        var action = _rendererFailures.Decide(kind, _wallpaper, Environment.TickCount64);
+        if (action == RendererFailureAction.LogOnly) return;
+        Shared.Logger.Warn($"Renderer failure {kind}: {action}.");
+        _ready = false;
+        _pointer?.SetEnabled(false);
+        if (action == RendererFailureAction.Reload && surface.ReloadRenderer()) return;
+        // A dead browser process can make the close throw; never leave a half-closed surface.
+        _form = null;
+        surface.FormClosed -= OnSurfaceClosed;
+        try { surface.Close(); } catch (Exception error) { Shared.Logger.Warn($"The failed renderer surface did not close cleanly: {error.Message}"); }
+        try { surface.Dispose(); } catch (Exception error) { Shared.Logger.Warn($"The failed renderer surface did not dispose cleanly: {error.Message}"); }
+        if (action == RendererFailureAction.Exit || !_wallpaper) { ExitThread(); return; }
+        _parent = 0;
+        _retryAt = Environment.TickCount64 + SurfaceClosePolicy.RetryDelayMs(_retryCount++);
+        SetPause(PauseReason.ShellRecovery, true);
     }
 
     private void RecoverSurface()
@@ -156,6 +237,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         }
         if (_form is null) { if (Environment.TickCount64 >= _retryAt) TryCreateSurface(); return; }
         if (!DesktopWindowHost.IsUsable(_parent) || DesktopWindowHost.ParentOf(_form.Handle) != _parent) { RecoverSurface(); return; }
+        if (_retryCount > 0 && RendererFailurePolicy.StayedHealthy(_ready, _readySince, Environment.TickCount64)) _retryCount = 0;
         SetPause(PauseReason.Fullscreen, _options.WallpaperPauseFullscreen && DesktopWindowHost.ForegroundCoversAnyMonitor(Screen.AllScreens.Select(screen => screen.Bounds)));
         SetPause(PauseReason.Battery, _options.WallpaperPauseBattery && SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline);
         _pointer?.SetEnabled(_ready && !_playback.Paused);
@@ -181,7 +263,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
                 var applied = _playback.Reasons;
                 var surface = _form;
                 if (surface is null || surface.IsDisposed || !_ready) return;
-                try { await surface.SetHostPausedAsync(applied != PauseReason.None, applied.ToString()); }
+                try { await surface.SetHostPausedAsync(applied != PauseReason.None, PlaybackPolicy.SuspendsRenderer(applied), applied.ToString()); }
                 catch when (surface.IsDisposed || !ReferenceEquals(surface, _form)) { }
                 if (applied != _playback.Reasons || !ReferenceEquals(surface, _form)) _reconcileRequested = true;
             }
@@ -232,14 +314,9 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     {
         try
         {
-            var value = PlaybackPolicy.ResolvePriority(_options.ProcessPriority, _wallpaper);
+            var requested = PriorityPolicy.ClassOf(PlaybackPolicy.ResolvePriority(_options.ProcessPriority, _wallpaper));
             using var process = Process.GetCurrentProcess();
-            process.PriorityClass = value switch
-            {
-                "idle" => ProcessPriorityClass.Idle, "below-normal" => ProcessPriorityClass.BelowNormal,
-                "above-normal" => ProcessPriorityClass.AboveNormal, "high" => ProcessPriorityClass.High,
-                "realtime" => ProcessPriorityClass.RealTime, _ => ProcessPriorityClass.Normal,
-            };
+            PriorityPolicy.Apply(requested, new ProcessPriorityTarget(process), Report);
         }
         catch (Exception error) { Report($"The requested process priority was not applied: {error.Message}"); }
     }
@@ -267,6 +344,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         {
             _tray.Visible = false; _tray.ContextMenuStrip?.Dispose(); _tray.Icon?.Dispose(); _tray.Dispose(); _tray = null;
         }
+        // After the surface and tray are gone, so a waiting newer launch takes an empty desktop.
+        _instance?.Dispose(); _instance = null;
         _coordinator.Dispose();
         base.ExitThreadCore();
     }

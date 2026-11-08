@@ -52,10 +52,16 @@ internal static class Program
 
         if (ScreensaverProtocol.TryHandle(args, out var launchPlan))
         {
-            if (launchPlan is not null) Application.Run(new MatrixApplicationContext(launchPlan));
+            if (launchPlan is not null) RunHost(launchPlan);
             return;
         }
-        Application.Run(new MatrixApplicationContext(new HostLaunchPlan(args)));
+        RunHost(new HostLaunchPlan(args));
+    }
+
+    private static void RunHost(HostLaunchPlan plan)
+    {
+        var context = new MatrixApplicationContext(plan);
+        HostLoop.Run(context, () => context.ExitRequested);
     }
 
     private static bool IsFullHelpRequested(string[] args)

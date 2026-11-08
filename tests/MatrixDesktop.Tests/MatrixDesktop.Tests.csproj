@@ -87,4 +87,10 @@
     <Compile Include="..\..\MatrixDesktopConfigurator\DraftRandomizer.cs" Link="Production\DraftRandomizer.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\DraftCloseFlush.cs" Link="Production\DraftCloseFlush.cs" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Host storage and lifecycle decisions, kept free of WinForms for this harness. -->
+    <Compile Include="..\..\MatrixDesktop\HostStorage.cs" Link="Production\HostStorage.cs" />
+    <Compile Include="..\..\MatrixDesktop\WallpaperInstanceGuard.cs" Link="Production\WallpaperInstanceGuard.cs" />
+  </ItemGroup>
 </Project>

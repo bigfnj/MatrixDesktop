@@ -86,6 +86,7 @@ tests.AddRange(MediaCatalogTests.All);
 tests.AddRange(ZMatrixTests.All);
 tests.AddRange(ScreensaverRegistrationTests.All);
 tests.AddRange(PlaybackPolicyTests.All);
+tests.AddRange(HostLifecyclePolicyTests.All);
 if (args.Length == 2 && args[0] == "--only")
     tests = tests.Where(test => test.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToList();
 if (tests.Count == 0) throw new ArgumentException("The requested test filter matched no tests.");
