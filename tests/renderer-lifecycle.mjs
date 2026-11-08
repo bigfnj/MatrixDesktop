@@ -223,11 +223,11 @@ const makeMatrixDevice = (maxTextureDimension2D) => {
 		destroy() { device.destroyed = true; },
 	});
 };
-let pendingFrame = null;
+let pendingFrame = null, lastFrame = null;
 const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution }) => {
 	const run = {};
 	const borrowed = { createView: () => ({}), destroy() { throw new Error("canvas texture destroyed"); } };
-	globalThis.requestAnimationFrame = (fn) => { pendingFrame = fn; return 1; };
+	globalThis.requestAnimationFrame = (fn) => { pendingFrame = lastFrame = fn; return 1; };
 	globalThis.cancelAnimationFrame = () => { pendingFrame = null; };
 	globalThis.document = { fullscreenEnabled: false, body: { appendChild: (tag) => queueMicrotask(() => tag.onload?.()) },
 		createElement: () => ({ getContext: () => ({ drawImage() {} }) }) };
@@ -312,6 +312,43 @@ await test("WebGPU Matrix renderer reports uncaptured GPU errors and stops claim
 		for (let i = 0; i < 20; i++) run.device.emit("uncapturederror", { error: { message: `again ${i}` } });
 		assert.equal(run.diagnostics.errors.length, 10, "validation errors must stay bounded");
 	} finally { run.dispose(); }
+});
+
+await test("WebGPU Matrix renderer reports a lost device to the page once and stops drawing", async () => {
+	const calls = [], settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+	window.matrixRendererLost = (reason) => calls.push(reason);
+	try {
+		const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+		try {
+			run.frame(16);
+			assert.equal(run.diagnostics.ready, true);
+			run.device.lose("unknown", "GPU process exited");
+			await settle();
+			assert.equal(run.diagnostics.ready, false, "ready must be false once the device is lost");
+			assert.deepEqual(run.diagnostics.errors, ["WebGPU device lost (unknown): GPU process exited"]);
+			assert.deepEqual(calls, ["WebGPU device lost (unknown)"], "the page hook must hear about the loss once");
+			assert.equal(pendingFrame, null, "a lost device must not schedule another frame");
+			const frames = run.diagnostics.frames;
+			lastFrame(33);
+			assert.equal(run.diagnostics.frames, frames, "a stray frame after the loss must not draw");
+			assert.equal(run.diagnostics.ready, false);
+		} finally { run.dispose(); }
+		// Teardown destroys the device itself; that loss is not a failure.
+		const own = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+		own.frame(16);
+		own.device.lose("destroyed", "");
+		await settle();
+		own.frame(33);
+		assert.deepEqual([own.diagnostics.ready, own.diagnostics.errors, own.diagnostics.frames, calls.length], [true, [], 2, 1], "reason 'destroyed' must be ignored");
+		own.dispose();
+	} finally { delete window.matrixRendererLost; }
+	// The hook belongs to js/main.js; without it a loss is still recorded and nothing throws.
+	const bare = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	bare.frame(16);
+	bare.device.lose("unknown", "driver reset");
+	await settle();
+	assert.deepEqual([bare.diagnostics.ready, bare.diagnostics.errors], [false, ["WebGPU device lost (unknown): driver reset"]]);
+	bare.dispose();
 });
 
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);

@@ -76,6 +76,7 @@ export default async (canvas, config) => {
 	let cleanedUp = false;
 	let regl;
 	let tick;
+	let contextLost = false;
 	const cleanup = () => {
 		if (cleanedUp) {
 			return;
@@ -128,6 +129,15 @@ export default async (canvas, config) => {
 	}
 
 	regl = createREGL({ canvas, pixelRatio: 1, extensions, optionalExtensions });
+	// AUD-19: on restore regl re-creates every texture empty, and the glyph atlases and
+	// palette are uploaded once, so a restored context draws black. Stay not ready from
+	// the loss on and tell the page, which owns recovery (js/main.js).
+	regl.on("lost", () => {
+		if (cleanedUp || contextLost) return;
+		contextLost = true; diagnostics.ready = false;
+		diagnostics.errors.push("WebGL context lost");
+		window.matrixRendererLost?.("WebGL context lost");
+	});
 
 	const cameraTex = regl.texture(cameraCanvas);
 	const lkg = await getLKG(config.useHoloplay);
@@ -151,7 +161,7 @@ export default async (canvas, config) => {
 	diagnostics.dispose = cleanup;
 
 	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
-		if (clock.paused) return;
+		if (clock.paused || contextLost || regl._gl.isContextLost()) return;
 		if (config.once) {
 			tick.cancel();
 		}

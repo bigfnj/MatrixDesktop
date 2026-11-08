@@ -38,6 +38,16 @@ INITIAL_PAUSE = """(() => {
 })();"""
 
 
+LOSS_HOOK = """(() => {
+  // Record the renderer's loss reports and swallow js/main.js's own hook, so its recovery
+  // reload cannot replace the page under this check.
+  const calls = [];
+  Object.defineProperty(window, 'matrixRendererLost', { configurable: true,
+    get() { return reason => calls.push(String(reason)); }, set() {} });
+  window.__matrixRendererLostCalls = calls;
+})();"""
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     regl_main_override = None
     def log_message(self, *args):
@@ -60,6 +70,41 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def capture(page):
     return Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
+
+
+def check_regl_context_loss(context, port):
+    """A lost WebGL context must stop claiming ready and report to the page hook once.
+
+    regl re-creates every texture empty on restore, so a restored context draws black;
+    the renderer must stay not ready (and stop counting frames) after the restore too.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(LOSS_HOOK)
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+        page.evaluate("window.__loseContext = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__loseContext.loseContext()")
+        try:
+            page.wait_for_function("!matrixRuntimeDiagnostics.ready", timeout=1000)
+        except Exception:
+            raise AssertionError("WebGL context loss left matrixRuntimeDiagnostics.ready true") from None
+        lost = page.evaluate("({ errors: matrixRuntimeDiagnostics.errors, calls: window.__matrixRendererLostCalls, frames: matrixRuntimeDiagnostics.frames })")
+        assert lost["errors"] == ["WebGL context lost"], f"context loss was not recorded: {lost['errors']}"
+        assert lost["calls"] == ["WebGL context lost"], f"page hook calls after the loss: {lost['calls']}"
+        page.evaluate("window.__loseContext.restoreContext()")
+        page.wait_for_timeout(1500)
+        restored = page.evaluate("({ ready: matrixRuntimeDiagnostics.ready, frames: matrixRuntimeDiagnostics.frames, calls: window.__matrixRendererLostCalls, contextLost: document.querySelector('canvas').getContext('webgl').isContextLost() })")
+        assert not restored["contextLost"], "the WebGL context did not restore, so the check proved nothing"
+        assert not restored["ready"], "ready came back after restore although the restored context draws black"
+        assert restored["frames"] == lost["frames"], f"frames advanced after the loss: {lost['frames']} -> {restored['frames']}"
+        assert restored["calls"] == ["WebGL context lost"], f"page hook calls after the restore: {restored['calls']}"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
 
 
 def main():
@@ -129,6 +174,8 @@ def main():
                         assert failed.locator(".notice b").count() == 0, "native failure text was interpreted as markup"
                         failed.close()
                         print("PASS native bootstrap failure remains visible as text and prevents renderer initialization", flush=True)
+                        check_regl_context_loss(context, server.server_port)
+                        print("PASS original Matrix regl context loss clears ready, reports once to the page and stays not ready after restore", flush=True)
                 finally:
                     context.close()
             browser.close()

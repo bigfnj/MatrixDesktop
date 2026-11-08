@@ -56,6 +56,7 @@ export default async (canvas, config) => {
 	let sizeTracker;
 	let gpuFailed = false;
 	let gpuErrors = 0;
+	let deviceLost = false;
 	const destroyContext = () => {
 		canvasContext?.unconfigure();
 		device?.destroy();
@@ -129,6 +130,16 @@ export default async (canvas, config) => {
 		gpuFailed = true; diagnostics.ready = false;
 		if (++gpuErrors <= 10) diagnostics.errors.push(`WebGPU validation: ${event.error.message}`);
 	});
+	// AUD-19: "destroyed" is our own teardown. Any other loss (a GPU process restart or a
+	// driver reset) leaves this device dead, so stop drawing and tell the page, which owns
+	// recovery (js/main.js).
+	device.lost.then((info) => {
+		if (cleanedUp || info.reason === "destroyed") return;
+		deviceLost = true; gpuFailed = true; diagnostics.ready = false;
+		diagnostics.errors.push(`WebGPU device lost (${info.reason}): ${info.message}`);
+		cancelAnimationFrame(frameRequest);
+		window.matrixRendererLost?.(`WebGPU device lost (${info.reason})`);
+	});
 	canvasContext = canvas.getContext("webgpu");
 
 	// console.table(device.limits);
@@ -194,7 +205,7 @@ export default async (canvas, config) => {
 	sizeTracker = createCanvasSize(canvas, config.resolution, device.limits.maxTextureDimension2D);
 
 	const renderLoop = (now) => {
-		if (cleanedUp) return;
+		if (cleanedUp || deviceLost) return;
 		now = clock.seconds(now) * 1000;
 		if (clock.paused) { frameRequest = requestAnimationFrame(renderLoop); return; }
 		if (isNaN(start)) {
