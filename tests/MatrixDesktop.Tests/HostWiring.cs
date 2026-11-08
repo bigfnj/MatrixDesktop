@@ -21,11 +21,13 @@ internal static class HostWiring
     internal static int Verify(string path)
     {
         List<Call> calls;
+        List<string> mainFormConstructors;
         try
         {
             using var stream = File.OpenRead(path);
             using var pe = new PEReader(stream);
             calls = ReadCalls(pe, pe.GetMetadataReader());
+            mainFormConstructors = InstanceConstructorAccess(pe.GetMetadataReader(), "MatrixDesktop.MainForm");
         }
         catch (Exception error)
         {
@@ -64,8 +66,31 @@ internal static class HostWiring
             Check.True(read is not null, "OnSurfaceClosed must read the closing form's StartupFailed");
             Check.True(decide is not null && decide.Offset > read!.Offset, "OnSurfaceClosed must pass StartupFailed to SurfaceClosePolicy.Decide");
         });
+        // AUD-31. A public MainForm constructor enabled a second, unreachable lock/sleep path of
+        // MainForm's own; edits to it changed nothing, and reviving it would bypass PlaybackPolicy.
+        failures += Run($"MainForm defines no public instance constructor: {path}", () =>
+        {
+            Check.True(mainFormConstructors.Count > 0, "witness: the scan must see MainForm's constructors at all");
+            Check.False(mainFormConstructors.Contains("Public"), "only MatrixApplicationContext may construct MainForm: " + string.Join(", ", mainFormConstructors));
+        });
+        failures += Run($"SystemEvents session and power subscriptions have one owner: {path}", () =>
+        {
+            foreach (var subscribe in new[] { "Microsoft.Win32.SystemEvents::add_SessionSwitch", "Microsoft.Win32.SystemEvents::add_PowerModeChanged" })
+            {
+                var owners = calls.Where(call => call.Callee == subscribe).Select(call => call.Caller).ToArray();
+                Check.Equal("MatrixDesktop.MatrixApplicationContext::.ctor", string.Join("; ", owners),
+                    $"{subscribe} must have exactly one caller, the host context, which routes it through PlaybackPolicy");
+            }
+        });
         return failures;
     }
+
+    // Accessibility of each instance constructor a type defines ("Assembly" for internal, "Public", ...).
+    private static List<string> InstanceConstructorAccess(MetadataReader reader, string typeName) =>
+        reader.TypeDefinitions.Select(reader.GetTypeDefinition).Where(type => TypeName(reader, type) == typeName)
+            .SelectMany(type => type.GetMethods()).Select(reader.GetMethodDefinition)
+            .Where(method => reader.GetString(method.Name) == ".ctor")
+            .Select(method => (method.Attributes & System.Reflection.MethodAttributes.MemberAccessMask).ToString()).ToList();
 
     private static int Run(string name, Action check)
     {

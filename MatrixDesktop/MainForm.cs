@@ -21,7 +21,6 @@ public sealed class MainForm : Form
     private readonly EventHandler _displaySettingsChangedHandler;
     private readonly AppOptions _appOptions;
     private readonly HostLaunchPlan _launchPlan;
-    private readonly bool _managedLifecycle;
     internal bool IsWallpaper => _appOptions is not null && _appOptions.WindowMode == WindowMode.Wallpaper && _launchPlan is not null && !_launchPlan.IsScreensaver && !_launchPlan.IsPreview;
     private System.Drawing.Rectangle CaptureBounds => IsWallpaper || _launchPlan.IsPreview ? SystemInformation.VirtualScreen : Bounds;
     internal event EventHandler? RendererReady;
@@ -49,12 +48,11 @@ public sealed class MainForm : Form
 
     private static string? _cachedUserDataFolder;
 
-    public MainForm(string[]? args) : this(new HostLaunchPlan(args ?? []), managedLifecycle: false) { }
-
-    internal MainForm(HostLaunchPlan launchPlan, bool managedLifecycle = true)
+    // MatrixApplicationContext is the only owner: it creates every surface and owns the session
+    // and power events, routing them through PlaybackPolicy into SetHostPausedAsync.
+    internal MainForm(HostLaunchPlan launchPlan)
     {
         _launchPlan = launchPlan;
-        _managedLifecycle = managedLifecycle;
         Text = "Matrix Digital Rain";
         TryApplyWindowIcon();
 
@@ -82,7 +80,7 @@ public sealed class MainForm : Form
 
         // If monitors are added/removed or resolution changes while the app is running,
         // resize to keep spanning the full virtual desktop.
-        // Routed through the same helper as the session and power handlers. It kept its own
+        // Routed through MarshalToUiThread. It kept its own
         // inline BeginInvoke, which checked only IsDisposed and swallowed the failure with no
         // log, so a display change racing the close vanished silently: the exact failure mode
         // the marshalling work was meant to remove.
@@ -203,72 +201,22 @@ public sealed class MainForm : Form
         {
             // SystemEvents can fail in some restricted environments; ignore.
         }
-
-        // v1.0: pause the WebView when the workstation locks or the machine
-        // sleeps. This stops the GL animation loop + audio + timers, which
-        // matters on laptops (battery) and any system where the user expects
-        // the rain not to keep rendering while they're away.
-        //
-        // The guard is not just tidiness. Nothing prevented a second subscription if the
-        // handle were ever recreated, and only one unsubscribe happens on teardown, so the
-        // surplus subscription would keep this form alive and fire against a disposed
-        // WebView.
-        // Tracked per event, not as one flag for both. A single flag set after two
-        // subscriptions describes neither: if the first += succeeded and the second threw,
-        // the flag stayed false, the catch swallowed it, and the successful subscription was
-        // never removed. SystemEvents is static and holds a strong reference, so that rooted
-        // the form for the life of the process and kept firing against a disposed WebView.
-        if (!_sessionSwitchAttached && !_managedLifecycle && !IsWallpaper && !_launchPlan.IsPreview)
-        {
-            try
-            {
-                SystemEvents.SessionSwitch += OnSessionSwitch;
-                _sessionSwitchAttached = true;
-            }
-            catch
-            {
-                // SystemEvents subscription can fail in services / sandboxed environments.
-            }
-        }
-
-        if (!_powerModeAttached && !_managedLifecycle && !IsWallpaper && !_launchPlan.IsPreview)
-        {
-            try
-            {
-                SystemEvents.PowerModeChanged += OnPowerModeChanged;
-                _powerModeAttached = true;
-            }
-            catch
-            {
-                // Not fatal; the session handler above may still be live.
-            }
-        }
     }
 
-    private bool _sessionSwitchAttached;
-    private bool _powerModeAttached;
     private bool _isSuspended;
 
-    // _isSuspended alone cannot serialise these: it is assigned only AFTER the await, and
-    // the await hands the UI thread back to the pump. Windows really does deliver two
-    // suspend-class events together (PowerModes.Suspend plus SessionLock on sleep-with-lock,
-    // RemoteDisconnect plus SessionLock on an RDP drop), so without an in-flight flag the
-    // second action would hide the WebView, race the first, and could finish by restoring
-    // visibility while the first one reports a successful suspend. That leaves a visible
-    // window over a suspended renderer, with _isSuspended true so nothing retries.
+    // _isSuspended alone cannot serialise suspends: it is assigned only AFTER the await, and
+    // the await hands the UI thread back to the pump. The caller is SetHostPausedAsync, which
+    // MatrixApplicationContext.ReconcilePauseAsync drives one call at a time; this flag keeps a
+    // second suspend from hiding the WebView mid-flight and finishing by restoring visibility
+    // over a suspended renderer, with _isSuspended true so nothing retries.
     private bool _suspendInFlight;
 
     // SystemEvents raises its events on a private thread it owns, NOT on the UI thread.
-    // Measured on this machine: UI thread id 2, handler thread id 4. So every one of these
-    // handlers must marshal before it touches the form or the WebView, exactly as
-    // _displaySettingsChangedHandler above already does with BeginInvoke.
-    //
-    // Before this fix the handlers called _webView.Visible and CoreWebView2.TrySuspendAsync
-    // straight from that thread. With Control.CheckForIllegalCrossThreadCalls off, which is
-    // the default when no debugger is attached, the write silently proceeded as an
-    // unsynchronised cross-thread access to an apartment-bound COM object. With the check
-    // on it threw InvalidOperationException, which the handler's own catch swallowed as a
-    // WARN. Either way the feature did not work and said nothing.
+    // Measured on this machine: UI thread id 2, handler thread id 4. So the
+    // DisplaySettingsChanged handler must marshal before it touches the form or the WebView.
+    // Session and power events belong to MatrixApplicationContext, which marshals them
+    // through its coordinator window.
     private void MarshalToUiThread(Action action, string reason)
     {
         try
@@ -285,36 +233,6 @@ public sealed class MainForm : Form
             // Shutdown races are expected here: the handle can go away between the check
             // and the post. Anything else is worth a line.
             Shared.Logger.Warn($"Could not marshal '{reason}' to the UI thread: {ex.Message}");
-        }
-    }
-
-    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
-    {
-        switch (e.Reason)
-        {
-            case SessionSwitchReason.SessionLock:
-            case SessionSwitchReason.ConsoleDisconnect:
-            case SessionSwitchReason.RemoteDisconnect:
-                MarshalToUiThread(async void () => await TrySuspendWebViewAsync($"session {e.Reason}"), $"session {e.Reason}");
-                break;
-            case SessionSwitchReason.SessionUnlock:
-            case SessionSwitchReason.ConsoleConnect:
-            case SessionSwitchReason.RemoteConnect:
-                MarshalToUiThread(() => TryResumeWebView($"session {e.Reason}"), $"session {e.Reason}");
-                break;
-        }
-    }
-
-    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
-    {
-        switch (e.Mode)
-        {
-            case PowerModes.Suspend:
-                MarshalToUiThread(async void () => await TrySuspendWebViewAsync("power suspend"), "power suspend");
-                break;
-            case PowerModes.Resume:
-                MarshalToUiThread(() => TryResumeWebView("power resume"), "power resume");
-                break;
         }
     }
 
@@ -361,29 +279,6 @@ public sealed class MainForm : Form
         }
     }
 
-    private void TryResumeWebView(string reason)
-    {
-        // Guarded like the suspend side. The handlers are detached in OnHandleDestroyed,
-        // which runs AFTER OnFormClosing has already disposed the WebView, so a session
-        // unlock arriving in that window would otherwise touch a disposed COM object.
-        if (_isShuttingDown) return;
-
-        try
-        {
-            if (_webView.CoreWebView2 is not null)
-            {
-                _webView.CoreWebView2.Resume();
-            }
-            _webView.Visible = true;
-            _isSuspended = false;
-            Shared.Logger.Info($"WebView resumed (reason='{reason}').");
-        }
-        catch (Exception ex)
-        {
-            Shared.Logger.Warn($"Failed to resume WebView (reason='{reason}'): {ex.Message}");
-        }
-    }
-
     protected override void OnHandleDestroyed(EventArgs e)
     {
         // Uninstall keyboard hook first to prevent callbacks during handle teardown
@@ -407,20 +302,6 @@ public sealed class MainForm : Form
             {
                 // Ignore.
             }
-        }
-
-        // Unhook the v1.0 power/session listeners so they don't fire against
-        // a destroyed form's WebView.
-        if (_sessionSwitchAttached)
-        {
-            try { SystemEvents.SessionSwitch -= OnSessionSwitch; } catch { /* ignore */ }
-            _sessionSwitchAttached = false;
-        }
-
-        if (_powerModeAttached)
-        {
-            try { SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch { /* ignore */ }
-            _powerModeAttached = false;
         }
 
         // Ensure foreground enforcer is stopped to prevent timer ticks during disposal
