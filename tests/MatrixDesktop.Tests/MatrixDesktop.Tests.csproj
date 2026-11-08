@@ -61,6 +61,8 @@
     <EmbeddedResource Include="..\..\MatrixDesktop_Argument_Guide.txt" LogicalName="Guide.txt" />
     <EmbeddedResource Include="..\..\MatrixDesktop\web\js\config.js" LogicalName="config.js.txt" />
     <EmbeddedResource Include="..\..\MatrixDesktop\web\js\zmatrix\settings.js" LogicalName="zmatrix-settings.js.txt" />
+    <!-- The configurator page, so ConfiguratorHostTests can send every request it posts through ConfiguratorRequests. -->
+    <EmbeddedResource Include="..\..\MatrixDesktopConfigurator\configurator\js\app.js" LogicalName="app.js.txt" />
     <Compile Include="..\..\Shared\ScreensaverProfile.cs" Link="Production\ScreensaverProfile.cs" />
     <Compile Include="..\..\Shared\ScreensaverRegistration.cs" Link="Production\ScreensaverRegistration.cs" />
     <Compile Include="..\..\Shared\StructuredArgumentCodec.cs" Link="Production\StructuredArgumentCodec.cs" />
@@ -88,6 +90,7 @@
     <Compile Include="..\..\MatrixDesktopConfigurator\DraftCloseFlush.cs" Link="Production\DraftCloseFlush.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\SingleInstanceGuard.cs" Link="Production\SingleInstanceGuard.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\PresetOperations.cs" Link="Production\PresetOperations.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\ConfiguratorRequests.cs" Link="Production\ConfiguratorRequests.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\TestProcessStop.cs" Link="Production\TestProcessStop.cs" />
   </ItemGroup>
 

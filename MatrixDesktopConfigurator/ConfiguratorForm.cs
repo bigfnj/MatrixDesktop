@@ -371,14 +371,17 @@ public sealed class ConfiguratorForm : Form
         }
     }
 
-    private async Task<object?> DispatchAsync(string type, JsonElement payload)
+    private Task<object?> DispatchAsync(string type, JsonElement payload)
+        => ConfiguratorRequests.DispatchAsync(type, payload, _state, _storage, ServeAsync);
+
+    // The requests ConfiguratorRequests.FormTypes routes here; it answers renamePreset itself.
+    private async Task<object?> ServeAsync(string type, JsonElement payload)
     {
         return type switch
         {
             "loadState"        => LoadStatePayload(),
             "saveDraft"        => SaveDraft(payload),
             "savePreset"       => SavePreset(payload),
-            "renamePreset"     => RenamePreset(payload),
             "deletePreset"     => DeletePreset(payload),
             "buildCommand"     => BuildCommand(payload),
             "buildWebQuery"    => await BuildWebQueryAsync(payload),
@@ -536,14 +539,6 @@ public sealed class ConfiguratorForm : Form
         return new { preset = existing, state = _state };
     }
 
-    // Name only: the saved values, the working draft and the selection stay as they are.
-    private object RenamePreset(JsonElement payload)
-    {
-        var preset = PresetOperations.Rename(_state, payload, DateTimeOffset.UtcNow);
-        _storage.Save(_state);
-        return new { preset, state = _state };
-    }
-
     private object DeletePreset(JsonElement payload)
     {
         var id = ReadOptionalString(payload, "id");
@@ -615,7 +610,7 @@ public sealed class ConfiguratorForm : Form
         var saver = Path.Combine(Path.GetDirectoryName(renderer)!, "MatrixDesktop.scr");
         if (!File.Exists(saver)) throw new FileNotFoundException("Publish MatrixDesktop.scr beside MatrixDesktop.exe before selecting it as the screensaver.");
         var draft = ReadObject(payload, "draft");
-        global::Shared.ScreensaverProfile.Save(_commandBuilder.BuildScreensaverArguments(draft).ToArray());
+        global::Shared.ScreensaverProfile.Save(ConfiguratorRequests.ScreensaverArguments(_commandBuilder, draft));
         global::Shared.ScreensaverRegistration.Register(saver);
         return new { saved = true, message = "Current visual settings saved and MatrixDesktop selected as the screensaver." };
     }
