@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import time
@@ -35,16 +36,45 @@ def close_window(process):
     process.wait(timeout=12)
     assert process.returncode == 0, f"application exited {process.returncode}"
 
+def remove_profile(profile, attempts=20, delay=0.25):
+    """Delete a private WebView2 profile, retrying while its msedgewebview2 children exit."""
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(profile)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            if attempt == attempts - 1:
+                print(f"WARN could not remove WebView2 profile {profile}: {error}", flush=True)
+                return False
+            time.sleep(delay)
+
+def prune_stale_profiles(max_age_seconds=24 * 3600):
+    """Delete profile folders older than a day. Concurrent runs share this folder, so a
+    recent profile may belong to a live application and is never touched."""
+    cutoff = time.time() - max_age_seconds
+    stale = [path for path in ARTIFACTS.glob("profile-*") if path.is_dir() and path.stat().st_mtime < cutoff]
+    removed = sum(remove_profile(path, attempts=1) for path in stale)
+    if stale:
+        print(f"PRUNE removed {removed} of {len(stale)} WebView2 profile(s) older than a day from {ARTIFACTS}", flush=True)
+
 def stop_application(process):
-    """Reap an application owned by this test, including a failed startup."""
-    if process.poll() is not None:
-        return
-    process.terminate()
+    """Reap an application owned by this test, including a failed startup, then delete
+    the private WebView2 profile open_application created for it."""
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    finally:
+        profile = getattr(process, "webview_profile", None)
+        if profile is not None:
+            remove_profile(profile)
 
 def preserve_portable_presets(case):
     """Restore the exact preset files after the case has reaped its owned app."""
@@ -73,8 +103,12 @@ def open_application(playwright, exe, args, case, env_overrides=None):
     if env_overrides:
         env.update(env_overrides)
     env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={port}"
-    env["WEBVIEW2_USER_DATA_FOLDER"] = str(ARTIFACTS / f"profile-{case}-{time.time_ns()}")
+    profile = ARTIFACTS / f"profile-{case}-{time.time_ns()}"
+    env["WEBVIEW2_USER_DATA_FOLDER"] = str(profile)
     process = subprocess.Popen([str(exe), *args], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+    # stop_application deletes it on every path. Left behind, these reached 132 folders and
+    # 1.84 GB (measured 2026-11-07), about 14 MB per launch.
+    process.webview_profile = profile
     print(f"OPEN {case} pid={process.pid} debugger={port}", flush=True)
     endpoint = f"http://127.0.0.1:{port}"
     try:
@@ -451,6 +485,7 @@ def main():
     parser.add_argument("--case",choices=["runtime","original","configurator","defaults","all"],default="all")
     options=parser.parse_args()
     ARTIFACTS.mkdir(parents=True,exist_ok=True)
+    prune_stale_profiles()
     with sync_playwright() as playwright:
         if options.case in ("defaults", "all"):
             for renderer in (["regl","webgpu"] if options.renderer=="both" else [options.renderer]):
