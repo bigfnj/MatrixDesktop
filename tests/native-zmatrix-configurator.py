@@ -576,6 +576,92 @@ def session_end_case(playwright, publish):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def process_windows(pid, visible_only):
+    """Top-level windows of one process id."""
+    found = []
+    def visit(hwnd, _):
+        owner = wintypes.DWORD()
+        native.USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and (not visible_only or native.USER32.IsWindowVisible(hwnd)):
+            found.append(hwnd)
+        return True
+    native.USER32.EnumWindows(native.CALLBACK(visit), 0)
+    return found
+
+
+def test_exit_case(playwright, publish):
+    """AUD-43 host half: a Test host that ends by itself is reported to the page with its pid.
+
+    A page spy stands in for configHost.testExited, so this checks the host's Exited,
+    BeginInvoke and ExecuteScriptAsync wiring whatever the page half does with the notice.
+    Without EnableRaisingEvents or the Exited subscription the spy is never called. A replaced
+    Test host's exit notice must not clear its replacement: without the identity guard in
+    OnTestExited, Stop no longer ends the current Test host.
+    """
+    import shutil
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="test-exit-", dir=ARTIFACTS))
+    app = root / "app"
+    shutil.copytree(publish, app)
+    exe = app / "MatrixDesktopConfigurator.exe"
+    (app / "MatrixDesktopConfigurator.presets.json").write_text(json.dumps({"schemaVersion": 1, "presetSeedVersion": 0,
+        "selectedPresetId": None, "lastDraft": {}, "userPresets": [], "uiTheme": "dark"}), encoding="utf-8")
+    process, browser = native.open_application(playwright, exe, [], "test-exit")
+    handles = []
+    try:
+        page = native.page_at(browser, "https://configurator.local/")
+        page.wait_for_function("document.querySelectorAll('.field').length>40")
+        page.evaluate("""() => {
+            window.__nativeReplies=[];window.__testExited=[];
+            const receive=configHost.receive.bind(configHost);
+            configHost.receive=message=>{window.__nativeReplies.push(structuredClone(message));receive(message);};
+            const pageHalf=configHost.testExited?.bind(configHost);
+            configHost.testExited=pid=>{window.__testExited.push(pid);pageHalf?.(pid);};
+        }""")
+
+        def launch():
+            count = page.evaluate("window.__nativeReplies.filter(m=>m.ok&&m.payload?.processId).length")
+            page.locator("#testButton").click()
+            page.wait_for_function("count=>window.__nativeReplies.filter(m=>m.ok&&m.payload?.processId).length>count", arg=count)
+            pid = page.evaluate("window.__nativeReplies.findLast(m=>m.ok&&m.payload?.processId).payload.processId")
+            handle = KERNEL32.OpenProcess(0x00100001, False, pid)  # SYNCHRONIZE | PROCESS_TERMINATE
+            assert handle, f"could not open Test host {pid}"
+            handles.append(handle)
+            return pid, handle
+
+        first, first_handle = launch()
+        deadline = time.monotonic() + 15
+        while not process_windows(first, visible_only=True) and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        assert process_windows(first, visible_only=True), f"Test host {first} showed no window"
+        for hwnd in process_windows(first, visible_only=False):
+            native.USER32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE, as native.close_window ends a windowed host
+        assert KERNEL32.WaitForSingleObject(first_handle, 10000) == 0, "the Test host did not close on WM_CLOSE"
+        try:
+            page.wait_for_function("pid=>window.__testExited.includes(pid)", arg=first, timeout=5000)
+        except Exception:
+            raise AssertionError(f"the host never called configHost.testExited({first}) after the Test window closed")
+        second, second_handle = launch()
+        third, third_handle = launch()
+        assert KERNEL32.WaitForSingleObject(second_handle, 5000) == 0, "a replaced Test host kept running"
+        page.wait_for_timeout(1000)  # the replaced host's exit notice is queued behind the launch
+        page.locator("#stopButton").click()
+        assert KERNEL32.WaitForSingleObject(third_handle, 5000) == 0, \
+            "Stop Test left the current Test host running: a replaced host's exit notice cleared it"
+        assert page.evaluate("window.__testExited") == [first], "only the Test host that ended by itself may be reported"
+        native.close_window(process)
+        print("PASS a Test host that ends by itself is reported once; a replaced host's exit leaves Stop working", flush=True)
+        return {"pid": process.pid, "testPids": [first, second, third]}
+    finally:
+        for handle in handles:
+            if KERNEL32.WaitForSingleObject(handle, 0) != 0:
+                KERNEL32.TerminateProcess(handle, 1)
+            KERNEL32.CloseHandle(handle)
+        native.stop_application(process)
+        browser.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish", type=Path, default=ROOT / "artifacts" / "gate" / "win-x64-fd")
@@ -585,6 +671,7 @@ def main():
     with sync_playwright() as playwright:
         second_instance_case(playwright, args.publish)
         session_end_case(playwright, args.publish)
+        test_exit_case(playwright, args.publish)
         for renderer in (["regl", "webgpu"] if args.renderer == "both" else [args.renderer]):
             configurator_case(playwright, args.publish / "MatrixDesktopConfigurator.exe", renderer)
     print("PASS portable preset and backup bytes restored by the native preservation helper.", flush=True)
