@@ -3,7 +3,9 @@
 const state = {
 	metadata: null,
 	defaultDraft: {},
-	lastDraft: {},
+	// The unlinked draft that 'Last draft' brings back. While no preset is selected it is the
+	// editor draft (syncScratchDraft); choosing a preset leaves it as it was.
+	scratchDraft: {},
 	draft: {},
 	presets: [],
 	selectedPresetId: null,
@@ -74,7 +76,7 @@ window.configHost = {
     snapshotDraft() {
         if (!state.metadata) return null;
         window.clearTimeout(state.saveTimer);
-        return { draft: clone(state.draft), selectedPresetId: state.selectedPresetId };
+        return { draft: clone(state.draft), selectedPresetId: state.selectedPresetId, scratchDraft: clone(syncScratchDraft()) };
     },
 	receive(message) {
 		const pending = state.pending.get(message.id);
@@ -195,6 +197,13 @@ const setDirty = (dirty) => {
 	setSaveState(dirty ? "Draft changed" : "Draft saved");
 };
 
+// Everything that reads the scratch draft, or leaves the unlinked state, calls this first, so
+// an edit still inside the save debounce is kept.
+const syncScratchDraft = () => {
+	if (!state.selectedPresetId) state.scratchDraft = clone(state.draft);
+	return state.scratchDraft;
+};
+
 const scheduleSaveDraft = () => {
 	window.clearTimeout(state.saveTimer);
 	setSaveState("Saving…");
@@ -203,8 +212,8 @@ const scheduleSaveDraft = () => {
 			await requestHost("saveDraft", {
 				draft: state.draft,
 				selectedPresetId: state.selectedPresetId,
+				scratchDraft: syncScratchDraft(),
 			});
-			state.lastDraft = clone(state.draft);
 			// Unconditional. The old guard was `if (!state.dirty)`, which could never be
 			// true here because updateDraftValue sets dirty before scheduling the save.
 			setSaveState("Draft saved");
@@ -1208,7 +1217,6 @@ const importCommand = async () => {
 		state.selectedPresetId = null;
 		state.draft = normalizeDraft(result.draft);
 		rememberDraftEdits(result.applied || []);
-		state.lastDraft = clone(state.draft);
 		state.presets = result.state?.userPresets || state.presets;
 		showImportPanel(false);
 		setDirty(true);
@@ -1259,8 +1267,9 @@ const bindEvents = () => {
 	el.presetSelect.addEventListener("change", () => {
 		const id = el.presetSelect.value || null;
 		const preset = state.presets.find((item) => item.id === id);
+		syncScratchDraft();
 		state.selectedPresetId = id;
-		state.draft = normalizeDraft(preset?.values || state.lastDraft);
+		state.draft = normalizeDraft(preset?.values || state.scratchDraft);
 		rememberDraftEdits();
 		setDirty(false);
 		scheduleSaveDraft();
@@ -1409,8 +1418,11 @@ const init = async () => {
 		state.defaultDraft = payload.defaultDraft;
 		state.presets = payload.state?.userPresets || [];
 		state.selectedPresetId = payload.state?.selectedPresetId || null;
-		state.lastDraft = normalizeDraft(payload.state?.lastDraft);
-		state.draft = normalizeDraft(state.lastDraft);
+		state.draft = normalizeDraft(payload.state?.lastDraft);
+		// With no preset selected the last draft is the unlinked draft, and a store written before
+		// scratchDraft existed has only the last draft.
+		state.scratchDraft = state.selectedPresetId && payload.state?.scratchDraft
+			? normalizeDraft(payload.state.scratchDraft) : clone(state.draft);
 		rememberDraftEdits();
 		state.activeGroupId = state.metadata.groups[0]?.id || null;
 		el.storageStatus.textContent = payload.storage?.portable ? "Portable preset storage" : "AppData preset storage";

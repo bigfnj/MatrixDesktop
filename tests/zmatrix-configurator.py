@@ -27,13 +27,20 @@ STUB = """
   window.__heldPreviewReplies = [];
   // The preset store, applied synchronously in arrival order as ConfiguratorForm does:
   // SaveDraft, SavePreset, DeletePreset and the renamePreset contract (Name only).
+  // scratchDraft follows the host contract: a sent object wins; when absent an unlinked save
+  // derives it from the draft and a linked save keeps it.
   const host = window.__host = structuredClone(state.state);
   const same = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
   const object = value => value && typeof value === 'object' && !Array.isArray(value) ? structuredClone(value) : {};
   const text = value => typeof value === 'string' ? value : null;
   const reply = preset => ({preset: structuredClone(preset), state: structuredClone(host)});
   const store = {
-    saveDraft: p => { host.lastDraft = object(p.draft); host.selectedPresetId = text(p.selectedPresetId); return {saved:true}; },
+    saveDraft: p => {
+      host.lastDraft = object(p.draft); host.selectedPresetId = text(p.selectedPresetId);
+      if (p.scratchDraft && typeof p.scratchDraft === 'object' && !Array.isArray(p.scratchDraft)) host.scratchDraft = structuredClone(p.scratchDraft);
+      else if (!host.selectedPresetId) host.scratchDraft = object(p.draft);
+      return {saved:true};
+    },
     savePreset: p => {
       const id = text(p.preset.id)?.trim() ? p.preset.id : crypto.randomUUID().replaceAll('-', '');
       let preset = host.userPresets.find(item => same(item.id, id));
@@ -407,6 +414,60 @@ def check_rename(page, _fixture):
     assert page.locator("#statusLine").inner_text() == "Preset renamed.", page.locator("#statusLine").inner_text()
 
 
+def relaunch(page, fixture, stored):
+    # A second configurator page loaded from the store the first page left behind.
+    fresh = page.context.browser.new_page(viewport={"width": 1280, "height": 860})
+    errors = []
+    fresh.on("pageerror", lambda error: errors.append(str(error)))
+    fresh.add_init_script(STUB.replace("__STATE__", json.dumps(dict(fixture, state=stored), ensure_ascii=False)))
+    fresh.goto(page.url, wait_until="load")
+    fresh.wait_for_function("document.querySelectorAll('.field').length>40")
+    return fresh, errors
+
+
+def check_scratch_draft(page, fixture):
+    def columns(target):
+        return field(target, "numColumns").locator('input[type="number"]').input_value()
+    drafts = "window.__smokeMessages.filter(m=>m.type==='saveDraft').map(m=>m.payload)"
+    presets = page.locator("#presetSelect")
+    assert columns(page) == "33", "the unlinked draft did not load: " + columns(page)
+    presets.select_option("alpha")
+    page.wait_for_timeout(400)
+    witness = page.evaluate(drafts)[-1]
+    assert witness["selectedPresetId"] == "alpha" and witness["draft"]["numColumns"] == 50, "no saveDraft witnessed the Alpha selection"
+    presets.select_option("")
+    page.wait_for_timeout(400)
+    assert columns(page) == "33", "Last draft brought back the preset instead of the unlinked draft: " + columns(page)
+    last = page.evaluate(drafts)[-1]
+    assert last["selectedPresetId"] is None and last["draft"]["numColumns"] == 33, "the Last draft save stored the wrong draft or selection"
+    # An unlinked edit still inside the save debounce when a preset is chosen.
+    page.evaluate("""() => {
+        const input = document.querySelector('[data-field="numColumns"] input[type=number]');
+        input.value = '44'; input.dispatchEvent(new Event('input', {bubbles: true}));
+        const select = document.querySelector('#presetSelect');
+        select.value = 'beta'; select.dispatchEvent(new Event('change', {bubbles: true}));
+    }""")
+    assert columns(page) == "60", "the Beta preset did not load: " + columns(page)
+    page.wait_for_timeout(400)
+    presets.select_option("")
+    assert columns(page) == "44", "choosing a preset inside the save debounce lost the unlinked edit: " + columns(page)
+    presets.select_option("alpha")
+    page.wait_for_timeout(400)
+    stored = page.evaluate("window.__host")
+    assert stored["selectedPresetId"] == "alpha" and stored.get("scratchDraft", {}).get("numColumns") == 44, "the store did not keep the unlinked draft beside the selected preset"
+    # A relaunch, then a store written before scratchDraft existed (falls back to the last draft).
+    old_store = {key: value for key, value in stored.items() if key != "scratchDraft"}
+    for state, expected, label in ((stored, "44", "after a relaunch"), (old_store, "50", "for a store without scratchDraft")):
+        fresh, errors = relaunch(page, fixture, state)
+        try:
+            assert columns(fresh) == "50", "the relaunch did not restore the selected preset's draft: " + columns(fresh)
+            fresh.locator("#presetSelect").select_option("")
+            assert columns(fresh) == expected, "Last draft " + label + " gave " + columns(fresh) + ", not " + expected
+            assert not errors, "; ".join(errors)
+        finally:
+            fresh.close()
+
+
 def check_test_exited(page, _fixture):
     stop, status = page.locator("#stopButton"), page.locator("#statusLine")
     launches = "window.__smokeReplies.filter(r=>r.type==='testCommand').length"
@@ -477,8 +538,9 @@ CHECKS = [
     ("Screensaver action labels match the controls the docs name", check_doc_labels),
     ("Rename changes only the preset name and keeps its saved values", check_rename),
     ("Stop Test follows the host's exit notice for the running test only", check_test_exited),
+    ("Last draft brings back the unlinked draft after a preset was chosen", check_scratch_draft),
 ]
-PRESET_CHECKS = {check_rename}
+PRESET_CHECKS = {check_rename, check_scratch_draft}
 
 
 def main():
