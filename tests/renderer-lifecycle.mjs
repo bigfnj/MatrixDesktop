@@ -522,6 +522,42 @@ await test("regl tick stays exact in float32 past 2^24 frames and cycles glyphs 
 	}
 });
 
+// R2-21: the WebGPU palette and stripe passes dither with randomFloat(uv + time), and the hash's
+// dot product is about 91 * time, so as shader time grows float32 gives neighbouring pixels the
+// same input and the dither turns into bars. This emulates the hash input in float32 for each
+// form computeMain is known to use, across a whole shader time cycle at a 4K-at-0.75 width.
+const ditherInputs = {
+	"uv+vec2<f32>(time.seconds)": (t) => Math.fround(t),
+	"uv+vec2<f32>(fract(time.seconds))": (t) => { const s = Math.fround(t); return Math.fround(s - Math.floor(s)); },
+};
+const ditherArgument = (source) => {
+	const main = source.slice(source.indexOf("fn computeMain"));
+	const start = main.indexOf("randomFloat(") + "randomFloat(".length;
+	let depth = 1, end = start;
+	while (depth > 0 && end < main.length) { const c = main[end++]; if (c === "(") depth++; else if (c === ")") depth--; }
+	return main.slice(start, end - 1).replace(/\s+/g, "");
+};
+for (const file of ["palettePass", "stripePass"]) {
+	await test(`WebGPU ${file} dither keeps neighbouring pixels distinct for a whole shader time cycle`, async () => {
+		const source = await readFile(new URL(`shaders/wgsl/${file}.wgsl`, root), "utf8");
+		assert(source.includes("fn computeMain") && source.slice(source.indexOf("fn computeMain")).includes("randomFloat("), `${file}.wgsl no longer dithers in computeMain`);
+		const argument = ditherArgument(source), input = ditherInputs[argument];
+		assert(input, `update the dither emulation: ${file}.wgsl computeMain now hashes randomFloat(${argument})`);
+		const f = Math.fround, a = f(12.9898), b = f(78.233), W = 2880, H = 1620, uvY = f(810 / H);
+		for (const t of [600, 1437, 2874, 3600, 5747, 11495, 16384, 21599.98]) {
+			const shift = input(t), py = f(f(uvY + shift) * b);
+			let previous = NaN, distinct = 0;
+			for (let x = 0; x < W; x++) {
+				const dt = f(f(f(f(x / W) + shift) * a) + py);
+				if (x > 0 && dt !== previous) distinct++;
+				previous = dt;
+			}
+			const share = distinct / (W - 1);
+			assert(share >= 0.9, `${file}.wgsl at shader time ${t} s: only ${(share * 100).toFixed(1)}% of neighbouring pixels get distinct dither inputs`);
+		}
+	});
+}
+
 // A fake page for webgpu/main.js: the device records texture sizes and can raise GPU events.
 // These stubs are installed last so they cannot change any earlier case.
 const makeMatrixDevice = (maxTextureDimension2D) => {
