@@ -9,8 +9,8 @@ internal sealed class DesktopPointerBridge : IDisposable
     private delegate nint MouseProc(int code, nint message, nint data);
     private readonly MouseProc _callback;
     private readonly Action<Pointer> _post;
+    private readonly PointerGate _gate = new(DesktopWindowHost.DesktopHasForeground);
     private nint _hook;
-    private long _lastMove;
     private bool _reportedFailure;
 
     internal DesktopPointerBridge(Action<Pointer> post) { _post = post; _callback = OnMouse; }
@@ -29,20 +29,14 @@ internal sealed class DesktopPointerBridge : IDisposable
 
     private nint OnMouse(int code, nint message, nint data)
     {
-        if (code >= 0 && DesktopWindowHost.DesktopHasForeground())
+        if (code >= 0 && _gate.ShouldForward((int)message, Environment.TickCount64))
         {
             var mouse = Marshal.PtrToStructure<MouseData>(data);
             var kind = (int)message;
-            var move = kind == 0x0200;
-            var now = Environment.TickCount64;
-            if (!move || now - _lastMove >= 30)
-            {
-                _lastMove = now;
-                var delta = unchecked((short)(mouse.Data >> 16));
-                var type = kind switch { 0x0200 => "move", 0x0201 or 0x0204 or 0x0207 => "down", 0x0202 or 0x0205 or 0x0208 => "up", 0x020a or 0x020e => "wheel", _ => "" };
-                var button = kind is 0x0204 or 0x0205 ? 2 : kind is 0x0207 or 0x0208 ? 1 : 0;
-                if (type.Length > 0) _post(new Pointer(type, mouse.Point, button, kind == 0x020e ? delta : 0, kind == 0x020a ? -delta : 0));
-            }
+            var delta = unchecked((short)(mouse.Data >> 16));
+            var type = kind switch { 0x0200 => "move", 0x0201 or 0x0204 or 0x0207 => "down", 0x0202 or 0x0205 or 0x0208 => "up", 0x020a or 0x020e => "wheel", _ => "" };
+            var button = kind is 0x0204 or 0x0205 ? 2 : kind is 0x0207 or 0x0208 ? 1 : 0;
+            if (type.Length > 0) _post(new Pointer(type, mouse.Point, button, kind == 0x020e ? delta : 0, kind == 0x020a ? -delta : 0));
         }
         return CallNextHookEx(_hook, code, message, data);
     }

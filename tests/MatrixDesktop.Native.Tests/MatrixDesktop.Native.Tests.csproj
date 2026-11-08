@@ -20,6 +20,9 @@
     <Compile Include="..\..\Shared\StructuredArgumentCodec.cs" Link="Production\StructuredArgumentCodec.cs" />
     <Compile Include="..\..\MatrixDesktop\HostLaunchPlan.cs" Link="Production\HostLaunchPlan.cs" />
     <Compile Include="..\..\MatrixDesktop\MediaHostKind.cs" Link="Production\MediaHostKind.cs" />
+    <Compile Include="..\..\MatrixDesktop\PointerGate.cs" Link="Production\PointerGate.cs" />
+    <Compile Include="..\..\MatrixDesktop\DesktopWindowHost.cs" Link="Production\DesktopWindowHost.cs" />
+    <Compile Include="..\..\MatrixDesktop\PlaybackPolicy.cs" Link="Production\PlaybackPolicy.cs" />
     <Compile Include="..\..\MatrixDesktop\ScreensaverWindowPolicy.cs" Link="Production\ScreensaverWindowPolicy.cs" />
     <Compile Include="..\..\MatrixDesktop\ForegroundWindow.cs" Link="Production\ForegroundWindow.cs" />
     <Compile Include="..\..\MatrixDesktop\AutostartService.cs" Link="Production\AutostartService.cs" />
