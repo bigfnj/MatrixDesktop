@@ -41,6 +41,7 @@ public sealed class MainForm : Form
     private EventHandler<CoreWebView2NewWindowRequestedEventArgs>? _newWindowRequestedHandler;
     private EventHandler<CoreWebView2NavigationStartingEventArgs>? _navigationStartingHandler;
     private EventHandler<CoreWebView2ProcessFailedEventArgs>? _processFailedHandler;
+    private EventHandler<CoreWebView2PermissionRequestedEventArgs>? _permissionRequestedHandler;
     // The page this surface navigated to, so a lost renderer can be sent back to it.
     private string? _rendererTarget;
 
@@ -50,6 +51,8 @@ public sealed class MainForm : Form
     private Shared.AppWindowIcon? _windowIcon;
 
     private readonly Shared.NativeMediaBridge _mediaBridge;
+    // The bridge's host kind, also what decides the permission prompts this host answers itself.
+    private readonly Shared.NativeHostKind _hostKind;
 
     private static string? _cachedUserDataFolder;
 
@@ -63,7 +66,8 @@ public sealed class MainForm : Form
 
         var effectiveArgs = ScreensaverWindowPolicy.EffectiveArguments(launchPlan);
         _appOptions = AppCli.Parse(effectiveArgs, out var passthroughArgs);
-        _mediaBridge = new(preview: false, MediaHostKind.For(launchPlan, _appOptions.WindowMode == WindowMode.Wallpaper));
+        _hostKind = MediaHostKind.For(launchPlan, _appOptions.WindowMode == WindowMode.Wallpaper);
+        _mediaBridge = new(preview: false, _hostKind);
         if (IsWallpaper || launchPlan.IsPreview)
         {
             TopLevel = false;
@@ -757,6 +761,24 @@ public sealed class MainForm : Form
         };
         _webView.CoreWebView2.ProcessFailed += _processFailedHandler;
 
+        // R2-51: a wallpaper, /s or /p host cannot show WebView2's camera prompt, and the renderer
+        // awaits getUserMedia, which never settles while that prompt is pending. Those hosts answer
+        // through HostPermissionPolicy without UI; interactive hosts keep the prompt.
+        _permissionRequestedHandler = (_, request) =>
+        {
+            var answer = HostPermissionPolicy.Decide(_hostKind, request.PermissionKind);
+            if (!answer.Handled) return;
+            try
+            {
+                request.State = answer.State;
+                request.SavesInProfile = answer.SavesInProfile;
+                request.Handled = true;
+                Shared.Logger.Info($"Answered a {request.PermissionKind} request with {answer.State} and no prompt: this host cannot show one.");
+            }
+            catch (Exception error) { Shared.Logger.Warn($"Could not answer a {request.PermissionKind} request: {error.Message}"); }
+        };
+        _webView.CoreWebView2.PermissionRequested += _permissionRequestedHandler;
+
         string webRoot;
         try
         {
@@ -903,6 +925,12 @@ public sealed class MainForm : Form
             {
                 try { core.ProcessFailed -= _processFailedHandler; } catch { }
                 _processFailedHandler = null;
+            }
+
+            if (_permissionRequestedHandler is not null)
+            {
+                try { core.PermissionRequested -= _permissionRequestedHandler; } catch { }
+                _permissionRequestedHandler = null;
             }
         }
         catch

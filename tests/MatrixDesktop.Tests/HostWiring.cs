@@ -92,6 +92,25 @@ internal static class HostWiring
             Check.True(release!.Offset < close!.Offset && release.Offset < rebuild!.Offset,
                 "RecoverSurface must release the hook before it closes the old surface and builds the new one");
         });
+        // R2-51. HostPermissionPolicy has its own native test; this proves MainForm asks it about
+        // every permission request and applies the answer it gives.
+        failures += Run($"MainForm answers permission requests through HostPermissionPolicy: {path}", () =>
+        {
+            const string core = "Microsoft.Web.WebView2.Core.CoreWebView2::";
+            const string request = "Microsoft.Web.WebView2.Core.CoreWebView2PermissionRequestedEventArgs::";
+            const string decide = "MatrixDesktop.HostPermissionPolicy::Decide";
+            Check.True(calls.Any(call => call.Caller.StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal) && call.Callee == core + "add_PermissionRequested"),
+                "MainForm must subscribe CoreWebView2.PermissionRequested");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::DetachWebViewHandlers" && call.Callee == core + "remove_PermissionRequested"),
+                "MainForm must detach its PermissionRequested handler with the others");
+            var handlers = calls.Where(call => call.Callee == decide).Select(call => call.Caller).Distinct().ToArray();
+            Check.True(handlers.Length == 1 && handlers[0].StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal),
+                "exactly one MainForm handler must ask HostPermissionPolicy.Decide: " + string.Join("; ", handlers));
+            var body = calls.Where(call => call.Caller == handlers[0]).ToList();
+            var asked = body.First(call => call.Callee == decide);
+            foreach (var setter in new[] { "set_State", "set_SavesInProfile", "set_Handled" })
+                Check.True(body.Any(call => call.Callee == request + setter && call.Offset > asked.Offset), $"the handler must apply the policy's answer through {setter}");
+        });
         failures += Run($"SystemEvents session and power subscriptions have one owner: {path}", () =>
         {
             foreach (var subscribe in new[] { "Microsoft.Win32.SystemEvents::add_SessionSwitch", "Microsoft.Win32.SystemEvents::add_PowerModeChanged" })
