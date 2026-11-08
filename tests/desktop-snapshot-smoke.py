@@ -121,6 +121,17 @@ def own_window(pid):
     raise AssertionError("Published app window was unavailable")
 
 
+def release_application(native, process):
+    """Close the owned app if it is still open. stop_application then reaps it if that failed
+    and deletes the private WebView2 profile open_application made under run/webview (R2-37)."""
+    if process.poll() is None:
+        try:
+            native.close_window(process)
+        except Exception:
+            pass  # stop_application terminates, then kills
+    native.stop_application(process)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish", type=Path, default=ROOT / "artifacts/gate/win-x64-fd")
@@ -216,16 +227,8 @@ def main():
             except Exception:
                 pass  # Playwright may already have closed its driver on an earlier error.
         try:
-            if process is not None and process.poll() is None:
-                try:
-                    native.close_window(process)
-                except Exception:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+            if process is not None:
+                release_application(native, process)
         finally:
             try:
                 if fixture is not None and fixture.poll() is None:
