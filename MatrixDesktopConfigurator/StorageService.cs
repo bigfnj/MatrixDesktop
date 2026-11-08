@@ -1,9 +1,11 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MatrixDesktop.Shared;
+using Microsoft.Win32.SafeHandles;
 
 namespace MatrixDesktopConfigurator;
 
@@ -219,22 +221,43 @@ internal sealed class StorageService
 
     private static (string Path, bool Portable) ResolveStoragePath()
     {
-        var portablePath = Path.Combine(AppContext.BaseDirectory, FileName);
-        if (CanWriteStorageFile(portablePath))
-        {
-            return (portablePath, true);
-        }
-
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(appData))
         {
             appData = Path.GetTempPath();
         }
 
-        return (Path.Combine(appData, "MatrixDesktop", "Configurator", FileName), false);
+        return ResolveStoragePath(
+            Path.Combine(AppContext.BaseDirectory, FileName),
+            Path.Combine(appData, "MatrixDesktop", "Configurator", FileName),
+            warn: Logger.Warn);
     }
 
-    private static bool CanWriteStorageFile(string path)
+    // Program.cs takes the store-keyed single-instance guard AFTER this runs, so two launches
+    // started together must resolve the same store here; otherwise each takes a different
+    // store's guard, both open, and one saves to AppData (R2-18, MDR-04). Only a real refusal
+    // falls back: neither check below can fail because another launch is probing or loading
+    // the store at the same moment. whileProbeOpen is a test seam that runs while the folder
+    // probe is held.
+    internal static (string Path, bool Portable) ResolveStoragePath(
+        string portablePath, string appDataPath, Action<string>? whileProbeOpen = null, Action<string>? warn = null)
+    {
+        if (CanWriteStorageFile(portablePath, whileProbeOpen))
+        {
+            return (portablePath, true);
+        }
+
+        // Presets beside the executable that this launch will not show, which otherwise
+        // reaches the owner as "my presets vanished".
+        if (File.Exists(portablePath))
+        {
+            warn?.Invoke($"The portable preset store '{portablePath}' is not writable, so this launch uses '{appDataPath}' and does not show the presets saved beside the executable.");
+        }
+
+        return (appDataPath, false);
+    }
+
+    private static bool CanWriteStorageFile(string path, Action<string>? whileProbeOpen)
     {
         try
         {
@@ -249,40 +272,55 @@ internal sealed class StorageService
             // MD-06: this used FileMode.OpenOrCreate, so merely probing for writability
             // CREATED a zero-byte presets file beside the executable. Load then read it,
             // could not parse an empty document, and logged an ERROR on every genuinely
-            // first run. Probe without leaving anything behind: an existing file is proved
-            // writable by opening it, and a missing one is proved by a uniquely named temp
-            // probe that is deleted again.
-            if (File.Exists(path))
+            // first run. The probe never creates the store.
+            //
+            // An existing store used to be proved writable by opening it ReadWrite. That open
+            // was refused while another configurator's Load was reading the file, sending this
+            // launch to AppData, and while it was held that Load failed, took the live store
+            // for corrupt and moved it aside. The attribute and ACL checks answer the same
+            // question without taking part in file sharing.
+            if (File.Exists(path)
+                && ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0
+                    || (OperatingSystem.IsWindows() && !AclAllowsWrites(path))))
             {
-                using var existing = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-                return existing.CanWrite;
+                return false;
             }
 
-            // Fixed name, and deleted in a finally. A GUID name meant a delete that failed,
-            // to a scanner holding the freshly closed handle, left one orphan per launch with
-            // nothing anywhere to sweep them; and the early return inside the using skipped
-            // the delete entirely.
-            var probe = Path.Combine(directory, ".write-probe");
-            try
+            // Each attempt probes its own file, as HostStorage does (AUD-73). The fixed
+            // '.write-probe' opened with FileShare.None made a launch overlapping another's
+            // probe fail with a sharing violation and silently resolve to AppData.
+            // DeleteOnClose removes the probe even when a scanner still holds it after our
+            // close or the process dies holding it, so per-attempt names cannot pile up the
+            // way the hand-deleted GUID probes once did.
+            var probe = Path.Combine(directory, $".write-probe-{Environment.ProcessId}-{Guid.NewGuid():N}");
+            using (var stream = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose))
             {
-                using (var stream = new FileStream(probe, FileMode.Create, FileAccess.Write, FileShare.None))
-                {
-                    if (!stream.CanWrite)
-                    {
-                        return false;
-                    }
-                }
+                stream.WriteByte((byte)'o');
+                stream.Flush();
+                whileProbeOpen?.Invoke(probe);
+            }
 
-                return true;
-            }
-            finally
-            {
-                try { File.Delete(probe); } catch { /* swept on the next successful probe */ }
-            }
+            return true;
         }
         catch
         {
             return false;
         }
     }
+
+    // FILE_WRITE_ATTRIBUTES is granted by the same ACL entries as writing the data (the
+    // standard Write and Modify permissions carry both), but unlike data access it takes no
+    // part in file sharing, so this open neither waits for a reader nor makes one fail.
+    private static bool AclAllowsWrites(string path)
+    {
+        using var handle = CreateFile(path, FileWriteAttributes, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
+        return !handle.IsInvalid;
+    }
+
+    private const int FileWriteAttributes = 0x0100;
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName, int desiredAccess, FileShare shareMode, IntPtr securityAttributes,
+        FileMode creationDisposition, int flagsAndAttributes, IntPtr templateFile);
 }

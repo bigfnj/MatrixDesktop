@@ -21,6 +21,10 @@ internal static class StorageTests
         ("Null preset records and values recover without changing valid data or backups", NullPresetContainersRecover),
         ("Renaming a preset changes only its name", RenameChangesOnlyName),
         ("The scratch draft survives choosing a preset and a relaunch", ScratchDraftSurvivesPresetChoice),
+        ("Two launches probing a missing store at once both resolve the portable store", OverlappingLaunchesAgree),
+        ("Probing an existing store neither yields to nor disturbs a launch reading it", ProbingLeavesReadersAlone),
+        ("A portable store that refuses writes falls back to AppData and says so", DeniedStoreFallsBack),
+        ("A portable folder that refuses new files falls back to AppData", DeniedFolderFallsBack),
     ];
 
     private static void Cleanup(StorageService storage)
@@ -311,6 +315,200 @@ internal static class StorageTests
             foreach (var path in new[] { storage.StoragePath, storage.BackupPath, storage.StoragePath + ".tmp" })
                 if (File.Exists(path)) File.Delete(path);
             Directory.Delete(directory);
+        }
+    }
+
+    // R2-18 (MDR-04): store resolution when launches overlap. These drive the real resolver
+    // against owned portable and AppData roots, so they never probe this harness's own
+    // publish folder, and no case ever creates the AppData side.
+    private static string NewResolverRoot()
+    {
+        var root = Path.Combine(AppContext.BaseDirectory, "synthetic-storage-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, "portable"));
+        return root;
+    }
+
+    private static void DeleteResolverRoot(string root)
+    {
+        var full = Path.GetFullPath(root);
+        var parent = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        Check.True(string.Equals(Path.GetDirectoryName(full), parent, StringComparison.OrdinalIgnoreCase)
+            && Path.GetFileName(full).StartsWith("synthetic-storage-", StringComparison.Ordinal),
+            "cleanup must stay inside this test's owned synthetic fixture directory");
+        Directory.Delete(full, recursive: true);
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void DenyCurrentUser(string path, System.Security.AccessControl.FileSystemRights rights, bool deny)
+    {
+        var rule = new System.Security.AccessControl.FileSystemAccessRule(
+            System.Security.Principal.WindowsIdentity.GetCurrent().User!, rights, System.Security.AccessControl.AccessControlType.Deny);
+        if (Directory.Exists(path))
+        {
+            var folder = new DirectoryInfo(path);
+            var acl = folder.GetAccessControl();
+            if (deny) acl.AddAccessRule(rule); else acl.RemoveAccessRule(rule);
+            folder.SetAccessControl(acl);
+        }
+        else
+        {
+            var file = new FileInfo(path);
+            var acl = file.GetAccessControl();
+            if (deny) acl.AddAccessRule(rule); else acl.RemoveAccessRule(rule);
+            file.SetAccessControl(acl);
+        }
+    }
+
+    private static void OverlappingLaunchesAgree()
+    {
+        // The second resolution runs while the first one's probe is held, the overlap that two
+        // launches started together produce. Killing mutation: probe the fixed '.write-probe'
+        // with FileMode.Create and FileShare.None again; the overlapping launch then resolves
+        // AppData and takes a second store's guard.
+        var root = NewResolverRoot();
+        try
+        {
+            var portable = Path.Combine(root, "portable", "presets.json");
+            var appData = Path.Combine(root, "appdata", "presets.json");
+            (string Path, bool Portable) second = ("(never resolved)", false);
+            string? firstProbe = null, secondProbe = null;
+            var first = StorageService.ResolveStoragePath(portable, appData, whileProbeOpen: probe =>
+            {
+                firstProbe = probe;
+                second = StorageService.ResolveStoragePath(portable, appData, whileProbeOpen: inner => secondProbe = inner);
+            });
+
+            Check.True(first == (portable, true) && second == (portable, true),
+                $"two launches resolving a missing store at once must both choose the portable store; got '{first.Path}' and '{second.Path}'");
+            using (var owner = SingleInstanceGuard.TryAcquire(first.Path))
+            using (var refused = SingleInstanceGuard.TryAcquire(second.Path))
+                Check.True(owner is not null && refused is null, "so exactly one of them takes the store's guard");
+            Check.True(firstProbe is not null && secondProbe is not null && firstProbe != secondProbe,
+                "the second launch must open its own probe while the first launch's probe is held");
+            Check.False(File.Exists(portable), "probing must not create the store");
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "and must not touch the AppData store");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    private static void ProbingLeavesReadersAlone()
+    {
+        // The probe used to open an existing store ReadWrite. Killing mutations: restore that
+        // open and hold it while the probe runs (the owner's load below fails and returns the
+        // backup); or restore it closed before the probe (a launch probing while the store is
+        // being read then resolves AppData).
+        var root = NewResolverRoot();
+        try
+        {
+            var portable = Path.Combine(root, "portable", "presets.json");
+            var appData = Path.Combine(root, "appdata", "presets.json");
+            var owner = new StorageService(portable);
+            owner.Save(StateWith("previous"));
+            owner.Save(StateWith("live"));
+
+            // The owning configurator loads while a second launch's probe is held.
+            ConfiguratorState? loaded = null;
+            var probing = StorageService.ResolveStoragePath(portable, appData, whileProbeOpen: _ => loaded = owner.Load());
+            Check.Equal("live", loaded?.UserPresets.FirstOrDefault()?.Name ?? "(no load ran)",
+                "the owner's load during another launch's probe must return the live store, not the backup");
+            Check.Equal(0, Directory.GetFiles(Path.GetDirectoryName(portable)!, "*.unreadable-*").Length,
+                "and must not move the live store aside as unreadable");
+            Check.True(probing == (portable, true), "the probing launch still resolves the portable store");
+
+            // A second launch probes while the store is open: the way Load's File.ReadAllText
+            // opens it, and exclusively, as a sync or backup tool may hold it.
+            foreach (var share in new[] { FileShare.Read, FileShare.None })
+            {
+                using var reader = new FileStream(portable, FileMode.Open, FileAccess.Read, share);
+                var during = StorageService.ResolveStoragePath(portable, appData);
+                Check.True(during == (portable, true),
+                    $"a launch probing while the store is open with FileShare.{share} must still resolve the portable store; got '{during.Path}'");
+            }
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    private static void DeniedStoreFallsBack()
+    {
+        // Only a real refusal falls back, and a fallback that hides existing portable presets
+        // is reported. Killing mutations: drop the read-only check, drop the ACL check, or drop
+        // the warning; each fails one leg below.
+        var root = NewResolverRoot();
+        var portable = Path.Combine(root, "portable", "presets.json");
+        var appData = Path.Combine(root, "appdata", "presets.json");
+        var warnings = new List<string>();
+        try
+        {
+            File.WriteAllText(portable, "{}");
+            Check.True(StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add) == (portable, true) && warnings.Count == 0,
+                "a writable store resolves to itself without a warning");
+
+            File.SetAttributes(portable, FileAttributes.ReadOnly);
+            var readOnly = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add);
+            File.SetAttributes(portable, FileAttributes.Normal);
+            Check.True(readOnly == (appData, false), "a read-only portable store falls back to AppData");
+            Check.True(warnings.Count == 1 && warnings[0].Contains(portable, StringComparison.Ordinal) && warnings[0].Contains(appData, StringComparison.Ordinal),
+                "and the fallback is reported, naming the store it cannot use and the one it uses");
+
+            if (OperatingSystem.IsWindows())
+            {
+                // The folder still accepts new files; only the store's ACL refuses writes.
+                (string Path, bool Portable) denied;
+                DenyCurrentUser(portable, System.Security.AccessControl.FileSystemRights.Write, deny: true);
+                try { denied = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add); }
+                finally { DenyCurrentUser(portable, System.Security.AccessControl.FileSystemRights.Write, deny: false); }
+                Check.True(denied == (appData, false), "a store whose ACL refuses writes falls back to AppData although its folder accepts new files");
+                Check.Equal(2, warnings.Count, "and that fallback is reported too");
+            }
+            else
+            {
+                Console.WriteLine("NOTE  ACL leg of the denied-store case UNCHECKED: not Windows");
+            }
+        }
+        finally
+        {
+            if (File.Exists(portable)) File.SetAttributes(portable, FileAttributes.Normal);
+            DeleteResolverRoot(root);
+        }
+    }
+
+    private static void DeniedFolderFallsBack()
+    {
+        // MDR-04 asked for a genuinely denied root. Killing mutation: report the folder
+        // writable when the probe cannot be created; this case then resolves the portable store.
+        var root = NewResolverRoot();
+        var folder = Path.Combine(root, "portable");
+        var portable = Path.Combine(folder, "presets.json");
+        var appData = Path.Combine(root, "appdata", "presets.json");
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("NOTE  denied-folder case UNCHECKED: not Windows");
+            DeleteResolverRoot(root);
+            return;
+        }
+
+        var warnings = new List<string>();
+        try
+        {
+            var rights = System.Security.AccessControl.FileSystemRights.CreateFiles | System.Security.AccessControl.FileSystemRights.WriteData;
+            (string Path, bool Portable) resolved;
+            DenyCurrentUser(folder, rights, deny: true);
+            try { resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add); }
+            finally { DenyCurrentUser(folder, rights, deny: false); }
+            Check.True(resolved == (appData, false), "a portable folder that refuses new files falls back to AppData");
+            Check.Equal(0, warnings.Count, "with no portable store to hide, this is the installed-copy mode and is not reported");
+            Check.Equal(0, Directory.GetFiles(folder).Length, "and the refused probe leaves nothing behind");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
         }
     }
 }
