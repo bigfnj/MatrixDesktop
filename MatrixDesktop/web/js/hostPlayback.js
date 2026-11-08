@@ -11,8 +11,9 @@ const notify = (value) => {
   if (paused) forwardPointer?.(null);
   for (const listener of listeners) listener(value);
 };
-const hostMessage = (event) => {
-  if (event.data?.type === "matrix-host-state") notify(event.data.paused);
+// Pause state arrives only as the matrix-host-state window event below; the host's
+// one PostWebMessage sender is the pointer bridge.
+const hostPointerMessage = (event) => {
   if (event.data?.type === "matrix-host-pointer" && !paused) {
     const canvas = globalThis.document?.querySelector("canvas");
     if (!canvas) return;
@@ -22,10 +23,10 @@ const hostMessage = (event) => {
 };
 const bridge = globalThis.window?.chrome?.webview;
 const hostEvent = (event) => notify(event.detail?.paused);
-bridge?.addEventListener("message", hostMessage);
+bridge?.addEventListener("message", hostPointerMessage);
 globalThis.window?.addEventListener("matrix-host-state", hostEvent);
 globalThis.window?.addEventListener("pagehide", () => {
-  bridge?.removeEventListener("message", hostMessage);
+  bridge?.removeEventListener("message", hostPointerMessage);
   globalThis.window?.removeEventListener("matrix-host-state", hostEvent);
   listeners.clear();
   pointerCanvas = null; forwardPointer = null;

@@ -10,7 +10,7 @@ export function createPointerForwarder(canvas, {
     if (typeof Constructor === "function") canvas.dispatchEvent(new Constructor(type, { bubbles: true, cancelable: true, ...fields }));
   };
   return data => {
-    if (data == null || data.eventType === "leave") {
+    if (data == null) {
       down = null; buttons = 0;
       send(PointerEvent, "pointerleave", { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 });
       return true;
