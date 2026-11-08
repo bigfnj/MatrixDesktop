@@ -362,6 +362,32 @@ test("original once and zero-fps frames show settled startup while legacy captur
     assert.deepEqual(result.observed, [controls === "original" ? 10 : 0]); assert.equal(result.scheduled, 0);
   }
 });
+
+// A visible host pause (tray, fullscreen, battery) must not keep a frame loop running.
+test("a host pause parks the UC3D loop and the host's resume re-arms it once", () => {
+  const oldWindow = globalThis.window, oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
+  const callbacks = new Map(), hosts = new Set(); let serial = 0, draws = 0;
+  globalThis.window = { devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+  globalThis.requestAnimationFrame = callback => { callbacks.set(++serial, callback); return serial; };
+  globalThis.cancelAnimationFrame = id => callbacks.delete(id);
+  const clock = { paused: false, seconds: now => now / 1000, dispose() {} };
+  // The host's pause event reaches the clock and the loop's subscription alike.
+  const host = paused => { clock.paused = paused; for (const listener of [...hosts]) listener(paused); };
+  const run = now => { const [id, callback] = callbacks.entries().next().value; callbacks.delete(id); callback(now); };
+  try {
+    const runtime = { config: { fps: 60, resolution: 1 }, diagnostics: { errors: [], frames: 0 }, update: () => ({}), dispose() {} };
+    const stop = startLoop({ clientWidth: 20, clientHeight: 10 }, runtime, () => { draws++; }, () => {}, Infinity,
+      { clock, subscribe: listener => { hosts.add(listener); listener(clock.paused); return () => hosts.delete(listener); } });
+    run(0); assert.equal(draws, 1, "witness: the running loop draws");
+    host(true); run(100);
+    assert.equal(draws, 1, "witness: a paused tick draws nothing");
+    assert.equal(callbacks.size, 0, "a paused loop must stop requesting animation frames");
+    host(false); host(false);
+    assert.equal(callbacks.size, 1, "the host's resume must re-arm the parked loop exactly once");
+    run(200); assert.equal(draws, 2, "the resumed loop must draw"); assert.equal(callbacks.size, 1);
+    stop(); assert.equal(callbacks.size, 0); assert.equal(hosts.size, 0, "teardown must unsubscribe from host playback");
+  } finally { globalThis.window = oldWindow; globalThis.requestAnimationFrame = oldRequest; globalThis.cancelAnimationFrame = oldCancel; }
+});
 const previousDocument = globalThis.document, previousAudio = globalThis.Audio;
 const listeners = new Map(), buttons = [];
 globalThis.document = {

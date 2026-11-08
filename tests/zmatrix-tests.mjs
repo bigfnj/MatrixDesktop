@@ -9,12 +9,17 @@ const { zmatrixDefaults, zmatrixParamMapping, normalizeZMatrixSettings, normaliz
 const { createRandom, createScene, streamColor, cleanupCell } = await import(new URL("scene.js", root));
 const { createSurface, fitSurface, rasterOperation } = await import(new URL("surface.js", root));
 const { validateNativeFont, decodeImage, loadNativeFont } = await import(new URL("fonts.js", root));
+// hostPlayback.js binds to the page's window once, when runtime.js first imports it. A private page
+// lets a test drive the real module through the host's own matrix-host-state event.
+const hostPage = new EventTarget(), pageBefore = Object.getOwnPropertyDescriptor(globalThis, "window");
+globalThis.window = hostPage;
 const { createResourceSlot, createRuntime, startLoop } = await import(new URL("runtime.js", root));
+if (pageBefore) Object.defineProperty(globalThis, "window", pageBefore); else delete globalThis.window;
 const { createProgram } = await import(new URL("../webglProgram.js", root));
 const { default: startZMatrixREGL } = await import(new URL("../regl/zmatrixPass.js", root));
 const { default: startZMatrixWebGPU } = await import(new URL("../webgpu/zmatrixPass.js", root));
 console.log(`SOURCE ${new URL("scene.js", root).pathname}`);
-for (const file of ["settings.js", "scene.js", "surface.js", "fonts.js", "runtime.js", "../webglProgram.js", "../regl/zmatrixPass.js", "../webgpu/zmatrixPass.js", "../renderFailure.js"])
+for (const file of ["settings.js", "scene.js", "surface.js", "fonts.js", "runtime.js", "../webglProgram.js", "../regl/zmatrixPass.js", "../webgpu/zmatrixPass.js", "../renderFailure.js", "../hostPlayback.js", "../uc3d/runtime.js"])
   console.log(`WITNESS ${file} ${createHash("sha256").update(readFileSync(new URL(file, root))).digest("hex")}`);
 const only = process.argv.indexOf("--only");
 const filter = only >= 0 ? new RegExp(process.argv[only + 1]) : null;
@@ -279,7 +284,7 @@ await test("resource install failure releases new and previous generations once"
 });
 function mockLoop(config, draw = () => {}) {
   const saved = { window: globalThis.window, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame };
-  const callbacks = new Map(), listeners = new Map(); let serial = 0, disposed = 0, cleaned = 0, clockDisposed = 0;
+  const callbacks = new Map(), listeners = new Map(), hosts = new Set(); let serial = 0, disposed = 0, cleaned = 0, clockDisposed = 0;
   globalThis.window = { addEventListener: (name, listener) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(listener); },
     removeEventListener: (name, listener) => listeners.get(name)?.delete(listener) };
   globalThis.requestAnimationFrame = fn => { callbacks.set(++serial, fn); return serial; };
@@ -287,9 +292,12 @@ function mockLoop(config, draw = () => {}) {
   const updates = [], steps = [], clock = { paused: false, value: 0, seconds() { return this.value; }, dispose: () => clockDisposed++ };
   const runtime = { config: { fps: 60, zmRefreshTime: 50, ...config }, diagnostics: { errors: [], frames: 0, inspect: () => ({ ticks: steps.reduce((a, b) => a + b, 0) }) },
     update: seconds => { updates.push(seconds); return { revision: updates.length }; }, advanceTicks: n => { steps.push(n); return { revision: 1000 + n }; }, warn() {}, dispose: () => disposed++ };
-  const stop = startLoop({}, runtime, draw, () => cleaned++, { clock });
-  return { runtime, updates, steps, clock, callbacks, listeners, stop,
+  const stop = startLoop({}, runtime, draw, () => cleaned++, { clock,
+    subscribe: listener => { hosts.add(listener); listener(clock.paused); return () => hosts.delete(listener); } });
+  return { runtime, updates, steps, clock, callbacks, listeners, hosts, stop,
     run(timestamp) { const [id, fn] = callbacks.entries().next().value; callbacks.delete(id); fn(timestamp); },
+    // The host's pause event reaches the clock and the loop's subscription alike.
+    host(paused) { clock.paused = paused; for (const listener of [...hosts]) listener(paused); },
     counts: () => ({ disposed, cleaned, clockDisposed }), restore() { stop(); Object.assign(globalThis, saved); } };
 }
 await test("once mode warms bounded ticks and stops RAF while preserving frame", () => {
@@ -301,10 +309,14 @@ await test("once mode warms bounded ticks and stops RAF while preserving frame",
 });
 await test("host paused loop does not simulate present or accumulate inactive clocktime", () => {
   const loop = mockLoop({});
-  try { loop.clock.paused = true; loop.run(0); assert.deepEqual(loop.updates, []);
-    loop.clock.paused = false; loop.clock.value = .5; loop.run(500); assert.deepEqual(loop.updates, [.5]);
-    loop.clock.paused = true; loop.run(20000); assert.equal(loop.runtime.diagnostics.frames, 1);
-    loop.clock.paused = false; loop.clock.value = .6; loop.run(21000); assert.deepEqual(loop.updates, [.5, .6]);
+  try { loop.host(true); loop.run(0); assert.deepEqual(loop.updates, []);
+    assert.equal(loop.callbacks.size, 0, "a paused loop must stop requesting animation frames");
+    loop.clock.value = .5; loop.host(false); assert.equal(loop.callbacks.size, 1, "the host's resume must re-arm the parked loop");
+    loop.run(500); assert.deepEqual(loop.updates, [.5]);
+    loop.host(true); loop.run(20000); assert.equal(loop.runtime.diagnostics.frames, 1); assert.equal(loop.callbacks.size, 0);
+    loop.clock.value = .6; loop.host(false); loop.host(false); assert.equal(loop.callbacks.size, 1, "a repeated resume must not arm a second loop");
+    loop.run(21000); assert.deepEqual(loop.updates, [.5, .6]);
+    loop.stop(); assert.equal(loop.callbacks.size, 0); assert.equal(loop.hosts.size, 0, "teardown must unsubscribe from host playback");
   } finally { loop.restore(); }
 });
 await test("explicit teardown cancels pending RAF and prevents future scheduling", () => {
@@ -319,6 +331,31 @@ await test("render failure stops RAF and releases runtime GPU and clock owners",
   try { loop.run(0); assert.equal(loop.callbacks.size, 0); assert.deepEqual(loop.runtime.diagnostics.errors, ["synthetic render fault"]);
     assert.deepEqual(loop.counts(), { disposed: 1, cleaned: 1, clockDisposed: 1 });
   } finally { console.error = oldError; globalThis.document = oldDocument; loop.restore(); }
+});
+// Both scene loops with their default clock and subscription: a parked loop that missed the host's
+// resume would leave the wallpaper frozen after every tray, fullscreen or battery pause.
+await test("UC3D and ZMatrix loops come back on the real host playback resume event", async () => {
+  const { startLoop: startUC3D } = await import(new URL("../uc3d/runtime.js", root));
+  const host = paused => hostPage.dispatchEvent(new CustomEvent("matrix-host-state", { detail: { paused } }));
+  const saved = { window: globalThis.window, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame };
+  const callbacks = new Map(); let serial = 0;
+  try {
+    globalThis.window = { devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+    globalThis.requestAnimationFrame = fn => { callbacks.set(++serial, fn); return serial; };
+    globalThis.cancelAnimationFrame = id => callbacks.delete(id);
+    for (const [name, start] of [["ZMatrix", startLoop], ["UC3D", startUC3D]]) {
+      // Frame times run ahead of performance.now(), which the real clock samples on each host event.
+      let draws = 0, now = performance.now();
+      const drain = () => { const pending = [...callbacks.values()]; callbacks.clear(); now += 100; for (const fn of pending) fn(now); };
+      const runtime = { config: { fps: 60, resolution: 1 }, diagnostics: { errors: [], frames: 0 }, update: () => ({ revision: draws }), dispose() {} };
+      const stop = start({ clientWidth: 20, clientHeight: 10 }, runtime, () => { draws++; }, () => {});
+      try {
+        drain(); assert.equal(draws, 1, `${name}: witness: the running loop draws`);
+        host(true); drain(); drain(); assert.equal(draws, 1, `${name}: witness: the paused loop draws nothing`);
+        host(false); drain(); assert.equal(draws, 2, `${name}: the host's resume must bring the loop back`);
+      } finally { stop(); host(false); }
+    }
+  } finally { Object.assign(globalThis, saved); }
 });
 // Page globals for the real runtime and both passes: one native glyph, a Canvas2D upload and manual frames.
 async function withZMatrixPage(run) {

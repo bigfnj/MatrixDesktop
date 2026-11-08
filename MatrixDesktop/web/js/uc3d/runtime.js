@@ -3,7 +3,7 @@ import { createMedia, selectImages } from "./media.js";
 import { createOverlays } from "./overlays.js";
 import { createAudio } from "./audio.js";
 import colorToRGB from "../colorToRGB.js";
-import { createPlaybackClock } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback } from "../hostPlayback.js";
 import { fitSurface } from "../zmatrix/surface.js";
 import { showRenderFailure } from "../renderFailure.js";
 
@@ -134,20 +134,21 @@ export async function createRuntime(canvas, options, backend) {
 // Both backends use one lifecycle and throttling implementation. No rendering callback
 // can survive pagehide, explicit teardown, or an initialization/runtime failure.
 // maximumDimension is the backend's texture/viewport limit for the canvas and render target.
-export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity) {
-  const clock = createPlaybackClock();
-  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
+export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity, environment = {}) {
+  const clock = environment.clock ?? createPlaybackClock();
+  let frame = 0, dead = false, parked = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
   const requestedFps = Number(runtime.config.fps ?? 60);
   const fps = Number.isFinite(requestedFps) ? Math.max(0, Math.min(120, requestedFps)) : 60;
   const dispose = () => {
     if (dead) return;
     dead = true; cancelAnimationFrame(frame); window.removeEventListener("pagehide", dispose);
-    clock.dispose(); runtime.dispose(); cleanup();
+    unsubscribe(); clock.dispose(); runtime.dispose(); cleanup();
   };
   const tick = (now) => {
     if (dead) return;
     now = clock.seconds(now) * 1000;
-    if (clock.paused) { frame = requestAnimationFrame(tick); return; }
+    // A paused host keeps the last frame on screen: park without requesting another frame.
+    if (clock.paused) { parked = true; return; }
     if (start === null) start = now;
     if (fps === 0 || now - previous >= 1000 / fps - 0.5 || runtime.config.once) {
       const ratio = window.devicePixelRatio || 1;
@@ -176,6 +177,10 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
     }
     frame = requestAnimationFrame(tick);
   };
+  // The host's resume re-arms a parked loop once. The listener also runs on subscribing.
+  const unsubscribe = (environment.subscribe ?? subscribeHostPlayback)(paused => {
+    if (!paused && parked && !dead) { parked = false; frame = requestAnimationFrame(tick); }
+  });
   window.addEventListener("pagehide", dispose, { once: true });
   runtime.diagnostics.dispose = dispose;
   frame = requestAnimationFrame(tick);
