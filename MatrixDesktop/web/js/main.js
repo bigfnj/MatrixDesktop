@@ -100,18 +100,21 @@ document.body.onload = async () => {
 		`;
 		canvas.style.display = "none";
 		document.body.appendChild(notice);
+		// once: a second click would start a second renderer on the same canvas. The canvas is
+		// shown BEFORE loading because REGL sizes its backing store from clientWidth, which is
+		// 0 while hidden, and nothing resizes it when it appears.
 		document.querySelector(".blue.pill").addEventListener("click", async () => {
 			try {
 				config.suppressWarnings = true;
 				urlParams.set("suppressWarnings", true);
 				history.replaceState({}, "", "?" + urlParams.toString());
-				await loadRenderer(canvas, config, useWebGPU);
+				notice.remove();
 				canvas.style.display = "unset";
-				document.body.removeChild(notice);
+				await loadRenderer(canvas, config, useWebGPU);
 			} catch (err) {
 				showError(err);
 			}
-		});
+		}, { once: true });
 	} else {
 		try {
 			await loadRenderer(canvas, config, useWebGPU);

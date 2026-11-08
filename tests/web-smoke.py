@@ -704,8 +704,71 @@ def check_config_error_boundary(browser, origin):
         page.close()
 
 
+READY = "window.matrixRuntimeDiagnostics?.ready === true && window.matrixRuntimeDiagnostics.frames > 2"
+
+
+def open_software_notice(browser, origin, query="numColumns=40&resolution=1"):
+    """The SwiftShader notice path: no suppressWarnings, so the page must wait for a click."""
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    page.goto(f"{origin}/index.html?{query}", wait_until="load")
+    try:
+        page.wait_for_function("document.querySelector('.blue.pill') != null", timeout=10000)
+    except Exception:
+        page.close()
+        return None
+    reached = page.evaluate("() => document.querySelector('.blue.pill').offsetParent != null && "
+                            "getComputedStyle(document.querySelector('canvas')).display === 'none'")
+    if not reached:
+        page.close()
+        return None
+    return page
+
+
+def check_plug_me_in(browser, origin):
+    """'Plug me in' must start one renderer, sized to the canvas it has just made visible."""
+    name = "Plug me in starts a renderer sized to the visible canvas"
+    page = open_software_notice(browser, origin)
+    if page is None:
+        fail(name, "notice path not reached: no visible .blue.pill over a hidden canvas")
+    else:
+        try:
+            page.click(".blue.pill")
+            page.wait_for_function(READY, timeout=20000)
+            size = page.evaluate("() => { const c = document.querySelector('canvas'); "
+                                 "return { width: c.width, height: c.height, expected: Math.ceil(c.clientWidth * devicePixelRatio) }; }")
+            if size["width"] > 1 and size["width"] == size["expected"]:
+                ok(name, f"{size['width']}x{size['height']}")
+            else:
+                fail(name, f"canvas backing store is {size['width']}x{size['height']}, expected width {size['expected']}")
+        except Exception as exc:
+            fail(name, f"no ready renderer with frames > 2 after the click: {type(exc).__name__}")
+        finally:
+            page.close()
+
+    name = "Plug me in clicked twice starts exactly one renderer"
+    page = open_software_notice(browser, origin)
+    if page is None:
+        fail(name, "notice path not reached: no visible .blue.pill over a hidden canvas")
+        return
+    try:
+        page.evaluate("() => { const pill = document.querySelector('.blue.pill'); pill.click(); pill.click(); }")
+        page.wait_for_function(READY, timeout=20000)
+        page.wait_for_timeout(1000)
+        seen = page.evaluate("() => ({ scripts: document.querySelectorAll(\"script[src$='lib/regl.min.js']\").length, "
+                             "notices: document.querySelectorAll('.notice').length })")
+        if seen == {"scripts": 1, "notices": 0}:
+            ok(name)
+        else:
+            fail(name, f"{seen['scripts']} regl.min.js script tag(s) and {seen['notices']} .notice element(s); expected 1 and 0")
+    except Exception as exc:
+        fail(name, f"no ready renderer with frames > 2 after two clicks: {type(exc).__name__}")
+    finally:
+        page.close()
+
+
 def check_startup_paths(browser, origin):
     check_config_error_boundary(browser, origin)
+    check_plug_me_in(browser, origin)
 
 
 def main():
