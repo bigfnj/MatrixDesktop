@@ -216,6 +216,10 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     private void RecoverSurface()
     {
         if (_exiting) return;
+        // As OnRendererFailed does: the rebuild captures the desktop synchronously on this thread,
+        // and an installed hook would make every mouse event wait for it. OnTick reinstalls the
+        // hook once the new surface is ready.
+        _pointer?.SetEnabled(false);
         _recovering = true;
         try
         {

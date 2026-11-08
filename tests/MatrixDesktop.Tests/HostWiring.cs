@@ -73,6 +73,25 @@ internal static class HostWiring
             Check.True(mainFormConstructors.Count > 0, "witness: the scan must see MainForm's constructors at all");
             Check.False(mainFormConstructors.Contains("Public"), "only MatrixApplicationContext may construct MainForm: " + string.Join(", ", mainFormConstructors));
         });
+        // R2-54. OnRendererFailed releases the wallpaper mouse hook before its surface goes;
+        // RecoverSurface did not, so the rebuild's synchronous desktop capture ran with the hook
+        // installed and every mouse event waited on the blocked UI thread. The ldc.i4.0 right
+        // before the call is the false argument.
+        failures += Run($"a surface rebuild releases the wallpaper mouse hook first: {path}", () =>
+        {
+            const string setEnabled = "MatrixDesktop.DesktopPointerBridge::SetEnabled";
+            static bool Releases(Call call) => call.Callee == setEnabled && call.PreviousOpcode == OpCodes.Ldc_I4_0.Value;
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::OnRendererFailed" && Releases(call)),
+                "witness: the scan must see OnRendererFailed release the hook with SetEnabled(false)");
+            var body = calls.Where(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::RecoverSurface").ToList();
+            var close = body.FirstOrDefault(call => call.Callee == FormClose);
+            var rebuild = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.MatrixApplicationContext::TryCreateSurface");
+            Check.True(close is not null && rebuild is not null, "witness: the scan must see RecoverSurface close the old surface and build the new one");
+            var release = body.FirstOrDefault(Releases);
+            Check.True(release is not null, "RecoverSurface must release the wallpaper mouse hook with SetEnabled(false)");
+            Check.True(release!.Offset < close!.Offset && release.Offset < rebuild!.Offset,
+                "RecoverSurface must release the hook before it closes the old surface and builds the new one");
+        });
         failures += Run($"SystemEvents session and power subscriptions have one owner: {path}", () =>
         {
             foreach (var subscribe in new[] { "Microsoft.Win32.SystemEvents::add_SessionSwitch", "Microsoft.Win32.SystemEvents::add_PowerModeChanged" })
