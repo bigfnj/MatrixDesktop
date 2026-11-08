@@ -10,7 +10,44 @@ internal static class ConfiguratorHostTests
     [
         ("A second configurator on the same store is refused", SecondConfiguratorRefused),
         ("The desktop snapshot help says wallpaper hosts use the wallpaper only", DesktopSnapshotHelp),
+        ("Stop Test ends the Test host but not the processes it started", StopTestEndsOnlyTheHost),
     ];
+
+    private static void StopTestEndsOnlyTheHost()
+    {
+        // AUD-74. Killing mutations: kill(true) in TestProcessStop.Run fails the call order;
+        // Kill(true) in the Process wrapper fails the real child below.
+        var calls = new List<string>();
+        TestProcessStop.Run(() => { calls.Add("exited?"); return false; }, () => calls.Add("close"),
+            ms => { calls.Add("wait " + ms); return false; }, tree => calls.Add("kill tree=" + tree));
+        Check.Equal("exited? close wait 1500 kill tree=False wait 1500", string.Join(" ", calls),
+            "Stop asks the window to close, waits, and only then ends the Test host alone");
+        calls.Clear();
+        TestProcessStop.Run(() => false, () => calls.Add("close"), _ => { calls.Add("wait"); return true; }, _ => calls.Add("kill"));
+        Check.Equal("close wait", string.Join(" ", calls), "a Test window that closes when asked is not killed");
+
+        var pidFile = Path.Combine(AppContext.BaseDirectory, "stand-in-test-host-" + Guid.NewGuid().ToString("N") + ".pid");
+        var info = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        info.ArgumentList.Add("--stand-in-test-host");
+        info.ArgumentList.Add(pidFile);
+        using var host = Process.Start(info)!;
+        Process? child = null;
+        try
+        {
+            for (var waited = 0; !File.Exists(pidFile) && waited < 20_000; waited += 50) Thread.Sleep(50);
+            child = Process.GetProcessById(int.Parse(File.ReadAllText(pidFile)));
+            TestProcessStop.Run(host);
+            Check.True(host.HasExited, "Stop Test must end the Test host");
+            Check.False(child.HasExited, "but not its child: the WebView2 browser it started may be serving every other instance");
+        }
+        finally
+        {
+            try { if (!host.HasExited) host.Kill(entireProcessTree: true); } catch { }
+            try { if (child is { HasExited: false }) child.Kill(); } catch { }
+            child?.Dispose();
+            try { File.Delete(pidFile); } catch { }
+        }
+    }
 
     private static void DesktopSnapshotHelp()
     {

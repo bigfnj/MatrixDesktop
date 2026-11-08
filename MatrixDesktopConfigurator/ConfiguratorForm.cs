@@ -701,25 +701,7 @@ public sealed class ConfiguratorForm : Form
 
         try
         {
-            if (process.HasExited)
-            {
-                return;
-            }
-
-            try
-            {
-                process.CloseMainWindow();
-            }
-            catch
-            {
-                // Ignore.
-            }
-
-            if (!process.WaitForExit(1500))
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(1500);
-            }
+            TestProcessStop.Run(process);
         }
         catch
         {
