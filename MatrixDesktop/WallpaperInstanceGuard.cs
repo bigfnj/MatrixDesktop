@@ -19,18 +19,19 @@ internal sealed class WallpaperInstanceGuard : IDisposable
         "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE", "MATRIXDESKTOP_SCREENSAVER_PROFILE",
     ];
 
-    internal enum Outcome { Acquired, TookOver, TimedOut }
+    internal enum Outcome { Acquired, TookOver, TimedOut, Unavailable }
 
-    private readonly Mutex _mutex;
-    private readonly EventWaitHandle _exitRequest;
+    private readonly Mutex? _mutex;
+    private readonly EventWaitHandle? _exitRequest;
     private RegisteredWaitHandle? _listener;
     private bool _owned;
 
     internal Outcome Result { get; }
+    internal string? Problem { get; }
 
-    private WallpaperInstanceGuard(Mutex mutex, EventWaitHandle exitRequest, bool owned, Outcome result)
+    private WallpaperInstanceGuard(Mutex? mutex, EventWaitHandle? exitRequest, bool owned, Outcome result, string? problem = null)
     {
-        _mutex = mutex; _exitRequest = exitRequest; _owned = owned; Result = result;
+        _mutex = mutex; _exitRequest = exitRequest; _owned = owned; Result = result; Problem = problem;
     }
 
     // "default" for an ordinary launch; a stable hash of the isolation variables otherwise.
@@ -47,8 +48,21 @@ internal sealed class WallpaperInstanceGuard : IDisposable
     internal static WallpaperInstanceGuard Acquire(string scope, TimeSpan bound)
     {
         var name = $"Local\\MatrixDesktop.Wallpaper.{scope}";
-        var exitRequest = new EventWaitHandle(false, EventResetMode.AutoReset, name + ".Exit");
-        var mutex = new Mutex(initiallyOwned: true, name, out var createdNew);
+        EventWaitHandle exitRequest;
+        Mutex mutex;
+        bool createdNew;
+        try
+        {
+            exitRequest = new EventWaitHandle(false, EventResetMode.AutoReset, name + ".Exit");
+            try { mutex = new Mutex(initiallyOwned: true, name, out createdNew); }
+            catch { exitRequest.Dispose(); throw; }
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or WaitHandleCannotBeOpenedException or IOException)
+        {
+            // Objects this launch may not open (an instance started elevated creates them with a
+            // High label) must not fail the launch: it runs unguarded and the caller says so.
+            return new WallpaperInstanceGuard(null, null, false, Outcome.Unavailable, error.Message);
+        }
         var owned = createdNew;
         if (!owned)
         {
@@ -73,8 +87,8 @@ internal sealed class WallpaperInstanceGuard : IDisposable
     // Runs onTakeover once, on a thread-pool thread, when a newer launch asks this holder to exit.
     internal void ListenForTakeover(Action onTakeover)
     {
-        if (!_owned || _listener is not null) return;
-        _listener = ThreadPool.RegisterWaitForSingleObject(_exitRequest, (_, _) => onTakeover(), null, Timeout.Infinite, executeOnlyOnce: true);
+        if (!_owned || _listener is not null || _exitRequest is null) return;
+        _listener = ThreadPool.RegisterWaitForSingleObject(_exitRequest,(_, _) => onTakeover(), null, Timeout.Infinite, executeOnlyOnce: true);
     }
 
     // Call on the acquiring thread, after the surface and tray are gone, so the newcomer
@@ -86,9 +100,9 @@ internal sealed class WallpaperInstanceGuard : IDisposable
         if (_owned)
         {
             _owned = false;
-            try { _mutex.ReleaseMutex(); } catch (ApplicationException) { /* not owned by this thread */ }
+            try { _mutex?.ReleaseMutex(); } catch (ApplicationException) { /* not owned by this thread */ }
         }
-        _mutex.Dispose();
-        _exitRequest.Dispose();
+        _mutex?.Dispose();
+        _exitRequest?.Dispose();
     }
 }

@@ -78,6 +78,11 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             ExitThread();
             return false;
         }
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.Unavailable)
+        {
+            Shared.Logger.Warn($"The wallpaper single-instance guard is unavailable ({_instance.Problem}); this launch cannot replace another running wallpaper.");
+            return true;
+        }
         if (_instance.Result == WallpaperInstanceGuard.Outcome.TookOver) Shared.Logger.Info($"Took over from the running wallpaper (scope {scope}).");
         _instance.ListenForTakeover(() => _coordinator.Post(() =>
         {

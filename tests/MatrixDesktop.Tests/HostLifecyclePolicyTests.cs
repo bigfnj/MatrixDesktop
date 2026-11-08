@@ -16,7 +16,21 @@ internal static class HostLifecyclePolicyTests
         ("Host wallpaper does not rebuild a renderer that failed to start", SurfaceClose),
         ("Host wallpaper guard lets the newest launch take over and leaves other scopes alone", WallpaperTakeover),
         ("Host wallpaper guard scope keeps isolated test launches away from the owner's wallpaper", WallpaperScope),
+        ("Host wallpaper guard that cannot open its objects lets the launch run and says why", WallpaperGuardUnavailable),
     ];
+
+    // An elevated wallpaper creates the guard's objects with a High label, so a normal launch is
+    // refused when it opens them; that must not throw out of the launch. A different-type object
+    // under the event name is the deterministic stand-in for any object this launch cannot open.
+    private static void WallpaperGuardUnavailable()
+    {
+        var scope = "test-" + Guid.NewGuid().ToString("N");
+        using var squatter = new Mutex(false, $"Local\\MatrixDesktop.Wallpaper.{scope}.Exit");
+        using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+        Check.Equal(WallpaperInstanceGuard.Outcome.Unavailable, guard.Result, "a guard that cannot open its objects must report itself unavailable instead of failing the launch");
+        Check.True(!string.IsNullOrWhiteSpace(guard.Problem), "the unavailable guard must say why, for the launch's warning");
+        guard.ListenForTakeover(() => throw new InvalidOperationException("an unavailable guard has nothing to listen to"));
+    }
 
     // AUD-72. A second --wallpaper stacked another renderer and tray icon under the first. Every
     // scope here is a fresh GUID, so this never signals a real wallpaper ("default" scope).
