@@ -117,7 +117,7 @@ export async function createRuntime(canvas, options, backend) {
       uniforms[53] = grid.nativeMode ? 1 : 0;
       uniforms[54] = grid.glyphHalfSize ?? 0;
       overlays.update(state, photo);
-      diagnostics.frames++; diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
+      diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
       diagnostics.controls = config.uc3dControls ?? "legacy";
       diagnostics.simulationTime = state.time; diagnostics.targetStreams = grid.columns;
       diagnostics.activeStreams = state.activeStreams ?? grid.columns;
@@ -163,7 +163,11 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
       } else elapsed = (now - start) / 1000;
       lastDraw = now;
       // A draw that returns false presented nothing: a lost context waits for its event.
-      try { runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false; }
+      // Only a presented frame counts, as in ZMatrix; a throwing draw never reaches the count.
+      try {
+        runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false;
+        if (runtime.diagnostics.ready) runtime.diagnostics.frames++;
+      }
       catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); showRenderFailure("UC3D", error); dispose(); return; }
       previous = now;
       // Keep the single frame and overlays visible. Resources are released on pagehide

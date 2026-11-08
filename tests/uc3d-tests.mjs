@@ -759,11 +759,12 @@ await asyncTest("REGL UC3D waits for the lost-context event instead of failing a
     const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
     const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
     try {
-      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present");
+      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present"); assert.equal(diagnostics().frames, 1, "witness: the presented frame counts");
       // isContextLost() is true at once; the browser queues the event as a later task.
       gl.lose(); tick(100);
       assert.deepEqual(diagnostics().errors, [], `a frame while the context was lost failed: ${diagnostics().errors.join("; ")}`);
       assert.equal(diagnostics().ready, false, "ready must be false while the context is lost");
+      assert.equal(diagnostics().frames, 1, "a frame that drew nothing must not count");
       assert.equal(diagnostics().disposed, false, "the pass must wait for the lost event");
       let prevented = false;
       canvas.listeners.get("webglcontextlost")({ preventDefault: () => { prevented = true; } });
