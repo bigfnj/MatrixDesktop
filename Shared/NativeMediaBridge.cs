@@ -386,17 +386,15 @@ internal sealed class NativeMediaBridge : IDisposable
             InvalidateEnvironment();
             var generation = _generation;
             var before = BootstrapJson(0);
-            var desktop = _desktop;
             _configuration = "";
             // The published resources stay served while the work builds; only Prepare replaces them.
             await BuildAheadAsync(query, bounds, atlasDpi);
             if (_disposed) return false;
-            // A wallpaper-sourced desktop is re-read so a wallpaper change reaches a later UC3D load.
-            if (UsesWallpaperDesktop) _desktop = null;
+            // Only a Refreshable (ZMatrix) bridge is refreshed, so a UC3D desktop, a still
+            // snapshot, is never re-read here.
             Prepare(query, bounds, atlasDpi);
-            // Unchanged inputs reuse their entries, so the bootstrap names the same ids; the
-            // UC3D desktop is served under a fixed id, so its bytes are compared.
-            if (BootstrapJson(0) == before && (desktop ?? []).AsSpan().SequenceEqual(_desktop ?? []))
+            // Unchanged inputs reuse their entries, so the bootstrap names the same ids.
+            if (BootstrapJson(0) == before)
             {
                 _generation = generation;
                 return false;

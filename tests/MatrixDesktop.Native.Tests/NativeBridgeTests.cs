@@ -14,7 +14,8 @@ internal static class NativeBridgeTests
         ("Native bridge replaces an invalid ZMatrix phrase list with the page's default", InvalidPhrasesUseDefault),
         ("Native bridge replaces an invalid ZMatrix character list with the page's default", InvalidCharactersUseDefault),
         ("Native bridge takes the UC3D desktop from the wallpaper for wallpaper and preview hosts", DesktopSourceFollowsHostKind),
-        ("Native bridge refresh re-reads a wallpaper-sourced UC3D desktop only", RefreshRereadsWallpaperDesktop),
+        ("Native bridge refresh never re-reads a UC3D desktop", RefreshKeepsUc3dDesktop),
+        ("Native bridge is refreshable only for ZMatrix", OnlyZMatrixIsRefreshable),
         ("Native bridge bootstrap marks only wallpaper, /s and /p hosts non-interactive", InteractiveFollowsHostKind),
         ("Native bridge ZMatrix startup prepares once", ZMatrixStartupPreparesOnce),
         ("Native bridge UC3D snapshot precedes show and survives startup", Uc3dSnapshotPrecedesShow),
@@ -135,24 +136,33 @@ internal static class NativeBridgeTests
         }
     }
 
-    private static void RefreshRereadsWallpaperDesktop()
+    // Production refreshes only a Refreshable (ZMatrix) bridge, and the UC3D desktop is a still
+    // snapshot, so a refresh that does reach a UC3D bridge reads nothing again and publishes nothing.
+    private static void RefreshKeepsUc3dDesktop()
     {
         const string query = "scene=uc3d&desktopBackground=true";
-        var wallpaper = new Captures();
-        using (var bridge = Bridge(NativeHostKind.Wallpaper, wallpaper))
+        foreach (var (name, kind) in new[] { ("wallpaper", NativeHostKind.Wallpaper), ("interactive", NativeHostKind.Interactive) })
         {
+            var captures = new Captures();
+            using var bridge = Bridge(kind, captures);
             bridge.Prepare(query, Virtual);
-            Refresh(bridge, query);
-            Require(wallpaper.Wallpaper + wallpaper.Screen == 2, $"A wallpaper host's refresh must re-read its desktop: {wallpaper.Wallpaper + wallpaper.Screen} reads.");
+            var before = bridge.BootstrapJson();
+            var published = Refresh(bridge, query);
+            Require(captures.Wallpaper + captures.Screen == 1 && !published && bridge.BootstrapJson() == before,
+                $"A refresh must not re-read the {name} host's UC3D desktop or republish it: {captures.Wallpaper + captures.Screen} reads, published={published}, bootstrap identical={bridge.BootstrapJson() == before}.");
         }
-        // Control: a screen copy is only clean before this window covers the screen, so it is kept.
-        var screen = new Captures();
-        using (var bridge = Bridge(NativeHostKind.Interactive, screen))
-        {
-            bridge.Prepare(query, Virtual);
-            Refresh(bridge, query);
-            Require(screen.Screen + screen.Wallpaper == 1, $"A refresh must keep a screen snapshot: {screen.Screen + screen.Wallpaper} reads.");
-        }
+    }
+
+    // The tray item and the broadcast timer refresh only while the bridge is Refreshable.
+    private static void OnlyZMatrixIsRefreshable()
+    {
+        foreach (var kind in Enum.GetValues<NativeHostKind>())
+            foreach (var (scene, refreshable) in new[] { ("zmatrix", true), ("uc3d", false), ("matrix", false) })
+            {
+                using var bridge = ZMatrixBridge(new Work(), kind);
+                bridge.Prepare("scene=" + scene, Small);
+                Require(bridge.Refreshable == refreshable, $"A {scene} bridge on a {kind} host must report Refreshable={refreshable}, got {bridge.Refreshable}.");
+            }
     }
 
     private static void InteractiveFollowsHostKind()
@@ -218,7 +228,7 @@ internal static class NativeBridgeTests
         internal void Ran(string step) => Threads.Enqueue((step, Environment.CurrentManagedThreadId));
     }
 
-    private static NativeMediaBridge ZMatrixBridge(Work work) => new(false, NativeHostKind.Wallpaper)
+    private static NativeMediaBridge ZMatrixBridge(Work work, NativeHostKind kind = NativeHostKind.Wallpaper) => new(false, kind)
     {
         WallpaperCapture = bounds =>
         {
