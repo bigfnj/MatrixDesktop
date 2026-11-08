@@ -5,8 +5,11 @@
 //
 // One popover element is created lazily and reused for every swatch, so the
 // DOM stays light no matter how many colors / palette stops are on screen.
+//
+// The colour helpers are exported so app.js reads and writes colours exactly as the popover
+// does. Its own copies had drifted: " #ff880" was #0ff880 in a row box and #ff8800 here.
 
-const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+export const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
 export const rgbToHsv = ({ r, g, b }) => {
 	r = clamp01(r); g = clamp01(g); b = clamp01(b);
@@ -41,23 +44,29 @@ export const hsvToRgb = ({ h, s, v }) => {
 	return { r: r + m, g: g + m, b: b + m };
 };
 
-export const colorToHex = ({ r, g, b }) => {
-	const ch = (v) => Math.round(clamp01(v) * 255).toString(16).padStart(2, "0");
-	return `#${ch(r)}${ch(g)}${ch(b)}`;
+// A missing colour or channel reads as 0.
+export const colorToHex = (color) => {
+	const ch = (v) => Math.round(clamp01(Number(v)) * 255).toString(16).padStart(2, "0");
+	return `#${ch(color?.r)}${ch(color?.g)}${ch(color?.b)}`;
 };
 
-export const hexToColor = (hex) => {
-	const n = String(hex || "").replace(/[^0-9a-f]/gi, "");
-	const s = n.length === 3 ? n.split("").map((c) => c + c).join("") : n.padEnd(6, "0").slice(0, 6);
+// Strict: "#rgb" or "#rrggbb" (the "#" optional, surrounding spaces ignored), otherwise null,
+// so a partly typed or mistyped value is refused rather than guessed. The lenient parsers it
+// replaces read "red" as #ed0000 here and as a NaN channel in a palette row, which the draft
+// saved as null.
+export const parseHex = (text) => {
+	const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(text ?? "").trim());
+	if (!match) return null;
+	const digits = match[1].length === 3 ? [...match[1]].map((c) => c + c).join("") : match[1];
 	return {
-		r: parseInt(s.slice(0, 2), 16) / 255,
-		g: parseInt(s.slice(2, 4), 16) / 255,
-		b: parseInt(s.slice(4, 6), 16) / 255,
+		r: parseInt(digits.slice(0, 2), 16) / 255,
+		g: parseInt(digits.slice(2, 4), 16) / 255,
+		b: parseInt(digits.slice(4, 6), 16) / 255,
 	};
 };
 
-const fmt = (v) => {
-	const n = clamp01(v);
+export const format01 = (v) => {
+	const n = clamp01(Number(v));
 	return Number.isInteger(n) ? String(n) : n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
 
@@ -121,10 +130,13 @@ const render = (skip) => {
 	refs.squareThumb.style.top = `${(1 - v) * 100}%`;
 	refs.squareThumb.style.background = hex;
 	refs.hueThumb.style.left = `${(h / 360) * 100}%`;
-	if (skip !== refs.hex) refs.hex.value = hex;
-	if (skip !== refs.r) refs.r.value = fmt(ctx.color.r);
-	if (skip !== refs.g) refs.g.value = fmt(ctx.color.g);
-	if (skip !== refs.b) refs.b.value = fmt(ctx.color.b);
+	if (skip !== refs.hex) {
+		refs.hex.value = hex;
+		refs.hex.classList.remove("invalid-input");
+	}
+	if (skip !== refs.r) refs.r.value = format01(ctx.color.r);
+	if (skip !== refs.g) refs.g.value = format01(ctx.color.g);
+	if (skip !== refs.b) refs.b.value = format01(ctx.color.b);
 };
 
 // Preserve the current hue when saturation collapses to 0 (grays have no
@@ -191,7 +203,10 @@ const wire = () => {
 
 	refs.hex.addEventListener("input", () => {
 		if (!liveContext()) return;
-		ctx.color = hexToColor(refs.hex.value);
+		const color = parseHex(refs.hex.value);
+		refs.hex.classList.toggle("invalid-input", !color);
+		if (!color) return;
+		ctx.color = color;
 		ctx.hsv = hsvFromColor(ctx.color);
 		render(refs.hex);
 		if (ctx.onChange) ctx.onChange({ ...ctx.color });

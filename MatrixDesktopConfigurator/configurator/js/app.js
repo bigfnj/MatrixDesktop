@@ -1,4 +1,4 @@
-﻿import { closeColorPicker, openColorPicker } from "./colorPicker.js";
+﻿import { clamp01, closeColorPicker, colorToHex, format01, openColorPicker, parseHex } from "./colorPicker.js";
 
 const state = {
 	metadata: null,
@@ -94,35 +94,9 @@ const requestHost = (type, payload = {}) =>
 	});
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
-const clamp01 = (value) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 const toNumber = (value, fallback = 0) => {
 	const number = Number.parseFloat(value);
 	return Number.isFinite(number) ? number : fallback;
-};
-
-const colorToHex = (color) => {
-	const channel = (value) =>
-		Math.round(clamp01(Number(value)) * 255)
-			.toString(16)
-			.padStart(2, "0");
-	return `#${channel(color?.r)}${channel(color?.g)}${channel(color?.b)}`;
-};
-
-const hexToColor = (hex) => {
-	const normalized = String(hex || "#000000").replace("#", "");
-	const value = normalized.length === 3
-		? normalized.split("").map((c) => c + c).join("")
-		: normalized.padEnd(6, "0").slice(0, 6);
-	return {
-		r: Number.parseInt(value.slice(0, 2), 16) / 255,
-		g: Number.parseInt(value.slice(2, 4), 16) / 255,
-		b: Number.parseInt(value.slice(4, 6), 16) / 255,
-	};
-};
-
-const format01 = (value) => {
-	const number = clamp01(Number(value));
-	return Number.isInteger(number) ? String(number) : number.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
 
 const normalizeColor = (color) => ({
@@ -1070,10 +1044,16 @@ const renderPaletteRow = (field, stops, stop, index) => {
 		value = { ...value, ...normalizeColor(next) };
 		swatch.style.background = colorToHex(value);
 		hex.value = colorToHex(value);
+		hex.classList.remove("invalid-input");
 		persist();
 	}));
+	// Text that is not a whole hex colour is marked and not saved: the lenient parser this
+	// replaces stored a NaN channel for "red", which the draft saved as null.
 	hex.addEventListener("input", () => {
-		value = { ...value, ...hexToColor(hex.value) };
+		const parsed = parseHex(hex.value);
+		hex.classList.toggle("invalid-input", !parsed);
+		if (!parsed) return;
+		value = { ...value, ...normalizeColor(parsed) };
 		swatch.style.background = colorToHex(value);
 		persist();
 	});
@@ -1155,11 +1135,15 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 			value = normalizeColor(next);
 			swatch.style.background = colorToHex(value);
 			hex.value = colorToHex(value);
+			hex.classList.remove("invalid-input");
 			persist();
 		});
 	});
 	hex.addEventListener("input", () => {
-		value = normalizeColor(hexToColor(hex.value));
+		const parsed = parseHex(hex.value);
+		hex.classList.toggle("invalid-input", !parsed);
+		if (!parsed) return;
+		value = normalizeColor(parsed);
 		swatch.style.background = colorToHex(value);
 		persist();
 	});

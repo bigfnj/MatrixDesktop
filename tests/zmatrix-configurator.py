@@ -317,6 +317,47 @@ def check_picker_closes_on_rerender(page, _fixture):
     assert popover_hidden(page), "a popover whose anchor left the document stayed open"
 
 
+def marked_invalid(locator):
+    return "invalid-input" in (locator.get_attribute("class") or "")
+
+
+def check_invalid_hex(page, _fixture):
+    for key, effect in (("palette", "palette"), ("stripeColors", "stripes")):
+        field(page, "effect").locator("select").select_option(effect)
+        row = field(page, key).locator(".list-row").first
+        box = row.locator(".hex-input")
+        first = lambda: saved(page)[key][0]
+        rgb = lambda stop: [round(stop[channel] * 255) for channel in "rgb"]
+        box.fill("#123456")
+        good = first()
+        assert rgb(good) == [0x12, 0x34, 0x56] and not marked_invalid(box), key + ": the row did not save '#123456': " + str(good)
+        for text in ("red", " #ff880"):
+            box.fill(text)
+            now = first()
+            assert all(isinstance(now[channel], (int, float)) for channel in "rgb"), key + ": " + repr(text) + " saved a non-number channel: " + str(now)
+            assert now == good, key + ": the row saved the invalid hex " + repr(text) + ": " + str(now)
+            assert marked_invalid(box), key + ": the row did not mark the invalid hex " + repr(text)
+        box.fill(" #abc ")
+        assert rgb(first()) == [0xaa, 0xbb, 0xcc], key + ": the row refused ' #abc ': " + str(first())
+        assert not marked_invalid(box), key + ": the row kept its invalid mark after ' #abc '"
+        box.fill("red")
+        # The popover reads the same text the same way: refused where the row refuses, taken where it takes.
+        row.locator(".color-swatch").click()
+        picker = page.locator(".color-popover .cp-hex")
+        picker.fill(" #ff880")
+        assert rgb(first()) == [0xaa, 0xbb, 0xcc], key + ": the popover took ' #ff880', which the row refuses: " + str(first())
+        assert marked_invalid(picker), key + ": the popover did not mark ' #ff880' invalid"
+        picker.fill(" #123 ")
+        assert rgb(first()) == [0x11, 0x22, 0x33], key + ": the popover refused ' #123 ': " + str(first())
+        assert not marked_invalid(picker), key + ": the popover kept its invalid mark after ' #123 '"
+        assert box.input_value() == "#112233" and not marked_invalid(box), key + ": the popover's colour left the row box stale or marked invalid"
+        picker.fill("zz")
+        page.keyboard.press("Escape")
+        row.locator(".color-swatch").click()
+        assert picker.input_value() == "#112233" and not marked_invalid(picker), key + ": the reopened popover kept the refused text or its invalid mark"
+        page.keyboard.press("Escape")
+
+
 def focused(page):
     return page.evaluate("""() => { const node = document.activeElement;
         const shell = node?.closest('[data-field]'); const row = node?.closest('.list-row, .phrase-row');
@@ -562,6 +603,7 @@ CHECKS = [
     ("CFG chooser retains selected file text and cancellation", check_cfg_chooser),
     ("Late picker callbacks preserve disabled palette and stripe saved values", check_late_picker),
     ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
+    ("Hex boxes refuse invalid colours and read text as the popover does", check_invalid_hex),
     ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
     ("Field controls have accessible names and their labels operate them", check_accessible_names),
     ("Font-name boxes share one installed-font list across re-renders", check_font_list),
