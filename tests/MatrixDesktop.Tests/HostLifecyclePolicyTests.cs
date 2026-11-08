@@ -13,7 +13,24 @@ internal static class HostLifecyclePolicyTests
         ("Host storage warns when it falls back past the preferred base folder", FallbackWarning),
         ("Host priority reports a class Windows did not grant", PriorityReadBack),
         ("Host pause keeps the frozen frame visible unless lock, sleep or display-off took it away", PauseSuspension),
+        ("Host wallpaper does not rebuild a renderer that failed to start", SurfaceClose),
     ];
+
+    // AUD-05. The startup error dialog came back every 500 ms in wallpaper mode. The host side
+    // (FailStartup sets the flag, OnSurfaceClosed asks this policy) is checked on the published
+    // dll by HostWiring.
+    private static void SurfaceClose()
+    {
+        var failed = SurfaceClosePolicy.Decide(wallpaper: true, startupFailed: true, consecutiveFailures: 0);
+        Check.True(failed.Exit, "a wallpaper renderer that failed to start must exit after its dialog, never be rebuilt to show it again");
+        var lost = SurfaceClosePolicy.Decide(wallpaper: true, startupFailed: false, consecutiveFailures: 0);
+        Check.False(lost.Exit, "any other wallpaper close must still be rebuilt");
+        Check.Equal(500, lost.RetryAfterMs, "the first rebuild keeps the 500 ms delay");
+        Check.Equal(1000, SurfaceClosePolicy.Decide(true, false, 1).RetryAfterMs, "repeated closes back off");
+        Check.Equal(8000, SurfaceClosePolicy.Decide(true, false, 40).RetryAfterMs, "the backoff is capped");
+        Check.True(SurfaceClosePolicy.Decide(false, false, 0).Exit, "a closed standard, screensaver or preview window exits");
+        Check.True(SurfaceClosePolicy.Decide(false, true, 0).Exit, "a failed standard start exits");
+    }
 
     // AUD-06. Hiding and suspending the renderer for every pause put black or the static
     // wallpaper on the desktop for a tray pause, a fullscreen app on another monitor or battery.

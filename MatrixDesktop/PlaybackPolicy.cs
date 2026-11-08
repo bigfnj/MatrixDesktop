@@ -65,3 +65,18 @@ internal sealed class ProcessPriorityTarget(System.Diagnostics.Process process) 
     public System.Diagnostics.ProcessPriorityClass PriorityClass { get => process.PriorityClass; set => process.PriorityClass = value; }
     public void Refresh() => process.Refresh();
 }
+
+// What the host does when its renderer window closes on its own. A renderer that failed to
+// start has already shown its error dialog; rebuilding it every 500 ms put that dialog back
+// forever in wallpaper mode, so it exits as every other mode does. Any other wallpaper close
+// is rebuilt with a capped backoff that resets once a renderer is ready.
+internal readonly record struct SurfaceCloseDecision(bool Exit, int RetryAfterMs);
+
+internal static class SurfaceClosePolicy
+{
+    internal static int RetryDelayMs(int consecutiveFailures) =>
+        Math.Min(10000, 500 * (1 << Math.Min(4, Math.Max(0, consecutiveFailures))));
+
+    internal static SurfaceCloseDecision Decide(bool wallpaper, bool startupFailed, int consecutiveFailures) =>
+        wallpaper && !startupFailed ? new(false, RetryDelayMs(consecutiveFailures)) : new(true, 0);
+}

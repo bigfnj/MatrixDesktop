@@ -100,7 +100,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             _form = form;
             _ready = false;
             form.FormClosed += OnSurfaceClosed;
-            form.RendererReady += (_, _) => { _ready = true; _ = ReconcilePauseAsync(); };
+            form.RendererReady += (_, _) => { _ready = true; _retryCount = 0; _ = ReconcilePauseAsync(); };
             if (_wallpaper || _plan.IsPreview)
             {
                 _ = form.Handle;
@@ -108,7 +108,6 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             }
             form.Show();
             if (_plan.IsScreensaver) _screensaverInputTick = LastInputTick();
-            _retryCount = 0;
             _playback.Set(PauseReason.ShellRecovery, false);
             if (_tray is not null) _tray.Text = "MatrixDesktop wallpaper";
             Shared.Logger.Info($"Renderer host ready: wallpaper={_wallpaper}, preview={_plan.IsPreview}, parentClass={DesktopWindowHost.ClassOf(_parent)}, parent=0x{_parent:X}, child=0x{form.Handle:X}.");
@@ -137,11 +136,15 @@ internal sealed class MatrixApplicationContext : ApplicationContext
 
     private void OnSurfaceClosed(object? sender, FormClosedEventArgs e)
     {
+        var startupFailed = sender is MainForm { StartupFailed: true };
         _form = null;
         _ready = false;
         if (_exiting || _recovering) return;
-        if (_wallpaper) { _retryAt = Environment.TickCount64 + 500; SetPause(PauseReason.ShellRecovery, true); }
-        else ExitThread();
+        var decision = SurfaceClosePolicy.Decide(_wallpaper, startupFailed, _retryCount);
+        if (decision.Exit) { ExitThread(); return; }
+        _retryCount++;
+        _retryAt = Environment.TickCount64 + decision.RetryAfterMs;
+        SetPause(PauseReason.ShellRecovery, true);
     }
 
     private void RecoverSurface()

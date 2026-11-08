@@ -25,6 +25,8 @@ public sealed class MainForm : Form
     internal bool IsWallpaper => _appOptions is not null && _appOptions.WindowMode == WindowMode.Wallpaper && _launchPlan is not null && !_launchPlan.IsScreensaver && !_launchPlan.IsPreview;
     private System.Drawing.Rectangle CaptureBounds => IsWallpaper || _launchPlan.IsPreview ? SystemInformation.VirtualScreen : Bounds;
     internal event EventHandler? RendererReady;
+    // Set by FailStartup before its dialog and close; the host reads it in FormClosed.
+    internal bool StartupFailed { get; private set; }
 
     // Best-effort foreground enforcement on startup.
     // Windows may refuse focus stealing in some cases, so we retry briefly.
@@ -750,17 +752,19 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Shared.Logger.Error("MainForm_Shown failed; closing form.", ex);
-            try
-            {
-                MessageBox.Show(
-                    $"MatrixDesktop failed to start:\n{ex.Message}",
-                    "MatrixDesktop",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
-            catch { /* dialog itself may fail in degraded states */ }
-            try { Close(); } catch { /* form may already be closing */ }
+            FailStartup($"MatrixDesktop failed to start:\n{ex.Message}");
         }
+    }
+
+    // Every renderer-start failure ends here. StartupFailed is set before the dialog and the
+    // close, so the host can tell a failed start (exit: this dialog already explained it) from
+    // a surface it should rebuild. Wallpaper mode used to rebuild it, dialog and all, every 500 ms.
+    private void FailStartup(string message)
+    {
+        StartupFailed = true;
+        try { MessageBox.Show(message, "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        catch { /* dialog itself may fail in degraded states */ }
+        try { Close(); } catch { /* form may already be closing */ }
     }
 
     private async Task InitializeWebViewAsync()
@@ -779,13 +783,9 @@ public sealed class MainForm : Form
         catch (WebView2RuntimeNotFoundException)
         {
             if (_isShuttingDown || IsDisposed) return;
-            MessageBox.Show(
+            FailStartup(
                 "Microsoft Edge WebView2 Runtime is not installed on this machine.\n\n" +
-                "Install the Evergreen WebView2 Runtime and re-run this app.",
-                "MatrixDesktop",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
+                "Install the Evergreen WebView2 Runtime and re-run this app.");
         }
         catch (COMException ex) when (ex.HResult == CatastrophicFailureHResult)
         {
@@ -795,8 +795,7 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             if (_isShuttingDown || IsDisposed) return;
-            MessageBox.Show(ex.ToString(), "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            Close();
+            FailStartup(ex.ToString());
         }
     }
 
@@ -858,14 +857,10 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            FailStartup(
                 "Unable to prepare bundled web assets for WebView2.\n\n" +
                 $"Source folder:\n{Path.Combine(AppContext.BaseDirectory, "web")}\n\n" +
-                $"Error:\n{ex}",
-                "MatrixDesktop",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
+                $"Error:\n{ex}");
             return;
         }
 
@@ -906,16 +901,12 @@ public sealed class MainForm : Form
         }
         catch (Exception retryException)
         {
-            MessageBox.Show(
+            FailStartup(
                 "WebView2 failed to initialize and a retry with a fresh local profile also failed.\n\n" +
                 $"Original profile:\n{originalProfile}\n\n" +
                 $"Retry profile:\n{retryProfile}\n\n" +
                 $"First failure:\n{firstException}\n\n" +
-                $"Retry failure:\n{retryException}",
-                "MatrixDesktop",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
+                $"Retry failure:\n{retryException}");
         }
     }
 
