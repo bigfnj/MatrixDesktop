@@ -831,30 +831,47 @@ def check_matrix_web(page, origin):
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
     page.on("pageerror", lambda e: errors.append(str(e)))
 
-    page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+    # An explicit resolution, so the expected size below does not depend on config.js's default.
+    resolution = 0.5
+    page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&resolution={resolution}", wait_until="load")
     try:
         page.wait_for_function("document.querySelector('canvas') != null", timeout=20000)
     except Exception:
         fail("matrix web bundle creates a canvas", "no canvas after 20s; " + "; ".join(errors[:3]) + "; url=" + page.url)
         return
 
-    page.wait_for_timeout(3000)
+    # R2-50: the canvas exists, at the element's default 300x150, before any renderer sizes it,
+    # so a fixed 3 s wait read an unsized canvas as sized under load. ready is set from the
+    # first frame, after the first resize. Two seconds of the renderer's own clock keep the
+    # console-error window as long as the old wait, counted from the renderer's start, and the
+    # deadline makes a renderer that never starts a named failure, not a hang.
+    try:
+        page.wait_for_function(READY + " && window.matrixRuntimeDiagnostics.simulationTime >= 2", timeout=60000)
+        stalled = None
+    except Exception:
+        stalled = page.evaluate("JSON.stringify({frames: window.matrixRuntimeDiagnostics?.frames ?? 0,"
+                                " errors: window.matrixRuntimeDiagnostics?.errors ?? []})")
 
     if errors:
         fail("matrix web bundle loads without console errors", "; ".join(errors[:3]))
     else:
         ok("matrix web bundle loads without console errors")
 
-    drawn = page.evaluate("""() => {
+    if stalled is not None:
+        fail("matrix web bundle sizes its canvas", f"no renderer drew 2 s of frames within 60 s: {stalled}")
+        return
+    size = page.evaluate("""r => {
         const c = document.querySelector('canvas');
-        if (!c) return { ok: false, why: 'no canvas' };
-        if (c.width < 2 || c.height < 2) return { ok: false, why: `canvas is ${c.width}x${c.height}` };
-        return { ok: true, why: `${c.width}x${c.height}` };
-    }""")
-    if drawn["ok"]:
-        ok("matrix web bundle sizes its canvas", drawn["why"])
+        return { width: c.width, height: c.height,
+                 expectedWidth: Math.ceil(c.clientWidth * devicePixelRatio * r),
+                 expectedHeight: Math.ceil(c.clientHeight * devicePixelRatio * r) };
+    }""", resolution)
+    actual, expected = f"{size['width']}x{size['height']}", f"{size['expectedWidth']}x{size['expectedHeight']}"
+    if abs(size["width"] - size["expectedWidth"]) <= 1 and abs(size["height"] - size["expectedHeight"]) <= 1:
+        ok("matrix web bundle sizes its canvas", f"{actual} at resolution {resolution}")
     else:
-        fail("matrix web bundle sizes its canvas", drawn["why"])
+        fail("matrix web bundle sizes its canvas",
+             f"{actual}, expected {expected} (client size x devicePixelRatio x resolution {resolution})")
 
 
 NOTICE_IN_VIEW = ("text => { const n = [...document.querySelectorAll('.notice')].find(n => n.textContent.includes(text)); "
