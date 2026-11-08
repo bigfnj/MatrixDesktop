@@ -25,6 +25,39 @@ STUB = """
   window.__smokeMessages = [];
   window.__smokeReplies = [];
   window.__heldPreviewReplies = [];
+  // The preset store, applied synchronously in arrival order as ConfiguratorForm does:
+  // SaveDraft, SavePreset, DeletePreset and the renamePreset contract (Name only).
+  const host = window.__host = structuredClone(state.state);
+  const same = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+  const object = value => value && typeof value === 'object' && !Array.isArray(value) ? structuredClone(value) : {};
+  const text = value => typeof value === 'string' ? value : null;
+  const reply = preset => ({preset: structuredClone(preset), state: structuredClone(host)});
+  const store = {
+    saveDraft: p => { host.lastDraft = object(p.draft); host.selectedPresetId = text(p.selectedPresetId); return {saved:true}; },
+    savePreset: p => {
+      const id = text(p.preset.id)?.trim() ? p.preset.id : crypto.randomUUID().replaceAll('-', '');
+      let preset = host.userPresets.find(item => same(item.id, id));
+      if (!preset) host.userPresets.push(preset = {id});
+      preset.name = text(p.preset.name)?.trim() ? p.preset.name : 'Untitled preset';
+      preset.values = object(p.preset.values);
+      host.selectedPresetId = id; host.lastDraft = structuredClone(preset.values);
+      return reply(preset);
+    },
+    renamePreset: p => {
+      const preset = host.userPresets.find(item => same(item.id, text(p.id)));
+      if (!preset) throw new Error('Unknown preset.');
+      if (text(p.name)?.trim()) preset.name = p.name.trim();
+      return reply(preset);
+    },
+    deletePreset: p => {
+      const id = text(p.id);
+      if (id?.trim()) {
+        host.userPresets = host.userPresets.filter(item => !same(item.id, id));
+        if (same(host.selectedPresetId, id)) host.selectedPresetId = null;
+      }
+      return {state: structuredClone(host)};
+    },
+  };
   window.chrome = window.chrome || {};
   window.chrome.webview = { postMessage: async msg => {
     window.__smokeMessages.push(structuredClone(msg));
@@ -35,7 +68,7 @@ STUB = """
         const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(msg)});
         if (!response.ok) throw new Error(await response.text());
         payload = await response.json();
-      } else if (msg.type === 'saveDraft') payload = {saved:true};
+      } else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
       else if (msg.type === 'restoreScreensaver') payload = {restored:true,message:'Synthetic restore action recorded.'};
@@ -346,6 +379,34 @@ def check_doc_labels(page, _fixture):
     assert not problems, "; ".join(problems)
 
 
+def preset_store(fixture):
+    # A saved store with two presets and an unlinked working draft of 33 columns.
+    def values(columns):
+        return dict(fixture["defaultDraft"], numColumns=columns)
+    presets = [{"id": "alpha", "name": "Alpha", "values": values(50)}, {"id": "beta", "name": "Beta", "values": values(60)}]
+    return dict(fixture, state=dict(fixture["state"], selectedPresetId=None, lastDraft=values(33), userPresets=presets))
+
+
+def check_rename(page, _fixture):
+    columns = field(page, "numColumns").locator('input[type="number"]')
+    page.locator("#presetSelect").select_option("alpha")
+    assert columns.input_value() == "50", "the Alpha preset did not load: " + columns.input_value()
+    columns.fill("77")
+    assert saved(page)["numColumns"] == 77, "the edit was not autosaved as the working draft"
+    page.once("dialog", lambda dialog: dialog.accept("Alpha renamed"))
+    page.locator("#renamePresetButton").click()
+    page.wait_for_function("[...document.querySelector('#presetSelect').options].some(option=>option.text==='Alpha renamed')")
+    host = page.evaluate("window.__host")
+    alpha = next(preset for preset in host["userPresets"] if preset["id"] == "alpha")
+    assert alpha["values"]["numColumns"] == 50, "Rename committed the unsaved draft to the preset's saved values: " + str(alpha["values"]["numColumns"])
+    assert columns.input_value() == "77", "Rename replaced the working draft in the editor"
+    assert host["selectedPresetId"] == "alpha" and host["lastDraft"]["numColumns"] == 77, "Rename changed the stored selection or draft"
+    assert page.locator("#presetSelect").input_value() == "alpha", "Rename lost the dropdown selection"
+    renames = [message["payload"] for message in page.evaluate("window.__smokeMessages") if message["type"] == "renamePreset"]
+    assert renames == [{"id": "alpha", "name": "Alpha renamed"}], "Rename must send only the id and name: " + json.dumps(renames)
+    assert page.locator("#statusLine").inner_text() == "Preset renamed.", page.locator("#statusLine").inner_text()
+
+
 def check_limits(page, fixture):
     choose_zmatrix(page)
     original = fixture["defaultDraft"]["zmCharacters"]
@@ -393,7 +454,9 @@ CHECKS = [
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
     ("Preview ignores obsolete and hidden asynchronous query replies", check_preview_race),
     ("Screensaver action labels match the controls the docs name", check_doc_labels),
+    ("Rename changes only the preset name and keeps its saved values", check_rename),
 ]
+PRESET_CHECKS = {check_rename}
 
 
 def main():
@@ -430,6 +493,8 @@ def main():
                 page_fixture = dict(fixture)
                 if function is check_preview_race:
                     page_fixture["preview"] = {"available": True, "origin": origin + "/preview/"}
+                if function in PRESET_CHECKS:
+                    page_fixture = preset_store(page_fixture)
                 page.add_init_script(STUB.replace("__STATE__", json.dumps(page_fixture, ensure_ascii=False)))
                 try:
                     page.goto(origin + "/index.html", wait_until="load")

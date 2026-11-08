@@ -1146,21 +1146,15 @@ const renamePreset = async () => {
 		setStatus("Select a saved preset to rename.", "error");
 		return;
 	}
-	const name = window.prompt("Preset name", existing.name);
+	const name = window.prompt("Preset name", existing.name)?.trim();
 	if (!name) return;
-	await savePresetWithName(existing.id, name, state.draft);
-};
-
-const savePresetWithName = async (id, name, values) => {
 	try {
-		const result = await requestHost("savePreset", {
-			preset: { id, name, values },
-		});
-		state.presets = result.state.userPresets || [];
-		state.selectedPresetId = result.state.selectedPresetId || id;
-		setDirty(false);
-		refreshAll();
-		setStatus("Preset saved.", "ok");
+		// Only the name changes. Saving values is Save's job, so an unsaved experiment in
+		// the editor is never committed to the preset by renaming it and the save indicator stays.
+		const result = await requestHost("renamePreset", { id: existing.id, name });
+		state.presets = result.state?.userPresets || state.presets;
+		renderPresetSelect();
+		setStatus("Preset renamed.", "ok");
 	} catch (error) {
 		setStatus(error.message, "error");
 	}
