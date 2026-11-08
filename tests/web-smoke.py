@@ -928,11 +928,52 @@ def check_context_loss_recovery(browser, origin):
         page.close()
 
 
+def check_image_effect_offline(browser, origin):
+    """effect=image with no url must render with no network instead of failing the renderer."""
+    name = "effect=image with no url renders with every external request blocked"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    blocked, warnings = [], []
+    page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
+
+    def offline(route):
+        if route.request.url.startswith(origin + "/"):
+            route.continue_()
+        else:
+            blocked.append(route.request.url)
+            route.abort("internetdisconnected")
+
+    try:
+        page.route("**/*", offline)
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&effect=image", wait_until="load")
+        try:
+            page.wait_for_function(READY, timeout=20000)
+        except Exception:
+            notice = page.evaluate("() => [...document.querySelectorAll('.notice')].map(n => n.textContent.trim()).join(' | ')")
+            fail(name, f"no ready renderer within 20 s ({len(blocked)} external request(s) blocked); notice: {notice or 'none'}")
+            return
+        page.wait_for_timeout(1500)
+        lit = bright_fraction(page.screenshot())
+        problems = []
+        if page.evaluate("document.querySelectorAll('.notice').length") > 0:
+            problems.append("a .notice is shown")
+        if lit <= LIT:
+            problems.append(f"only {lit:.2%} bright pixels, so the rain is not visible")
+        if blocked and not any("background image" in text.lower() for text in warnings):
+            problems.append("no console warning names the missing background image")
+        if problems:
+            fail(name, "; ".join(problems))
+        else:
+            ok(name, f"{len(blocked)} external request(s) blocked, {lit:.1%} bright pixels")
+    finally:
+        page.close()
+
+
 def check_startup_paths(browser, origin):
     check_config_error_boundary(browser, origin)
     check_plug_me_in(browser, origin)
     check_noninteractive_software_start(browser, origin)
     check_context_loss_recovery(browser, origin)
+    check_image_effect_offline(browser, origin)
 
 
 def main():

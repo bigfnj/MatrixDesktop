@@ -299,6 +299,80 @@ await test("failed WebGPU pipeline initialization cleans sibling passes", async 
 	assert.equal(cleaned, 1);
 });
 
+// AUD-21: effect=image must start without its background image. The fetch, Image and
+// console.warn stubs below replace the suite's for one pass and are restored afterwards.
+const runImagePass = async (backend, query, { offline = false, closeEarly = false } = {}) => {
+	const config = makeConfig({ effect: "image", ...query });
+	const saved = { fetch: globalThis.fetch, Image: globalThis.Image, warn: console.warn };
+	const run = { requested: [], warnings: [], writes: [], diagnostics: { errors: [] } };
+	const gate = closeEarly ? new Promise((resolve) => { run.open = resolve; }) : Promise.resolve();
+	globalThis.fetch = async (path) => {
+		if (String(path).startsWith("shaders/")) return saved.fetch(path);
+		run.requested.push(path);
+		await gate;
+		if (offline) throw new TypeError("Failed to fetch");
+		return { blob: async () => ({}) };
+	};
+	globalThis.Image = class { async decode() { run.requested.push(this.src); await gate; if (offline) throw new Error("The source image cannot be decoded."); } };
+	console.warn = (message) => run.warnings.push(String(message));
+	globalThis.matrixRuntimeDiagnostics = run.diagnostics;
+	try {
+		if (backend === "WebGPU") {
+			const device = makeDevice(), borrowed = { createView: () => ({}) };
+			device.queue = { ...device.queue, writeTexture: (target, data) => run.writes.push([...data]) };
+			const { default: make } = await import("../MatrixDesktop/web/js/webgpu/imagePass.js");
+			const pass = make({ config, device });
+			if (closeEarly) { pass.cleanup(); run.open(); await assert.rejects(pass.loaded, /Failed to fetch/); return run; }
+			await pass.loaded;
+			pass.build([4, 4], { primary: borrowed, bloom: borrowed });
+			pass.run(encoder, true);
+			pass.cleanup();
+		} else {
+			const commands = [], handle = (data) => Object.assign(() => {}, { data, resize() {}, destroy() {} });
+			const regl = Object.assign((command) => { commands.push(command); return () => {}; }, { texture: handle, framebuffer: handle, prop: (p) => p });
+			const { default: make } = await import("../MatrixDesktop/web/js/regl/imagePass.js");
+			const pass = make({ regl, config }, { primary: {}, bloom: {} });
+			if (closeEarly) { pass.cleanup(); run.open(); await assert.rejects(pass.ready, /cannot be decoded/); return run; }
+			await pass.ready;
+			pass.setSize(4, 4); pass.execute(true);
+			run.bound = commands[0].uniforms.backgroundTex();
+			pass.cleanup();
+		}
+		return run;
+	} finally {
+		globalThis.fetch = saved.fetch; globalThis.Image = saved.Image; console.warn = saved.warn;
+		delete globalThis.matrixRuntimeDiagnostics;
+	}
+};
+
+for (const backend of ["WebGPU", "REGL"]) {
+	await test(`${backend} image effect draws uncoloured rain when its background image cannot load`, async () => {
+		const run = await runImagePass(backend, {}, { offline: true });
+		assert.equal(run.requested.length, 1, "the background image must be requested once");
+		if (backend === "WebGPU") assert.deepEqual(run.writes, [[255, 255, 255, 255]], "a white texture must stand in for the image");
+		else assert.deepEqual(run.bound?.data, [[255]], "a white texture must stand in for the image");
+		assert.equal(run.warnings.length, 1, "the missing image must be announced once");
+		assert.match(run.warnings[0], /^Background image .+ could not be loaded/);
+		assert(run.warnings[0].includes(run.requested[0]), "the warning must name the image");
+		assert.deepEqual(run.diagnostics.errors, run.warnings, "diagnostics must record the missing image");
+		const closed = await runImagePass(backend, {}, { offline: true, closeEarly: true });
+		assert.deepEqual([closed.warnings, closed.diagnostics.errors], [[], []], "a pass closed before its image failed must stay quiet");
+	});
+
+	await test(`${backend} image effect treats an empty url like no url`, async () => {
+		const plain = await runImagePass(backend, {});
+		const empty = await runImagePass(backend, { url: "" });
+		assert.equal(plain.requested.length, 1);
+		assert.notEqual(plain.requested[0], "", "with no url the default image must be requested");
+		assert.deepEqual(empty.requested, plain.requested, "url= must request the same default image as no url");
+		for (const run of [plain, empty]) {
+			assert.deepEqual([run.warnings, run.diagnostics.errors], [[], []], "a loaded image must not warn");
+			if (backend === "WebGPU") assert.deepEqual(run.writes, [], "a loaded image must not be replaced");
+			else assert.equal(run.bound?.data?.flipY, true, "the loaded image must be bound");
+		}
+	});
+}
+
 const makeRegl = () => {
 	const resources = new Set();
 	const regl = () => () => {};
