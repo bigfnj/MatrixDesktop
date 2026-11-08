@@ -628,7 +628,7 @@ function fakeGPU(adapterLimit, defaultLimit) {
   const textures = [], copies = [], resource = () => ({ createView: () => ({}), destroy() {} });
   const device = {
     limits: { maxTextureDimension2D: defaultLimit }, destroy() {},
-    queue: { copyExternalImageToTexture: (source, destination, size) => copies.push(size), writeBuffer() {}, submit() {} },
+    queue: { copyExternalImageToTexture: (source, destination, size) => copies.push({ source: source.source, size }), writeBuffer() {}, submit() {} },
     createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
     createRenderPipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
     createBuffer: resource, createTexture: descriptor => { textures.push(descriptor.size); return resource(); },
@@ -659,6 +659,36 @@ await asyncTest("WebGPU UC3D requests the adapter texture limit and fits the can
       } finally { stop(); }
     }
   });
+});
+await asyncTest("WebGPU UC3D downscales a desktop snapshot wider than the texture limit before upload", async () => {
+  for (const [width, height] of [[9000, 600], [4000, 600]]) {
+    await withPassEnvironment({ desktopUrl: `synthetic:desktop-${width}x${height}` }, async ({ tick, diagnostics }) => {
+      const resized = [];
+      globalThis.createImageBitmap = async (source, options) => {
+        const bitmap = { width: options.resizeWidth, height: options.resizeHeight, closed: false, close() { this.closed = true; } };
+        resized.push({ source, bitmap }); return bitmap;
+      };
+      const gpu = fakeGPU(8192, 8192), canvas = passCanvas(gpu.context, 200, 50);
+      const stop = await startWebGPU(canvas, resolveConfig({ scene: "uc3d", resolution: "1", desktopBackground: "true" }));
+      try {
+        tick(0);
+        assert.deepEqual(diagnostics().errors, []); assert.equal(diagnostics().ready, true);
+        // The glyph atlas uploads first; the desktop snapshot is the last external upload.
+        const upload = gpu.copies.at(-1), [w, h] = upload.size;
+        assert.equal(gpu.copies.length, 2, "witness: the atlas and the desktop snapshot must both upload");
+        assert.ok(gpu.textures.every(([tw, th]) => tw <= 8192 && th <= 8192), `${width}x${height} snapshot: texture sizes ${JSON.stringify(gpu.textures)} exceed 8192`);
+        assert.deepEqual(gpu.textures[1], upload.size, "the desktop texture must match its upload");
+        if (width > 8192) {
+          assert.ok(w >= 8191 && Math.abs(h - w * height / width) <= 1, `snapshot ${w}x${h} did not keep ${width}x${height}`);
+          assert.equal(resized.length, 1); assert.equal(resized[0].source.naturalWidth, width, "the resize must read the captured image");
+          assert.equal(upload.source, resized[0].bitmap); assert.equal(resized[0].bitmap.closed, true, "the resized bitmap must be released after upload");
+        } else {
+          assert.deepEqual([w, h], [width, height], "a snapshot within the limit must upload unchanged");
+          assert.equal(resized.length, 0, "a snapshot within the limit must not be resized");
+        }
+      } finally { stop(); }
+    });
+  }
 });
 test("UC3D overlay warnings are capped at 32 distinct entries", () => {
   const dom = runtimeDom();
