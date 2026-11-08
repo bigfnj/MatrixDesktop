@@ -676,6 +676,11 @@ def check_matrix_web(page, origin):
         fail("matrix web bundle sizes its canvas", drawn["why"])
 
 
+NOTICE_IN_VIEW = ("text => { const n = [...document.querySelectorAll('.notice')].find(n => n.textContent.includes(text)); "
+                  "const r = n.getBoundingClientRect(); "
+                  "return { top: Math.round(r.top), height: innerHeight, inView: r.top >= 0 && r.top < innerHeight }; }")
+
+
 def check_config_error_boundary(browser, origin):
     """A configuration exception must produce the visible startup notice, not a silent page."""
     name = "a configuration exception shows the visible startup error"
@@ -698,6 +703,10 @@ def check_config_error_boundary(browser, origin):
                 fail(name, "the config.js stub was never requested, so the boundary was not exercised")
             else:
                 fail(name, "makeConfig threw and no .notice explains it; the page stays black")
+            return
+        where = page.evaluate(NOTICE_IN_VIEW, "injected configuration failure")
+        if not where["inView"]:
+            fail(name, f"the notice is outside the viewport (top {where['top']}px of {where['height']}px)")
             return
         ok(name, f"stub served {len(served)}x")
     finally:
@@ -906,10 +915,13 @@ def check_context_loss_recovery(browser, origin):
         page.evaluate("() => sessionStorage.setItem('matrixRendererRecoveries', JSON.stringify([Date.now(), Date.now(), Date.now()]))")
         page.evaluate("() => { window.__beforeLoss = true; window.matrixRendererLost('WebGPU device lost (smoke)'); }")
         page.wait_for_function("[...document.querySelectorAll('.notice')].some(n => n.textContent.includes('could not be recovered'))", timeout=5000)
-        if page.evaluate("window.__beforeLoss") is True:
-            ok(name)
-        else:
+        where = page.evaluate(NOTICE_IN_VIEW, "could not be recovered")
+        if page.evaluate("window.__beforeLoss") is not True:
             fail(name, "the page reloaded although the budget was spent")
+        elif not where["inView"]:
+            fail(name, f"the notice is outside the viewport (top {where['top']}px of {where['height']}px)")
+        else:
+            ok(name)
     except Exception as exc:
         fail(name, f"no notice after the budget was spent: {type(exc).__name__}")
     finally:

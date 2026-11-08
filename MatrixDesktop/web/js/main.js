@@ -44,6 +44,8 @@ const loadRenderer = (canvas, config, useWebGPU) => loadBackend(canvas, config, 
 const showError = (error) => {
 	stopCamera();
 	console.error("Failed to load renderer:", error);
+	// The canvas fills the viewport, so a notice placed after it would land below the fold.
+	for (const canvas of document.querySelectorAll("canvas")) canvas.style.display = "none";
 	const notice = document.createElement("div");
 	notice.className = "notice";
 	const message = document.createElement("p");
