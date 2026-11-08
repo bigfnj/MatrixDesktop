@@ -1,6 +1,8 @@
 import makeConfig from "./config.js";
 import { wantsWebGPU } from "./rendererChoice.js";
 import { stopCamera } from "./camera.js";
+import loadBackend from "./rendererLoader.js";
+import installRecovery from "./rendererRecovery.js";
 
 const canvas = document.createElement("canvas");
 document.body.appendChild(canvas);
@@ -35,29 +37,15 @@ const isRunningSwiftShader = () => {
 	}
 };
 
-const loadRenderer = async (canvas, config, useWebGPU) => {
-	if (useWebGPU) {
-		try {
-			const webgpuModule = await import("./webgpu/main.js");
-			await webgpuModule.default(canvas, config);
-			return;
-		} catch (err) {
-			if (["uc3d", "zmatrix"].includes(config.scene)) {
-				// Shader and device failures in this optional scene must remain visible;
-				// a working WebGL replacement would otherwise conceal a broken WebGPU pass.
-				throw err;
-			}
-			console.warn("WebGPU renderer failed, falling back to regl:", err);
-			stopCamera();
-		}
-	}
-	const reglModule = await import("./regl/main.js");
-	await reglModule.default(canvas, config);
-};
+// The REGL fallback after a WebGPU failure gets a fresh canvas (see rendererLoader.js);
+// hostPlayback.js looks the canvas up per message, so nothing else holds the old one.
+const loadRenderer = (canvas, config, useWebGPU) => loadBackend(canvas, config, useWebGPU, { stopCamera });
 
 const showError = (error) => {
 	stopCamera();
 	console.error("Failed to load renderer:", error);
+	// The canvas fills the viewport, so a notice placed after it would land below the fold.
+	for (const canvas of document.querySelectorAll("canvas")) canvas.style.display = "none";
 	const notice = document.createElement("div");
 	notice.className = "notice";
 	const message = document.createElement("p");
@@ -66,6 +54,21 @@ const showError = (error) => {
 	document.body.appendChild(notice);
 };
 
+// A lost GPU context or device reloads the page within a budget, then leaves a notice
+// (see rendererRecovery.js). Renderers call window.matrixRendererLost?.(reason). The native
+// bootstrap only matches the query the page was opened with, so a reload first undoes
+// Plug me in's history rewrite.
+const startupSearch = location.search;
+window.matrixRendererLost = installRecovery({
+	target: window,
+	storage: () => window.sessionStorage,
+	reload: () => {
+		if (location.search !== startupSearch) history.replaceState(history.state, "", location.pathname + startupSearch);
+		location.reload();
+	},
+	showError,
+});
+
 document.body.onload = async () => {
 	// WebView2 can retain an older document-created script in a reused iframe.
 	// The native bridge fetches the current generation before any renderer uses
@@ -73,7 +76,10 @@ document.body.onload = async () => {
 	try { await window.matrixHostBootstrapReady; }
 	catch (error) { showError(error); return; }
 	const urlParams = new URLSearchParams(window.location.search);
-	const config = makeConfig(Object.fromEntries(urlParams.entries()));
+	// Inside the visible error boundary: a configuration failure must explain itself.
+	let config;
+	try { config = makeConfig(Object.fromEntries(urlParams.entries())); }
+	catch (error) { showError(error); return; }
 	// Config check FIRST. && evaluates left to right, so asking supportsWebGPU() first
 	// meant awaiting navigator.gpu.requestAdapter() on every launch even though the default
 	// renderer is "regl", which initialises the D3D12 adapter enumeration and can spin up the
@@ -87,7 +93,14 @@ document.body.onload = async () => {
 	// and a whole throwaway WebGL context just to read a renderer string, and never releases
 	// it, so it burned one of the browser's live-context budget immediately before the real
 	// context is created. Now skipped entirely when the answer cannot matter.
-	if (!config.suppressWarnings && isRunningSwiftShader()) {
+	const softwareRendering = !config.suppressWarnings && isRunningSwiftShader();
+	// Wallpaper, screensaver and preview hosts deliver no input to the page, so nobody could
+	// press "Plug me in": warn and start rather than leave a static notice up forever.
+	const nonInteractive = window.matrixHostBootstrap?.interactive === false;
+	if (softwareRendering && nonInteractive) {
+		console.warn("Hardware acceleration is disabled; rendering in software because this host takes no input.");
+	}
+	if (softwareRendering && !nonInteractive) {
 		const notice = document.createElement("notice");
 		notice.innerHTML = `<div class="notice">
 		<p>Wake up, Neo... you've got hardware acceleration disabled.</p>
@@ -97,18 +110,21 @@ document.body.onload = async () => {
 		`;
 		canvas.style.display = "none";
 		document.body.appendChild(notice);
+		// once: a second click would start a second renderer on the same canvas. The canvas is
+		// shown BEFORE loading because REGL sizes its backing store from clientWidth, which is
+		// 0 while hidden, and nothing resizes it when it appears.
 		document.querySelector(".blue.pill").addEventListener("click", async () => {
 			try {
 				config.suppressWarnings = true;
 				urlParams.set("suppressWarnings", true);
 				history.replaceState({}, "", "?" + urlParams.toString());
-				await loadRenderer(canvas, config, useWebGPU);
+				notice.remove();
 				canvas.style.display = "unset";
-				document.body.removeChild(notice);
+				await loadRenderer(canvas, config, useWebGPU);
 			} catch (err) {
 				showError(err);
 			}
-		});
+		}, { once: true });
 	} else {
 		try {
 			await loadRenderer(canvas, config, useWebGPU);

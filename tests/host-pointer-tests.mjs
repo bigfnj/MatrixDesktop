@@ -22,6 +22,6 @@ forward(null);
 assert.equal(events.at(-1).type, "pointerleave");
 forward(pointer("up", { button: 2 }));
 const count = events.length;
-for (const invalid of [pointer("keyboard"), pointer("move", { x: NaN }), pointer("move", { viewportWidth: 0 }), pointer("move", { y: -1 })]) assert.equal(forward(invalid), false);
+for (const invalid of [pointer("keyboard"), pointer("leave"), pointer("move", { x: NaN }), pointer("move", { viewportWidth: 0 }), pointer("move", { y: -1 })]) assert.equal(forward(invalid), false);
 assert.equal(events.length, count, "invalid coordinates/events must not reach visual handlers");
 console.log("PASS host pointer: DPI scaling, event routing, click pairing, drag suppression, wheel, leave and invalid input");

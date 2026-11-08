@@ -676,6 +676,306 @@ def check_matrix_web(page, origin):
         fail("matrix web bundle sizes its canvas", drawn["why"])
 
 
+NOTICE_IN_VIEW = ("text => { const n = [...document.querySelectorAll('.notice')].find(n => n.textContent.includes(text)); "
+                  "const r = n.getBoundingClientRect(); "
+                  "return { top: Math.round(r.top), height: innerHeight, inView: r.top >= 0 && r.top < innerHeight }; }")
+
+
+def check_config_error_boundary(browser, origin):
+    """A configuration exception must produce the visible startup notice, not a silent page."""
+    name = "a configuration exception shows the visible startup error"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    served = []
+
+    def stub(route):
+        served.append(route.request.url)
+        route.fulfill(content_type="text/javascript",
+                      body="export default () => { throw new Error('injected configuration failure'); };")
+
+    try:
+        page.route("**/js/config.js", stub)
+        page.goto(f"{origin}/index.html?suppressWarnings=true", wait_until="load")
+        try:
+            page.wait_for_function("[...document.querySelectorAll('.notice')].some(n => "
+                                   "n.textContent.includes('injected configuration failure'))", timeout=10000)
+        except Exception:
+            if not served:
+                fail(name, "the config.js stub was never requested, so the boundary was not exercised")
+            else:
+                fail(name, "makeConfig threw and no .notice explains it; the page stays black")
+            return
+        where = page.evaluate(NOTICE_IN_VIEW, "injected configuration failure")
+        if not where["inView"]:
+            fail(name, f"the notice is outside the viewport (top {where['top']}px of {where['height']}px)")
+            return
+        ok(name, f"stub served {len(served)}x")
+    finally:
+        page.close()
+
+
+READY = "window.matrixRuntimeDiagnostics?.ready === true && window.matrixRuntimeDiagnostics.frames > 2"
+
+
+def open_software_notice(browser, origin, query="numColumns=40&resolution=1"):
+    """The SwiftShader notice path: no suppressWarnings, so the page must wait for a click."""
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    page.goto(f"{origin}/index.html?{query}", wait_until="load")
+    try:
+        page.wait_for_function("document.querySelector('.blue.pill') != null", timeout=10000)
+    except Exception:
+        page.close()
+        return None
+    reached = page.evaluate("() => document.querySelector('.blue.pill').offsetParent != null && "
+                            "getComputedStyle(document.querySelector('canvas')).display === 'none'")
+    if not reached:
+        page.close()
+        return None
+    return page
+
+
+def check_plug_me_in(browser, origin):
+    """'Plug me in' must start one renderer, sized to the canvas it has just made visible."""
+    name = "Plug me in starts a renderer sized to the visible canvas"
+    page = open_software_notice(browser, origin)
+    if page is None:
+        fail(name, "notice path not reached: no visible .blue.pill over a hidden canvas")
+    else:
+        try:
+            page.click(".blue.pill")
+            page.wait_for_function(READY, timeout=20000)
+            size = page.evaluate("() => { const c = document.querySelector('canvas'); "
+                                 "return { width: c.width, height: c.height, expected: Math.ceil(c.clientWidth * devicePixelRatio) }; }")
+            if size["width"] > 1 and size["width"] == size["expected"]:
+                ok(name, f"{size['width']}x{size['height']}")
+            else:
+                fail(name, f"canvas backing store is {size['width']}x{size['height']}, expected width {size['expected']}")
+        except Exception as exc:
+            fail(name, f"no ready renderer with frames > 2 after the click: {type(exc).__name__}")
+        finally:
+            page.close()
+
+    name = "Plug me in clicked twice starts exactly one renderer"
+    page = open_software_notice(browser, origin)
+    if page is None:
+        fail(name, "notice path not reached: no visible .blue.pill over a hidden canvas")
+        return
+    try:
+        page.evaluate("() => { const pill = document.querySelector('.blue.pill'); pill.click(); pill.click(); }")
+        page.wait_for_function(READY, timeout=20000)
+        page.wait_for_timeout(1000)
+        seen = page.evaluate("() => ({ scripts: document.querySelectorAll(\"script[src$='lib/regl.min.js']\").length, "
+                             "notices: document.querySelectorAll('.notice').length })")
+        if seen == {"scripts": 1, "notices": 0}:
+            ok(name)
+        else:
+            fail(name, f"{seen['scripts']} regl.min.js script tag(s) and {seen['notices']} .notice element(s); expected 1 and 0")
+    except Exception as exc:
+        fail(name, f"no ready renderer with frames > 2 after two clicks: {type(exc).__name__}")
+    finally:
+        page.close()
+
+
+def check_noninteractive_software_start(browser, origin):
+    """Wallpaper, screensaver and preview hosts cannot click: they must start, not block."""
+    name = "a non-interactive host on SwiftShader starts rendering instead of blocking"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    try:
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+        renderer = page.evaluate("() => { const gl = document.createElement('canvas').getContext('webgl'); "
+                                 "const info = gl?.getExtension('WEBGL_debug_renderer_info'); "
+                                 "return info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : ''; }")
+    finally:
+        page.close()
+    if "swiftshader" not in renderer.lower():
+        fail(name, f"witness failed: this Chromium renders with '{renderer}', not SwiftShader, so the notice path is unreachable")
+        return
+
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    warnings = []
+    page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
+    try:
+        page.add_init_script("window.matrixHostBootstrap = { interactive: false }; "
+                             "window.matrixHostBootstrapReady = Promise.resolve(window.matrixHostBootstrap);")
+        page.goto(f"{origin}/index.html?numColumns=40", wait_until="load")
+        page.wait_for_function(READY, timeout=20000)
+        first = page.evaluate("window.matrixRuntimeDiagnostics.frames")
+        page.wait_for_timeout(700)
+        seen = page.evaluate("() => ({ frames: window.matrixRuntimeDiagnostics.frames, "
+                             "pill: document.querySelector('.blue.pill') != null, "
+                             "display: getComputedStyle(document.querySelector('canvas')).display })")
+        problems = []
+        if seen["pill"]:
+            problems.append("the blocking notice is shown")
+        if seen["display"] == "none":
+            problems.append("the canvas is hidden")
+        if seen["frames"] <= first:
+            problems.append(f"frames did not advance ({first} -> {seen['frames']})")
+        if not any("hardware acceleration" in text.lower() for text in warnings):
+            problems.append("no console warning says hardware acceleration is disabled")
+        if problems:
+            fail(name, "; ".join(problems))
+        else:
+            ok(name, f"frames {first} -> {seen['frames']}")
+    except Exception as exc:
+        fail(name, f"no ready renderer with frames > 2 behind interactive:false: {type(exc).__name__}")
+    finally:
+        page.close()
+
+    for label, script in (("no bootstrap", None),
+                          ("interactive:true", "window.matrixHostBootstrap = { interactive: true };")):
+        name = f"an interactive host ({label}) on SwiftShader still shows the blocking notice"
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        try:
+            if script:
+                page.add_init_script(script)
+            page.goto(f"{origin}/index.html?numColumns=40", wait_until="load")
+            try:
+                page.wait_for_function("document.querySelector('.blue.pill') != null", timeout=10000)
+                held = page.evaluate("() => getComputedStyle(document.querySelector('canvas')).display === 'none' "
+                                     "&& window.matrixRuntimeDiagnostics == null")
+            except Exception:
+                held = False
+            if held:
+                ok(name)
+            else:
+                fail(name, "no .blue.pill over a hidden canvas with no renderer started")
+        finally:
+            page.close()
+
+
+def bright_fraction(png_bytes, threshold=40):
+    from PIL import Image
+    histogram = Image.open(io.BytesIO(png_bytes)).convert("L").histogram()
+    return sum(histogram[threshold + 1:]) / max(1, sum(histogram))
+
+
+LOSE = ("() => { window.__beforeLoss = true; const gl = document.querySelector('canvas').getContext('webgl'); "
+        "window.__lose = gl.getExtension('WEBGL_lose_context'); window.__lose.loseContext(); }")
+
+
+LIT = 0.002  # a lost-and-restored canvas is exactly black; ZMatrix rain at 480x360 lights about 0.8%
+
+
+def check_context_loss_recovery(browser, origin):
+    """A lost WebGL context must come back as rendering rain, not a black page that looks healthy."""
+    for scene in ("matrix", "uc3d", "zmatrix"):
+        name = f"{scene} renders again after a WebGL context loss and restore"
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        try:
+            page.goto(f"{origin}/index.html?suppressWarnings=true&scene={scene}&numColumns=40", wait_until="load")
+            page.wait_for_function(READY, timeout=30000)
+            page.wait_for_timeout(1500)
+            before = bright_fraction(page.screenshot())
+            if before <= LIT:
+                fail(name, f"witness failed: only {before:.2%} bright pixels before the loss")
+                continue
+            page.evaluate(LOSE)
+            page.wait_for_timeout(300)
+            try:
+                with page.expect_navigation(timeout=8000):
+                    page.evaluate("window.__lose.restoreContext()")
+            except Exception:
+                fail(name, "the page did not reload within 8 s of restoreContext()")
+                continue
+            page.wait_for_function(READY + " && window.__beforeLoss === undefined", timeout=30000)
+            first = page.evaluate("window.matrixRuntimeDiagnostics.frames")
+            for _ in range(12):  # rain builds up after the reload; ZMatrix starts sparse
+                page.wait_for_timeout(500)
+                after = bright_fraction(page.screenshot())
+                if after > LIT:
+                    break
+            frames = page.evaluate("window.matrixRuntimeDiagnostics.frames")
+            if frames > first and after > LIT:
+                ok(name, f"bright {before:.1%} -> {after:.1%}, frames {first} -> {frames}")
+            else:
+                fail(name, f"after the reload: frames {first} -> {frames}, {after:.2%} bright pixels")
+        except Exception as exc:
+            fail(name, f"{type(exc).__name__}: {str(exc).splitlines()[0]}")
+        finally:
+            page.close()
+
+    name = "a WebGL context that is never restored still reloads"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    try:
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+        page.wait_for_function(READY, timeout=30000)
+        with page.expect_navigation(timeout=14000):
+            page.evaluate(LOSE)
+        ok(name)
+    except Exception as exc:
+        fail(name, f"no reload within 14 s of an unrestored loss: {type(exc).__name__}")
+    finally:
+        page.close()
+
+    name = "a renderer loss past the reload budget leaves a visible notice"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    try:
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+        page.wait_for_function(READY, timeout=30000)
+        page.evaluate("() => sessionStorage.setItem('matrixRendererRecoveries', JSON.stringify([Date.now(), Date.now(), Date.now()]))")
+        page.evaluate("() => { window.__beforeLoss = true; window.matrixRendererLost('WebGPU device lost (smoke)'); }")
+        page.wait_for_function("[...document.querySelectorAll('.notice')].some(n => n.textContent.includes('could not be recovered'))", timeout=5000)
+        where = page.evaluate(NOTICE_IN_VIEW, "could not be recovered")
+        if page.evaluate("window.__beforeLoss") is not True:
+            fail(name, "the page reloaded although the budget was spent")
+        elif not where["inView"]:
+            fail(name, f"the notice is outside the viewport (top {where['top']}px of {where['height']}px)")
+        else:
+            ok(name)
+    except Exception as exc:
+        fail(name, f"no notice after the budget was spent: {type(exc).__name__}")
+    finally:
+        page.close()
+
+
+def check_image_effect_offline(browser, origin):
+    """effect=image with no url must render with no network instead of failing the renderer."""
+    name = "effect=image with no url renders with every external request blocked"
+    page = browser.new_page(viewport={"width": 480, "height": 360})
+    blocked, warnings = [], []
+    page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
+
+    def offline(route):
+        if route.request.url.startswith(origin + "/"):
+            route.continue_()
+        else:
+            blocked.append(route.request.url)
+            route.abort("internetdisconnected")
+
+    try:
+        page.route("**/*", offline)
+        page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&effect=image", wait_until="load")
+        try:
+            page.wait_for_function(READY, timeout=20000)
+        except Exception:
+            notice = page.evaluate("() => [...document.querySelectorAll('.notice')].map(n => n.textContent.trim()).join(' | ')")
+            fail(name, f"no ready renderer within 20 s ({len(blocked)} external request(s) blocked); notice: {notice or 'none'}")
+            return
+        page.wait_for_timeout(1500)
+        lit = bright_fraction(page.screenshot())
+        problems = []
+        if page.evaluate("document.querySelectorAll('.notice').length") > 0:
+            problems.append("a .notice is shown")
+        if lit <= LIT:
+            problems.append(f"only {lit:.2%} bright pixels, so the rain is not visible")
+        if blocked and not any("background image" in text.lower() for text in warnings):
+            problems.append("no console warning names the missing background image")
+        if problems:
+            fail(name, "; ".join(problems))
+        else:
+            ok(name, f"{len(blocked)} external request(s) blocked, {lit:.1%} bright pixels")
+    finally:
+        page.close()
+
+
+def check_startup_paths(browser, origin):
+    check_config_error_boundary(browser, origin)
+    check_plug_me_in(browser, origin)
+    check_noninteractive_software_start(browser, origin)
+    check_context_loss_recovery(browser, origin)
+    check_image_effect_offline(browser, origin)
+
+
 def main():
     state_path = REPO / "artifacts" / "gate" / "loadState.json"
     if not state_path.exists():
@@ -725,6 +1025,9 @@ def main():
 
             print("=== web smoke: flags actually do something ===")
             check_glyph_intensity(browser, web_origin)
+
+            print("=== web smoke: renderer startup paths ===")
+            check_startup_paths(browser, web_origin)
 
             browser.close()
     finally:

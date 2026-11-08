@@ -83,8 +83,132 @@ await test("Holoplay uses REGL before any WebGPU adapter probe", () => {
 });
 
 await test("web boolean parser accepts exact aliases and rejects embedded true", () => {
-	for (const text of ["", "true", "TRUE", "1", "y", "yes", " on "]) assert.equal(makeConfig({ camera: text }).useCamera, true, text);
-	for (const text of ["false", "0", "no", "off", "truthy", "untrue", "nottrue", "true-ish"]) assert.equal(makeConfig({ camera: text }).useCamera, false, text);
+	for (const text of ["", "true", "TRUE", "1", "y", "yes", " on "]) assert.equal(makeConfig({ camera: text, effect: "mirror" }).useCamera, true, text);
+	for (const text of ["false", "0", "no", "off", "truthy", "untrue", "nottrue", "true-ish"]) assert.equal(makeConfig({ camera: text, effect: "mirror" }).useCamera, false, text);
+});
+
+await test("camera is requested only by the mirror effect", () => {
+	assert.equal(makeConfig({ camera: "true", effect: "mirror" }).useCamera, true, "Mirror keeps its camera");
+	for (const effect of ["palette", "stripes", "image", "none", "Mirror"]) assert.equal(makeConfig({ camera: "true", effect }).useCamera, false, effect);
+	assert.equal(makeConfig({ camera: "true" }).useCamera, false, "the default palette effect must not open the camera");
+});
+
+await test("an intro that cannot progress is skipped instead of rendering nothing", () => {
+	const warnings = [], warn = console.warn;
+	console.warn = (message) => warnings.push(String(message));
+	try {
+		for (const speeds of [{ fallSpeed: "0" }, { animationSpeed: "0" }, { animationSpeed: "-1" }, { fallSpeed: "-0.3" }]) {
+			const before = warnings.length;
+			assert.equal(makeConfig({ skipIntro: "false", ...speeds }).skipIntro, true, JSON.stringify(speeds));
+			assert.equal(warnings.length, before + 1, `${JSON.stringify(speeds)} must say why the intro was skipped`);
+		}
+		const before = warnings.length;
+		assert.equal(makeConfig({ skipIntro: "false" }).skipIntro, false, "default speeds keep the intro");
+		assert.equal(makeConfig({ skipIntro: "false", animationSpeed: "-1", fallSpeed: "-0.3" }).skipIntro, false, "two negative speeds still progress");
+		assert.equal(makeConfig({ skipIntro: "false", scene: "uc3d", animationSpeed: "0" }).skipIntro, false, "UC3D has no intro sweep");
+		assert.equal(warnings.length, before, "an intro that can progress must not warn");
+	} finally { console.warn = warn; }
+});
+
+await test("inherited Object property names in the query are ignored like any unknown key", () => {
+	const inherited = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"];
+	const query = Object.fromEntries([["unknownKey", "1"], ...inherited.map((key) => [key, "1"]), ["numColumns", "17"], ["fallSpeed", "0.9"]]);
+	assert.equal(Object.hasOwn(query, "__proto__"), true, "the probe must carry __proto__ as an own query key");
+	const config = makeConfig(query);
+	assert.equal(config.numColumns, 17); assert.equal(config.fallSpeed, 0.9);
+	for (const key of ["unknownKey", ...inherited]) assert.equal(Object.hasOwn(config, key), false, key);
+	assert.equal(Object.getPrototypeOf(config), Object.prototype);
+	const plain = makeConfig({});
+	for (const name of inherited) {
+		assert.equal(makeConfig({ font: name }).glyphMSDFURL, plain.glyphMSDFURL, `font=${name} must fall back to the default glyph atlas`);
+		assert.equal(makeConfig({ font: name, version: "megacity" }).glyphMSDFURL, "assets/megacity_msdf.png", `font=${name} must fall back to the version's font`);
+	}
+});
+
+await test("WebGPU-to-REGL fallback draws on a fresh canvas and keeps the WebGPU error", async () => {
+	const { default: loadRenderer } = await import("../MatrixDesktop/web/js/rendererLoader.js");
+	const doc = { createElement: (tag) => makeCanvas(tag) };
+	const makeCanvas = (tag = "canvas") => ({ tag, ownerDocument: doc, claimed: null, replacedBy: null,
+		getContext(type) { if (this.claimed != null && this.claimed !== type) return null; this.claimed = type; return {}; },
+		replaceWith(node) { this.replacedBy = node; } });
+	const pipelineError = Object.assign(new Error("invalid WGSL in palettePass"), { name: "GPUPipelineError" });
+	const webgpu = async () => ({ default: async (canvas) => { canvas.getContext("webgpu"); throw pipelineError; } });
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		let drawnOn = null, stops = 0;
+		const original = makeCanvas();
+		const result = await loadRenderer(original, { scene: "matrix" }, true, { importWebGPU: webgpu, stopCamera: () => stops++,
+			importRegl: async () => ({ default: async (canvas) => {
+				assert.notEqual(canvas.getContext("webgl"), null, "REGL received a canvas WebGPU had already claimed");
+				drawnOn = canvas; globalThis.matrixRuntimeDiagnostics = { backend: "regl" };
+			} }) });
+		assert.notEqual(drawnOn, original);
+		assert.equal(drawnOn.tag, "canvas");
+		assert.equal(original.replacedBy, drawnOn, "the fresh canvas must take the claimed canvas's place in the page");
+		assert.equal(result, drawnOn);
+		assert.equal(stops, 1);
+		assert.equal(globalThis.matrixRuntimeDiagnostics.requestedRendererError, "invalid WGSL in palettePass");
+		await assert.rejects(loadRenderer(makeCanvas(), { scene: "matrix" }, true, { importWebGPU: webgpu,
+			importRegl: async () => ({ default: async () => { throw new Error("no WebGL"); } }) }),
+			/no WebGL \(after WebGPU failed: invalid WGSL in palettePass\)/);
+		const kept = makeCanvas();
+		assert.equal(await loadRenderer(kept, { scene: "matrix" }, true, { importWebGPU: async () => ({ default: async () => {} }),
+			importRegl: async () => { throw new Error("REGL must not load after WebGPU started"); } }), kept);
+		await assert.rejects(loadRenderer(makeCanvas(), { scene: "uc3d" }, true, { importWebGPU: webgpu,
+			importRegl: async () => { throw new Error("UC3D must not fall back"); } }), /invalid WGSL/);
+	} finally {
+		console.warn = warn;
+		delete globalThis.matrixRuntimeDiagnostics;
+	}
+});
+
+await test("a lost renderer reloads within a budget and then explains itself", async () => {
+	const { default: install, RECOVERY_KEY } = await import("../MatrixDesktop/web/js/rendererRecovery.js");
+	const run = ({ stamps = [], storage, time = 1_000_000 } = {}) => {
+		const listeners = {}, timers = [], log = { reloads: 0, errors: [], prevented: 0 };
+		const items = new Map([[RECOVERY_KEY, JSON.stringify(stamps)]]);
+		const hook = install({
+			target: { addEventListener: (type, fn, capture) => { assert.equal(capture, true, `${type} must be a capture listener`); listeners[type] = fn; } },
+			storage: storage ?? (() => ({ getItem: (key) => items.get(key) ?? null, setItem: (key, value) => items.set(key, value) })),
+			reload: () => log.reloads++, showError: (error) => log.errors.push(error.message), now: () => time,
+			setTimer: (fn, ms) => { timers.push({ fn, ms, live: true }); return timers.length; },
+			clearTimer: (id) => { if (id != null) timers[id - 1].live = false; },
+		});
+		const fire = (type) => listeners[type]?.({ preventDefault: () => log.prevented++ });
+		return { hook, fire, timers, log, items };
+	};
+	let page = run();
+	page.fire("webglcontextlost");
+	assert.equal(page.log.prevented, 1, "the loss must ask the browser to restore the context");
+	assert.equal(page.log.reloads, 0, "a WebGL loss waits for the restore");
+	page.hook("WebGL context lost");
+	assert.equal(page.log.reloads, 0, "a renderer's hook call during a pending WebGL loss must not reload early");
+	page.fire("webglcontextrestored");
+	assert.equal(page.log.reloads, 1, "a restored context must reload the page");
+	assert.equal(page.timers[0].live, false, "the restore must cancel the no-restore timer");
+	assert.deepEqual(JSON.parse(page.items.get(RECOVERY_KEY)), [1_000_000]);
+	page.fire("webglcontextrestored"); page.hook("again");
+	assert.equal(page.log.reloads, 1, "one loss reloads once");
+	page = run();
+	page.fire("webglcontextlost");
+	assert.equal(page.timers[0].ms, 10000);
+	page.timers[0].fn();
+	assert.equal(page.log.reloads, 1, "no restore within the wait must still reload");
+	page = run();
+	page.hook("WebGPU device lost (unknown)");
+	assert.equal(page.log.reloads, 1, "a WebGPU device loss reloads at once");
+	page = run({ stamps: [999_000, 998_000, 997_000] });
+	page.fire("webglcontextlost"); page.fire("webglcontextrestored");
+	assert.equal(page.log.reloads, 0, "three recoveries in five minutes exhaust the budget");
+	assert.match(page.log.errors[0] ?? "", /could not be recovered automatically/);
+	page = run({ stamps: [999_000, 998_000, 1_000_000 - 5 * 60 * 1000] });
+	page.hook("WebGPU device lost");
+	assert.equal(page.log.reloads, 1, "a stamp older than five minutes no longer counts");
+	page = run({ storage: () => { throw new Error("SecurityError"); } });
+	page.hook("WebGPU device lost");
+	assert.equal(page.log.reloads, 0, "without storage there is no budget, so no reload");
+	assert.equal(page.log.errors.length, 1);
 });
 
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {
@@ -174,6 +298,80 @@ await test("failed WebGPU pipeline initialization cleans sibling passes", async 
 	await assert.rejects(makePipeline({}, [() => ({ loaded: Promise.resolve(), cleanup() { cleaned++; } }), () => { throw new Error("factory failed"); }]), /factory failed/);
 	assert.equal(cleaned, 1);
 });
+
+// AUD-21: effect=image must start without its background image. The fetch, Image and
+// console.warn stubs below replace the suite's for one pass and are restored afterwards.
+const runImagePass = async (backend, query, { offline = false, closeEarly = false } = {}) => {
+	const config = makeConfig({ effect: "image", ...query });
+	const saved = { fetch: globalThis.fetch, Image: globalThis.Image, warn: console.warn };
+	const run = { requested: [], warnings: [], writes: [], diagnostics: { errors: [] } };
+	const gate = closeEarly ? new Promise((resolve) => { run.open = resolve; }) : Promise.resolve();
+	globalThis.fetch = async (path) => {
+		if (String(path).startsWith("shaders/")) return saved.fetch(path);
+		run.requested.push(path);
+		await gate;
+		if (offline) throw new TypeError("Failed to fetch");
+		return { blob: async () => ({}) };
+	};
+	globalThis.Image = class { async decode() { run.requested.push(this.src); await gate; if (offline) throw new Error("The source image cannot be decoded."); } };
+	console.warn = (message) => run.warnings.push(String(message));
+	globalThis.matrixRuntimeDiagnostics = run.diagnostics;
+	try {
+		if (backend === "WebGPU") {
+			const device = makeDevice(), borrowed = { createView: () => ({}) };
+			device.queue = { ...device.queue, writeTexture: (target, data) => run.writes.push([...data]) };
+			const { default: make } = await import("../MatrixDesktop/web/js/webgpu/imagePass.js");
+			const pass = make({ config, device });
+			if (closeEarly) { pass.cleanup(); run.open(); await assert.rejects(pass.loaded, /Failed to fetch/); return run; }
+			await pass.loaded;
+			pass.build([4, 4], { primary: borrowed, bloom: borrowed });
+			pass.run(encoder, true);
+			pass.cleanup();
+		} else {
+			const commands = [], handle = (data) => Object.assign(() => {}, { data, resize() {}, destroy() {} });
+			const regl = Object.assign((command) => { commands.push(command); return () => {}; }, { texture: handle, framebuffer: handle, prop: (p) => p });
+			const { default: make } = await import("../MatrixDesktop/web/js/regl/imagePass.js");
+			const pass = make({ regl, config }, { primary: {}, bloom: {} });
+			if (closeEarly) { pass.cleanup(); run.open(); await assert.rejects(pass.ready, /cannot be decoded/); return run; }
+			await pass.ready;
+			pass.setSize(4, 4); pass.execute(true);
+			run.bound = commands[0].uniforms.backgroundTex();
+			pass.cleanup();
+		}
+		return run;
+	} finally {
+		globalThis.fetch = saved.fetch; globalThis.Image = saved.Image; console.warn = saved.warn;
+		delete globalThis.matrixRuntimeDiagnostics;
+	}
+};
+
+for (const backend of ["WebGPU", "REGL"]) {
+	await test(`${backend} image effect draws uncoloured rain when its background image cannot load`, async () => {
+		const run = await runImagePass(backend, {}, { offline: true });
+		assert.equal(run.requested.length, 1, "the background image must be requested once");
+		if (backend === "WebGPU") assert.deepEqual(run.writes, [[255, 255, 255, 255]], "a white texture must stand in for the image");
+		else assert.deepEqual(run.bound?.data, [[255]], "a white texture must stand in for the image");
+		assert.equal(run.warnings.length, 1, "the missing image must be announced once");
+		assert.match(run.warnings[0], /^Background image .+ could not be loaded/);
+		assert(run.warnings[0].includes(run.requested[0]), "the warning must name the image");
+		assert.deepEqual(run.diagnostics.errors, run.warnings, "diagnostics must record the missing image");
+		const closed = await runImagePass(backend, {}, { offline: true, closeEarly: true });
+		assert.deepEqual([closed.warnings, closed.diagnostics.errors], [[], []], "a pass closed before its image failed must stay quiet");
+	});
+
+	await test(`${backend} image effect treats an empty url like no url`, async () => {
+		const plain = await runImagePass(backend, {});
+		const empty = await runImagePass(backend, { url: "" });
+		assert.equal(plain.requested.length, 1);
+		assert.notEqual(plain.requested[0], "", "with no url the default image must be requested");
+		assert.deepEqual(empty.requested, plain.requested, "url= must request the same default image as no url");
+		for (const run of [plain, empty]) {
+			assert.deepEqual([run.warnings, run.diagnostics.errors], [[], []], "a loaded image must not warn");
+			if (backend === "WebGPU") assert.deepEqual(run.writes, [], "a loaded image must not be replaced");
+			else assert.equal(run.bound?.data?.flipY, true, "the loaded image must be bound");
+		}
+	});
+}
 
 const makeRegl = () => {
 	const resources = new Set();

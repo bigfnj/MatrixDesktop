@@ -32,3 +32,32 @@ timestamp += 1000;
 assert.equal(pausedClock.seconds(), 1);
 pausedClock.dispose();
 console.log("PASS host playback clock: pause, between-frame pause, resume, initial pause, disposal");
+
+// Transport: the host sends pause only as a window event from MainForm.SetHostPausedAsync's
+// ExecuteScriptAsync; its one PostWebMessage sender is the pointer bridge.
+{
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../MatrixDesktop/MainForm.cs", import.meta.url), "utf8");
+  const match = source.match(/ExecuteScriptAsync\(\$"(window\.matrixHostPlaybackState=\{state\};[^"]*)"\)/);
+  assert(match, "MainForm.SetHostPausedAsync's pause script was not found");
+  const hostScript = (paused) => match[1].replace("{state}", JSON.stringify({ paused, reason: "test" })).replaceAll("{{", "{").replaceAll("}}", "}");
+  const webview = new EventTarget(), pointerEvents = [];
+  const window = Object.assign(new EventTarget(), { chrome: { webview } });
+  const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }), dispatchEvent: (event) => pointerEvents.push(event.type) };
+  Object.assign(globalThis, { window, document: { querySelector: () => canvas }, MouseEvent: class { constructor(type, fields) { this.type = type; Object.assign(this, fields); } } });
+  try {
+    const transport = await import("../MatrixDesktop/web/js/hostPlayback.js?transport");
+    const states = [];
+    transport.subscribeHostPlayback((value) => states.push(value));
+    const message = (data) => { const event = new Event("message"); event.data = data; webview.dispatchEvent(event); };
+    message({ type: "matrix-host-state", paused: true });
+    assert.deepEqual(states, [false], "a matrix-host-state web message has no host sender and must not pause");
+    new Function("window", "CustomEvent", hostScript(true))(window, CustomEvent);
+    assert.deepEqual(states, [false, true], "the host's ExecuteScriptAsync pause script must pause");
+    new Function("window", "CustomEvent", hostScript(false))(window, CustomEvent);
+    assert.deepEqual(states, [false, true, false], "the host's resume script must resume");
+    message({ type: "matrix-host-pointer", eventType: "move", x: 5, y: 5, viewportWidth: 10, viewportHeight: 10, button: 0 });
+    assert(pointerEvents.includes("pointermove"), "pointer web messages must still reach the canvas");
+  } finally { delete globalThis.window; delete globalThis.document; delete globalThis.MouseEvent; }
+  console.log("PASS host playback transport: pause and resume only through the host's window event; pointer web messages still forwarded");
+}

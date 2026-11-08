@@ -636,9 +636,11 @@ paramMapping.angle = paramMapping.slant;
 paramMapping.colors = paramMapping.stripeColors;
 
 export default (urlParams) => {
+	// Own registry entries only: "in" also matches Object.prototype names such as
+	// constructor or __proto__, which have no parser and would throw before the renderer.
 	const validParams = Object.fromEntries(
 		Object.entries(urlParams)
-			.filter(([key]) => key in paramMapping)
+			.filter(([key]) => Object.hasOwn(paramMapping, key))
 			.map(([key, value]) => [paramMapping[key].key, paramMapping[key].parser(value)])
 			.filter(([_, value]) => value != null),
 	);
@@ -668,7 +670,7 @@ export default (urlParams) => {
 	}
 
 	const version = validParams.version in versions ? versions[validParams.version] : versions.classic;
-	const fontName = [validParams.font, version.font, defaults.font].find((name) => name in fonts);
+	const fontName = [validParams.font, version.font, defaults.font].find((name) => Object.hasOwn(fonts, name));
 	const font = fonts[fontName];
 
 	const baseTextureURL = textureURLs[[version.baseTexture, defaults.baseTexture].find((name) => name in textureURLs)];
@@ -688,6 +690,9 @@ export default (urlParams) => {
 		hasBaseTexture,
 		hasGlintTexture,
 	};
+	// Only the mirror effect consumes the camera texture. A stale camera=true saved
+	// under Mirror must not open the webcam for an effect that cannot show it.
+	if (config.effect !== "mirror") config.useCamera = false;
 	if (config.scene === "uc3d" && config.uc3dControls === "original") {
 		config.animationSpeed = range(config.animationSpeed, 0, 4);
 		config.pictureScale = config.uc3dPictureScale / 100;
@@ -696,6 +701,12 @@ export default (urlParams) => {
 	}
 	if (config.scene === "uc3d" && config.uc3dControls === "legacy" && validParams.bloomStrength == null)
 		config.bloomStrength = defaults.bloomStrength;
+	// The Matrix intro sweep advances by animationSpeed * fallSpeed. At zero, or with opposite
+	// signs, it never reaches the bottom row, so the rain would stay black (or saturate).
+	if (config.scene === "matrix" && !config.skipIntro && config.animationSpeed * config.fallSpeed <= 0) {
+		console.warn(`skipIntro=false ignored: the intro cannot progress at animationSpeed ${config.animationSpeed} and fallSpeed ${config.fallSpeed}.`);
+		config.skipIntro = true;
+	}
 
 	if (config.bloomSize <= 0) {
 		config.bloomStrength = 0;

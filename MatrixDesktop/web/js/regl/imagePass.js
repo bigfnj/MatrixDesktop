@@ -9,13 +9,24 @@ export default ({ regl: nativeRegl, config }, inputs) => {
 	const owner = createResourceOwner();
 	const regl = ownRegl(owner, nativeRegl);
 	const output = makePassFBO(regl, config.useHalfFloat);
-	const bgURL = "bgURL" in config ? config.bgURL : defaultBGURL;
+	// AUD-21: url= means the default image, and an image that cannot load (offline, blocked,
+	// undecodable) leaves the rain uncoloured on a white texture instead of stopping the renderer.
+	const bgURL = config.bgURL || defaultBGURL;
 	const background = loadImage(regl, bgURL);
+	let backgroundTex = background.texture;
+	const backgroundLoaded = background.loaded.catch((error) => {
+		if (owner.closed) throw error;
+		const white = regl.texture([[255]]);
+		backgroundTex = () => white;
+		const message = `Background image ${bgURL} could not be loaded (${error?.message ?? error}); drawing the rain uncoloured.`;
+		globalThis.matrixRuntimeDiagnostics?.errors?.push(message);
+		console.warn(message);
+	});
 	const imagePassFrag = loadText("shaders/glsl/imagePass.frag.glsl");
 	const render = regl({
 		frag: regl.prop("frag"),
 		uniforms: {
-			backgroundTex: background.texture,
+			backgroundTex: () => backgroundTex(),
 			tex: inputs.primary,
 			bloomTex: inputs.bloom,
 		},
@@ -25,7 +36,7 @@ export default ({ regl: nativeRegl, config }, inputs) => {
 		{
 			primary: output,
 		},
-		Promise.all([background.loaded, imagePassFrag.loaded]),
+		Promise.all([backgroundLoaded, imagePassFrag.loaded]),
 		(w, h) => output.resize(w, h),
 		(shouldRender) => {
 			if (shouldRender) {
