@@ -1129,6 +1129,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                     # the end of the try below, and under StrictMode an early throw would
                     # otherwise make the reaped check blow up instead of reporting UNCHECKED.
                     $webviewKids = -1
+                    $publishDirsBefore = @(Get-ChildItem -LiteralPath (Split-Path $exe -Parent) -Directory -Force | ForEach-Object { $_.Name })
                     $started = Start-GateApp -Exe $exe -AppArgs $cases[$caseName]
                     $proc = $started.Process
                     $closeMethod = 'not-attempted'
@@ -1186,13 +1187,6 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                             }
                         }
 
-                        $userData = Join-Path (Split-Path $exe -Parent) 'userdata'
-                        if (Test-Path -LiteralPath $userData) {
-                            Test-Fail "smoke [$caseName] leaves no userdata beside the exe" "found $userData"
-                        } else {
-                            Test-Ok "smoke [$caseName] leaves no userdata beside the exe"
-                        }
-
                         $webviewKids = Get-WebViewDescendantCount -RootPid $proc.Id
                     } finally {
                         $closeMethod = Stop-GateProcess $proc
@@ -1212,6 +1206,25 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         } else {
                             Test-Ok "smoke [$caseName] log clean, $($records.Count) record(s) for pid $($proc.Id)"
                         }
+                    }
+
+                    # WEBVIEW2_USER_DATA_FOLDER (set above for the whole gate) replaces the folder
+                    # the app requests, so a wrong request leaves nothing on disk to find: the
+                    # app's own record is checked instead (AUD-54, Get-WebViewProfileVerdict). A
+                    # missing record is a FAIL. The publish folder is compared before and after
+                    # the case, so any folder the app itself creates beside the exe still fails.
+                    $profileVerdict = Get-WebViewProfileVerdict -Records $records `
+                        -Requested (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'MatrixDesktop\WebView2') -Effective $env:WEBVIEW2_USER_DATA_FOLDER
+                    if ($profileVerdict.Outcome -eq 'ok') {
+                        Test-Ok "smoke [$caseName] requests its WebView2 profile under LocalAppData"
+                    } else {
+                        Test-Fail "smoke [$caseName] requests its WebView2 profile under LocalAppData" $profileVerdict.Detail
+                    }
+                    $newPublishDirs = @(Get-NewTopLevelDirectories -Path (Split-Path $exe -Parent) -Before $publishDirsBefore)
+                    if ($newPublishDirs.Count -gt 0) {
+                        Test-Fail "smoke [$caseName] creates no folder beside the exe" "new in $(Split-Path $exe -Parent): $($newPublishDirs -join ', ')"
+                    } else {
+                        Test-Ok "smoke [$caseName] creates no folder beside the exe"
                     }
 
                     if ($closeMethod -eq 'WM_CLOSE') {

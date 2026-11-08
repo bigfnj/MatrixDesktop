@@ -236,6 +236,53 @@ function Get-CiWaitDecision {
     return 'fail'
 }
 
+# ---------------------------------------------------------------- WebView2 profile
+
+# The gate gives every case a private WEBVIEW2_USER_DATA_FOLDER, which WebView2 uses in place
+# of the folder MainForm requests, so nothing on disk shows where the product would put its
+# profile (AUD-54). MainForm logs 'WebView2 profile requested=<path> effective=<path>' once per
+# initialisation. A case needs exactly one such INFO record for its pid, requesting $Requested
+# and running on $Effective; paths compare case-insensitively after normalisation.
+function Get-WebViewProfileVerdict {
+    param(
+        [AllowEmptyCollection()][object[]]$Records = @(),
+        [Parameter(Mandatory = $true)][string]$Requested,
+        [Parameter(Mandatory = $true)][string]$Effective
+    )
+    $pattern = '^WebView2 profile requested=(?<requested>.*?) effective=(?<effective>.*)$'
+    $found = @($Records | Where-Object { $null -ne $_ -and $_.Level -eq 'INFO' -and $_.Msg -match $pattern })
+    if ($found.Count -ne 1) {
+        return [pscustomobject]@{ Outcome = 'fail'; Detail = "expected one 'WebView2 profile requested=... effective=...' record for the case pid, found $($found.Count)" }
+    }
+    $m = [regex]::Match($found[0].Msg, $pattern)
+    $problems = @()
+    if (-not (Test-SamePath $m.Groups['requested'].Value $Requested)) { $problems += "requested '$($m.Groups['requested'].Value)', expected '$Requested'" }
+    if (-not (Test-SamePath $m.Groups['effective'].Value $Effective)) { $problems += "effective '$($m.Groups['effective'].Value)', expected '$Effective'" }
+    if ($problems.Count -gt 0) { return [pscustomobject]@{ Outcome = 'fail'; Detail = $problems -join '; ' } }
+    return [pscustomobject]@{ Outcome = 'ok'; Detail = "requested $Requested, effective $Effective" }
+}
+
+function Test-SamePath {
+    param([string]$A, [string]$B)
+    if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
+    try {
+        $fullA = [IO.Path]::GetFullPath($A).TrimEnd('\', '/')
+        $fullB = [IO.Path]::GetFullPath($B).TrimEnd('\', '/')
+    } catch { return $false }
+    return [string]::Equals($fullA, $fullB, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# Top-level folders under $Path that are not in the $Before snapshot, sorted. Replaces a
+# Test-Path for one literal 'userdata' name: any folder the app creates beside the exe counts.
+function Get-NewTopLevelDirectories {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowEmptyCollection()][string[]]$Before = @()
+    )
+    return @(Get-ChildItem -LiteralPath $Path -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $Before -notcontains $_.Name } | ForEach-Object { $_.Name } | Sort-Object)
+}
+
 # ---------------------------------------------------------------- publish profile parity
 
 # The property elements of every PropertyGroup in an MSBuild file, as Name/Value pairs.

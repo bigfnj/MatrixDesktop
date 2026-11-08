@@ -457,6 +457,43 @@ try {
         Assert-Equal 'fail' $old.Outcome 'the registered case against the old stand-in'
     }
 
+    # ------------------------------------------------------------ AUD-54 WebView2 profile record
+
+    function New-Record { param([string]$Level, [string]$Msg) [pscustomobject]@{ Level = $Level; Msg = $Msg } }
+
+    Invoke-TestCase 'AUD-54 (a) exactly one profile record, requesting LocalAppData and running on the gate override' {
+        $want = 'C:\Users\Someone\AppData\Local\MatrixDesktop\WebView2'
+        $override = 'D:\repo with space\artifacts\gate\webview-profile'
+        $start = New-Record 'INFO' 'MatrixDesktop starting'
+        $good = New-Record 'INFO' "WebView2 profile requested=$want effective=$override"
+        Assert-Equal 'ok' (Get-WebViewProfileVerdict -Records @($start, $good) -Requested $want -Effective $override).Outcome 'the correct record'
+        $spelled = New-Record 'INFO' "WebView2 profile requested=$($want.ToLowerInvariant())\ effective=$override\"
+        Assert-Equal 'ok' (Get-WebViewProfileVerdict -Records @($spelled) -Requested $want -Effective $override).Outcome 'case and a trailing separator do not matter'
+        $none = Get-WebViewProfileVerdict -Records @($start) -Requested $want -Effective $override
+        Assert-Equal 'fail' $none.Outcome 'no record is a FAIL, not a pass'
+        if ($none.Detail -notlike '*found 0') { throw "the failure does not say no record was found ($($none.Detail))" }
+        Assert-Equal 'fail' (Get-WebViewProfileVerdict -Records @() -Requested $want -Effective $override).Outcome 'an empty log'
+        Assert-Equal 'fail' (Get-WebViewProfileVerdict -Records @($good, $good) -Requested $want -Effective $override).Outcome 'two initialisations in one case'
+        Assert-Equal 'fail' (Get-WebViewProfileVerdict -Records @((New-Record 'WARN' $good.Msg)) -Requested $want -Effective $override).Outcome 'only an INFO record counts'
+        $beside = Get-WebViewProfileVerdict -Records @((New-Record 'INFO' "WebView2 profile requested=D:\publish\userdata effective=$override")) -Requested $want -Effective $override
+        Assert-Equal 'fail' $beside.Outcome 'a profile requested beside the exe (mutation A)'
+        if ($beside.Detail -notlike "requested 'D:\publish\userdata', expected*") { throw "the failure does not name the request ($($beside.Detail))" }
+        Assert-Equal 'fail' (Get-WebViewProfileVerdict -Records @((New-Record 'INFO' "WebView2 profile requested= effective=$override")) -Requested $want -Effective $override).Outcome 'an empty request (mutation B)'
+        Assert-Equal 'fail' (Get-WebViewProfileVerdict -Records @((New-Record 'INFO' "WebView2 profile requested=$want effective=$want")) -Requested $want -Effective $override).Outcome 'the override was not in effect'
+    }
+
+    Invoke-TestCase 'AUD-54 (b) any new top-level folder beside the exe is reported, existing ones and files are not' {
+        $publish = Join-Path $scratch 'publish'
+        foreach ($dir in 'web', 'configurator') { New-Item -ItemType Directory -Force -Path (Join-Path $publish $dir) | Out-Null }
+        $before = @(Get-ChildItem -LiteralPath $publish -Directory -Force | ForEach-Object { $_.Name })
+        Assert-Equal 0 @(Get-NewTopLevelDirectories -Path $publish -Before $before).Count 'nothing changed'
+        [void](New-StubFile 'publish\MatrixDesktop.log' "a file, not a folder`n")
+        New-Item -ItemType Directory -Force -Path (Join-Path $publish 'web\cache') | Out-Null
+        Assert-Equal 0 @(Get-NewTopLevelDirectories -Path $publish -Before $before).Count 'a new file or a nested folder is not a top-level folder'
+        foreach ($dir in 'userdata', 'MatrixDesktop.exe.WebView2') { New-Item -ItemType Directory -Force -Path (Join-Path $publish $dir) | Out-Null }
+        Assert-Equal 'MatrixDesktop.exe.WebView2,userdata' ((Get-NewTopLevelDirectories -Path $publish -Before $before) -join ',') 'both new folders, whatever their names'
+    }
+
     Invoke-TestCase 'AUD-28 (f) the newest CI run on the tagged commit decides, and no run is a failure' {
         function New-Run { param([long]$Id, [string]$Status, [string]$Conclusion) [pscustomobject]@{ id = $Id; status = $Status; conclusion = $Conclusion } }
         Assert-Equal 'missing' (Get-CiCheckVerdict -CheckRuns @()).Outcome 'CI never ran on the commit'
