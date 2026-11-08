@@ -129,7 +129,6 @@ ACCEPTED-RECORDED with checkable evidence.
 | AUD-59 | low | README says a missing WebGPU adapter reports unverified coverage, but the calibration command it documents exits 1 instead |
 | AUD-60 | low | BACKLOG 'Picking this up cold' points to trap details that do not exist and its coverage map omits every v1.2.0 test layer |
 | AUD-61 | low | Docs name a 'Restore previous screensaver' control; the configurator button is labelled 'Restore screensaver' |
-| AUD-62 | low | BACKLOG still lists two measured non-defects as 'Upstream, reportable to Rezmason/matrix', plus a fixed per-frame layout read under 'Watching, not acting' |
 | AUD-63 | info | InvariantGlobalization, presented as part of the portable optimization, reaches only the local pubxml publish, not the release zip or the gate-verified payload |
 | AUD-64 | medium | The renderer clock never rebases, so float32 time degrades a long-running wallpaper: rain motion drops to 32 Hz after about 3 days of active time and 16 Hz after about 6, high speeds lose trail levels within hours, and the WebGPU palette/stripe dither turns into screen-wide blocks within hours |
 | AUD-65 | low | The regl symbol pass compares a float32 frame counter, so after 2^24 active frames (78 h at 60 Hz, 32 h at 144 Hz) Operator and Palimpsest glyphs cycle 3x too fast, then 5x and 8x |
@@ -234,7 +233,7 @@ analyzers at AnalysisMode=All; they were leads for the finders, not findings. 77
 | AUD-59 | README says a missing WebGPU adapter reports unverified coverage, but the calibration command it documents exits 1 instead | OPEN, planned FIXED | Found at README.md:605-617, main.js:81, uc3d-browser.py:82-88. |
 | AUD-60 | BACKLOG 'Picking this up cold' points to trap details that do not exist and its coverage map omits every v1.2.0 test layer | OPEN, planned FIXED | Found at BACKLOG.md:44-48, bloomPass.js:61-85, run-gate.ps1:481-494, SMOKE_TEST_PLAN.md:71-125. |
 | AUD-61 | Docs name a 'Restore previous screensaver' control; the configurator button is labelled 'Restore screensaver' | OPEN, planned FIXED | Found at README.md:41, MatrixDesktop_Argument_Guide.txt:1014, docs/ZMATRIX.md:116, index.html:68, app.js:51, BACKLOG.md:87. |
-| AUD-62 | BACKLOG still lists two measured non-defects as 'Upstream, reportable to Rezmason/matrix', plus a fixed per-frame layout read under 'Watching, not acting' | OPEN, planned FIXED | Found at BACKLOG.md:210, bloomPass.js:20-21, renderer-lifecycle.mjs:57-77. |
+| AUD-62 | BACKLOG still lists two measured non-defects as 'Upstream, reportable to Rezmason/matrix', plus a fixed per-frame layout read under 'Watching, not acting' | FIXED | The heading now reads "Suspected upstream defects, measured and withdrawn" and carries the probe's numbers (`tests/bloom-probe.py:111,115` asserts zero changed bytes; the 0/8192 and 0/3404 counts are the v1.2.0 row) and the placeholder's current ownership (`web/js/regl/bloomPass.js:20-21`, `:26-30`). The six v1.0.2 bullets fixed in v1.2.0 and the "Watching, not acting" layout read are struck through with a pointer to their FIXED rows; no row was deleted. Documentation only; the optional structural BACKLOG test was not added (decision table). |
 | AUD-63 | InvariantGlobalization, presented as part of the portable optimization, reaches only the local pubxml publish, not the release zip or the gate-verified payload | OPEN, planned FIXED | Found at run-gate.ps1:934-947, README.md:237-243, FlagNormalization.cs:34, ZMatrixCfgImporter.cs:49. |
 | AUD-64 | The renderer clock never rebases, so float32 time degrades a long-running wallpaper: rain motion drops to 32 Hz after about 3 days of active time and 16 Hz after about 6, high speeds lose trail levels within hours, and the WebGPU palette/stripe dither turns into screen-wide blocks within hours | OPEN, planned FIXED | Found at hostPlayback.js:45-55, regl/main.js:139, webgpu/main.js:136,220, rainPass.raindrop.frag.glsl:21,53-58, rainPass.wgsl:55,165-176, palettePass.wgsl:62,67. |
 | AUD-65 | The regl symbol pass compares a float32 frame counter, so after 2^24 active frames (78 h at 60 Hz, 32 h at 144 Hz) Operator and Palimpsest glyphs cycle 3x too fast, then 5x and 8x | OPEN, planned FIXED | Found at rainPass.symbol.frag.glsl:14,44, regl/main.js:138-139,154,183-189, regl/utils.js:121-125, rainPass.js:111-120,324, config.js:207,373. |
@@ -532,7 +531,8 @@ Found and verified during that pass, deliberately not fixed. Each says why.
   the cell count along the *longer* axis, so the renderer drew about seven columns instead
   of eighty. The same one line was also pushing the entire command panel off the bottom of
   the window, which nobody had noticed. See `tests/web-smoke.py`.
-- **Release symbols are stripped, so crash diagnostics lost line numbers.** `DebugType=none`
+- ~~**Release symbols are stripped, so crash diagnostics lost line numbers.**~~ **Fixed in
+  v1.2.0**: see "Release builds carry no line numbers" under Post-push v1.2.0 audit. `DebugType=none`
   in Release keeps the payload lean, but `CrashDumpWriter` writes `ex.ToString()` into the
   log and that only carries line numbers when debug info is present at runtime. Recommended
   fix is `DebugType=embedded`, which emits no separate `.pdb` (so the payload stays clean and
@@ -550,39 +550,51 @@ Found and verified during that pass, deliberately not fixed. Each says why.
   One consequence worth knowing: `DraftRandomizer` has always set `glyphIntensity` to
   0.8 to 2.4, so a preset saved from Randomize before v1.0.4 carries a value that did
   nothing then and does something now.
-- **CI and the gate now duplicate work.** `ci.yml` builds and publishes, and then the gate
+- ~~**CI and the gate now duplicate work.**~~ **Fixed in v1.2.0**: see "CI and gate duplicate
+  build/publish" under Post-push v1.2.0 audit. `ci.yml` builds and publishes, and then the gate
   builds and publishes again. Consolidating means deciding whether CI keeps its own payload
   assertions or defers entirely to `tests/run-gate.ps1`.
 - ~~**Generate the guide's flag reference from `ArgumentCatalog`.**~~ **Done in v1.0.5**, as a
   cross-check rather than generation. See the v1.0.3 section below for why.
-- **The two boolean parsers disagree.** A wrapper flag treats any value containing "true" as
+- ~~**The two boolean parsers disagree.**~~ **Fixed in v1.2.0**: see "Boolean parsers
+  disagree" under Post-push v1.2.0 audit. A wrapper flag treats any value containing "true" as
   true (`Shared/FlagNormalization.ParseBool`), while a web flag requires exactly "true"
   (`web/js/config.js:402`). So `--topmost truthy` is true and `--camera truthy` is false.
   Harmless for realistic input, but it is a real inconsistency now that wrapper flags honour
   explicit values.
 
-### Upstream, reportable to Rezmason/matrix
+### Suspected upstream defects, measured and withdrawn
 
-Neither has a user-visible effect on a supported MatrixDesktop path, which is why they were
-left alone under the vendoring policy in `VENDORING.md`.
+Both were suspected here and measured in v1.2.0; neither changes a rendered byte, so there is
+nothing to report upstream. `tests/bloom-probe.py` forces the WGSL LOD to zero and changes 0 of
+8192 bytes (a halved-contribution witness changes 6719), and changes the REGL placeholder's
+format for 0 of 3404 bytes (a non-black witness changes 3404); see "Two upstream shader/FBO
+defects" under Post-push v1.2.0 audit. The placeholder FBO is now created with
+`config.useHalfFloat` and released by the pass's resource owner
+(`web/js/regl/bloomPass.js:20-21`, `:26-30`).
 
-- `shaders/wgsl/bloomCombine.wgsl` samples mip levels 1 to 4 from textures created with a
+- ~~`shaders/wgsl/bloomCombine.wgsl` samples mip levels 1 to 4 from textures created with a
   single mip, left over from a superseded pyramid design, so the weighting is not what the
-  shader intends.
-- `js/regl/bloomPass.js` builds its no-bloom placeholder FBO without `config.useHalfFloat`
+  shader intends.~~ Measured: no effect on output.
+- ~~`js/regl/bloomPass.js` builds its no-bloom placeholder FBO without `config.useHalfFloat`
   and never resizes or destroys it, so it stays a 1x1 uint8 target whose format can mismatch
-  the primary.
+  the primary.~~ Measured: no effect on output; the placeholder now honours `useHalfFloat` and
+  is owned.
 
 ### Renderer parity, larger scope
 
-- **No `quiltPass` in the WebGPU pipeline.** `--version holoplay --renderer webgpu` silently
+- ~~**No `quiltPass` in the WebGPU pipeline.**~~ **Fixed in v1.2.0**: see "WebGPU lacks a quilt
+  pass" under Post-push v1.2.0 audit (Holoplay routes to REGL before any WebGPU adapter probe).
+  `--version holoplay --renderer webgpu` silently
   drops the entire Looking Glass feature that `--renderer regl` engages. Fixing it means
   porting the quilt pass; documenting it may be the better answer.
-- **`version=holoplay` on ordinary hardware renders garbage.** `lkgHelper` falls back to a
+- ~~**`version=holoplay` on ordinary hardware renders garbage.**~~ **Fixed in v1.2.0**: see
+  "Ordinary hardware gets fake Holoplay calibration" under Post-push v1.2.0 audit. `lkgHelper` falls back to a
   hardcoded recorded device, so the lenticular interlace is drawn onto a normal monitor. The
   three-second timeout added in the v1.0.2 pass stops it hanging, but the fallback itself is
   still wrong.
-- **Per-pass GPU disposal is incomplete.** `cleanup()` is now reachable (it runs on
+- ~~**Per-pass GPU disposal is incomplete.**~~ **Fixed in v1.2.0**: see "GPU disposal
+  incomplete" under Post-push v1.2.0 audit. `cleanup()` is now reachable (it runs on
   `pagehide`), which makes the existing listener and camera teardown effective, but several
   WebGPU one-shot allocations still pass no cleanup callback and there is no `.destroy()`
   anywhere under `js/regl/`. The browser reclaims these on context loss, so this is hygiene
@@ -629,7 +641,9 @@ left alone under the vendoring policy in `VENDORING.md`.
 
 ### Watching, not acting
 
-- **WebGPU reads `canvas.clientWidth` every frame.** `webgpu/main.js:172` recomputes the
+- ~~**WebGPU reads `canvas.clientWidth` every frame.**~~ **Fixed in v1.2.0**: see "WebGPU reads
+  layout every frame" under Post-push v1.2.0 audit (`canvasSize.js` caches CSS dimensions with a
+  ResizeObserver). `webgpu/main.js:172` recomputes the
   canvas size per frame where `regl/main.js:42` correctly does it on a `resize` event. Real,
   but it is the non-default renderer, the read is cheap while layout is clean, and rewiring
   the frame loop's resize path risks more than it saves. Revisit if WebGPU becomes default.
