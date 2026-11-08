@@ -18,8 +18,9 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     private MainForm? _form;
     private nint _parent;
     private bool _exiting, _recovering, _reconciling, _reconcileRequested, _ready;
-    private long _retryAt;
+    private long _retryAt, _readySince;
     private int _retryCount;
+    private readonly RendererFailurePolicy _rendererFailures = new();
     private uint _screensaverInputTick;
     private readonly DesktopPointerBridge? _pointer;
     private WallpaperInstanceGuard? _instance;
@@ -135,7 +136,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             _form = form;
             _ready = false;
             form.FormClosed += OnSurfaceClosed;
-            form.RendererReady += (_, _) => { _ready = true; _retryCount = 0; _ = ReconcilePauseAsync(); };
+            form.RendererReady += (_, _) => { _ready = true; _readySince = Environment.TickCount64; _ = ReconcilePauseAsync(); };
+            form.RendererFailed += OnRendererFailed;
             if (_wallpaper || _plan.IsPreview)
             {
                 _ = form.Handle;
@@ -182,6 +184,29 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         SetPause(PauseReason.ShellRecovery, true);
     }
 
+    // A failed WebView2 process left the surface blank until an unrelated shell event. A reload
+    // stays inside the surface; a lost or exhausted renderer is rebuilt after the same capped
+    // backoff as any lost wallpaper surface, and ends every other host.
+    private void OnRendererFailed(object? sender, RendererFailureKind kind)
+    {
+        if (_exiting || sender is not MainForm surface || !ReferenceEquals(surface, _form)) return;
+        var action = _rendererFailures.Decide(kind, _wallpaper, Environment.TickCount64);
+        if (action == RendererFailureAction.LogOnly) return;
+        Shared.Logger.Warn($"Renderer failure {kind}: {action}.");
+        _ready = false;
+        _pointer?.SetEnabled(false);
+        if (action == RendererFailureAction.Reload && surface.ReloadRenderer()) return;
+        // A dead browser process can make the close throw; never leave a half-closed surface.
+        _form = null;
+        surface.FormClosed -= OnSurfaceClosed;
+        try { surface.Close(); } catch (Exception error) { Shared.Logger.Warn($"The failed renderer surface did not close cleanly: {error.Message}"); }
+        try { surface.Dispose(); } catch (Exception error) { Shared.Logger.Warn($"The failed renderer surface did not dispose cleanly: {error.Message}"); }
+        if (action == RendererFailureAction.Exit || !_wallpaper) { ExitThread(); return; }
+        _parent = 0;
+        _retryAt = Environment.TickCount64 + SurfaceClosePolicy.RetryDelayMs(_retryCount++);
+        SetPause(PauseReason.ShellRecovery, true);
+    }
+
     private void RecoverSurface()
     {
         if (_exiting) return;
@@ -212,6 +237,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         }
         if (_form is null) { if (Environment.TickCount64 >= _retryAt) TryCreateSurface(); return; }
         if (!DesktopWindowHost.IsUsable(_parent) || DesktopWindowHost.ParentOf(_form.Handle) != _parent) { RecoverSurface(); return; }
+        if (_retryCount > 0 && RendererFailurePolicy.StayedHealthy(_ready, _readySince, Environment.TickCount64)) _retryCount = 0;
         SetPause(PauseReason.Fullscreen, _options.WallpaperPauseFullscreen && DesktopWindowHost.ForegroundCoversAnyMonitor(Screen.AllScreens.Select(screen => screen.Bounds)));
         SetPause(PauseReason.Battery, _options.WallpaperPauseBattery && SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline);
         _pointer?.SetEnabled(_ready && !_playback.Paused);

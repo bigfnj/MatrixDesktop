@@ -99,6 +99,23 @@ internal static class HostWiring
         failures += Run($"the tray refreshes Start with Windows when its menu opens: {path}", () =>
             Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::CreateTray" && call.Callee == "System.Windows.Forms.ToolStripDropDown::add_Opening"),
                 "CreateTray must subscribe the menu's Opening, so another launch's or the configurator's shortcut change shows"));
+        // AUD-07. RendererFailurePolicy has its own tests; these prove WebView2 failures reach it.
+        failures += Run($"WebView2 process failures reach RendererFailurePolicy: {path}", () =>
+        {
+            Check.True(calls.Any(call => call.Caller.StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal) && call.Callee == "Microsoft.Web.WebView2.Core.CoreWebView2::add_ProcessFailed"),
+                "MainForm must subscribe CoreWebView2.ProcessFailed");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::DetachWebViewHandlers" && call.Callee == "Microsoft.Web.WebView2.Core.CoreWebView2::remove_ProcessFailed"),
+                "MainForm must detach its ProcessFailed handler with the others");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::TryCreateSurface" && call.Callee == "MatrixDesktop.MainForm::add_RendererFailed"),
+                "the context must subscribe every surface's RendererFailed");
+            var handler = calls.Where(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::OnRendererFailed").Select(call => call.Callee).ToList();
+            Check.True(handler.Contains("MatrixDesktop.RendererFailurePolicy::Decide") && handler.Contains("MatrixDesktop.MainForm::ReloadRenderer"),
+                "the context must decide through RendererFailurePolicy and reload through the surface");
+            Check.True(handler.Contains("MatrixDesktop.SurfaceClosePolicy::RetryDelayMs"),
+                "a lost renderer must be rebuilt after the capped backoff, never in a tight loop");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::OnTick" && call.Callee == "MatrixDesktop.RendererFailurePolicy::StayedHealthy"),
+                "the wallpaper tick must reset the rebuild backoff only once a renderer stayed ready");
+        });
         return failures;
     }
 

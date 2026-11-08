@@ -24,6 +24,8 @@ public sealed class MainForm : Form
     internal bool IsWallpaper => _appOptions is not null && _appOptions.WindowMode == WindowMode.Wallpaper && _launchPlan is not null && !_launchPlan.IsScreensaver && !_launchPlan.IsPreview;
     private System.Drawing.Rectangle CaptureBounds => IsWallpaper || _launchPlan.IsPreview ? SystemInformation.VirtualScreen : Bounds;
     internal event EventHandler? RendererReady;
+    // Raised after a WebView2 process failed, outside WebView2's own callback; the host decides.
+    internal event EventHandler<RendererFailureKind>? RendererFailed;
     // Set by FailStartup before its dialog and close; the host reads it in FormClosed.
     internal bool StartupFailed { get; private set; }
 
@@ -38,6 +40,9 @@ public sealed class MainForm : Form
     // Stored so we can detach on shutdown.
     private EventHandler<CoreWebView2NewWindowRequestedEventArgs>? _newWindowRequestedHandler;
     private EventHandler<CoreWebView2NavigationStartingEventArgs>? _navigationStartingHandler;
+    private EventHandler<CoreWebView2ProcessFailedEventArgs>? _processFailedHandler;
+    // The page this surface navigated to, so a lost renderer can be sent back to it.
+    private string? _rendererTarget;
 
     private bool _isShuttingDown;
     private bool _webViewInitializationStarted;
@@ -731,6 +736,23 @@ public sealed class MainForm : Form
         };
         _webView.CoreWebView2.NavigationStarting += _navigationStartingHandler;
 
+        // A failed renderer or browser process left the page blank for good. Log what failed and
+        // let the host respond after this callback returns: the response may navigate or close
+        // this WebView, which must not happen inside WebView2's own event.
+        _processFailedHandler = (_, failure) =>
+        {
+            Shared.Logger.Warn($"WebView2 process failed: {DescribeProcessFailure(failure)}.");
+            var kind = failure.ProcessFailedKind switch
+            {
+                CoreWebView2ProcessFailedKind.BrowserProcessExited => RendererFailureKind.BrowserProcessExited,
+                CoreWebView2ProcessFailedKind.RenderProcessExited => RendererFailureKind.RenderProcessExited,
+                CoreWebView2ProcessFailedKind.RenderProcessUnresponsive => RendererFailureKind.RenderProcessUnresponsive,
+                _ => RendererFailureKind.Other,
+            };
+            MarshalToUiThread(() => { if (!_isShuttingDown) RendererFailed?.Invoke(this, kind); }, "renderer process failure");
+        };
+        _webView.CoreWebView2.ProcessFailed += _processFailedHandler;
+
         string webRoot;
         try
         {
@@ -767,7 +789,27 @@ public sealed class MainForm : Form
                 ScreensaverWindowPolicy.RendererReady(_launchPlan,
                     () => RendererReady?.Invoke(this, EventArgs.Empty), TryBeginForegroundEnforce);
         };
+        _rendererTarget = target;
         _webView.CoreWebView2.Navigate(target);
+    }
+
+    private static string DescribeProcessFailure(CoreWebView2ProcessFailedEventArgs failure)
+    {
+        var text = $"kind={failure.ProcessFailedKind}";
+        try { text += $", reason={failure.Reason}, exitCode={failure.ExitCode}, process='{failure.ProcessDescription}'"; }
+        catch (Exception error) { text += $" (details unavailable: {error.Message})"; }
+        return text;
+    }
+
+    // Sends a surface whose renderer was lost back to its page. False when it cannot, so the
+    // host treats the surface as lost instead of leaving it blank.
+    internal bool ReloadRenderer()
+    {
+        if (_isShuttingDown || IsDisposed || _webView.CoreWebView2 is null) return false;
+        // Before the first navigation there is nothing to reload: that navigation is still ahead.
+        if (_rendererTarget is null) return true;
+        try { _webView.CoreWebView2.Navigate(_rendererTarget); return true; }
+        catch (Exception error) { Shared.Logger.Warn($"Could not reload the renderer: {error.Message}"); return false; }
     }
 
     private async Task RetryWebViewInitializationAfterCatastrophicFailureAsync(COMException firstException)
@@ -851,6 +893,12 @@ public sealed class MainForm : Form
             {
                 try { core.NavigationStarting -= _navigationStartingHandler; } catch { }
                 _navigationStartingHandler = null;
+            }
+
+            if (_processFailedHandler is not null)
+            {
+                try { core.ProcessFailed -= _processFailedHandler; } catch { }
+                _processFailedHandler = null;
             }
         }
         catch

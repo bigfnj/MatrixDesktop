@@ -17,7 +17,55 @@ internal static class HostLifecyclePolicyTests
         ("Host wallpaper guard lets the newest launch take over and leaves other scopes alone", WallpaperTakeover),
         ("Host wallpaper guard scope keeps isolated test launches away from the owner's wallpaper", WallpaperScope),
         ("Host wallpaper guard that cannot open its objects lets the launch run and says why", WallpaperGuardUnavailable),
+        ("Host renderer process failure reloads, rebuilds or exits as WebView2 requires", RendererFailure),
     ];
+
+    // AUD-07. Nothing handled CoreWebView2.ProcessFailed, so a lost renderer left a wallpaper
+    // blank until an unrelated shell event. The host side (MainForm subscribes and forwards, the
+    // context asks this policy) is checked on the published dll by HostWiring.
+    private static void RendererFailure()
+    {
+        const long start = 1_000_000;
+        foreach (var wallpaper in new[] { true, false })
+            Check.Equal(RendererFailureAction.Reload, new RendererFailurePolicy().Decide(RendererFailureKind.RenderProcessExited, wallpaper, start),
+                $"a lost main-frame renderer must be reloaded (wallpaper={wallpaper})");
+        Check.Equal(RendererFailureAction.Recreate, new RendererFailurePolicy().Decide(RendererFailureKind.BrowserProcessExited, true, start),
+            "a lost browser process closes the WebView, so a wallpaper must rebuild its surface");
+        Check.Equal(RendererFailureAction.Exit, new RendererFailurePolicy().Decide(RendererFailureKind.BrowserProcessExited, false, start),
+            "a lost browser process ends a fullscreen, screensaver or preview host");
+        foreach (var wallpaper in new[] { true, false })
+            Check.Equal(RendererFailureAction.LogOnly, new RendererFailurePolicy().Decide(RendererFailureKind.Other, wallpaper, start),
+                $"WebView2 restarts GPU, utility and other processes itself (wallpaper={wallpaper})");
+
+        // An unresponsive renderer is reported again about every 15 s while it stays hung.
+        var hung = new RendererFailurePolicy();
+        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start), "one unresponsive report only logs");
+        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 15_000), "two unresponsive reports only log");
+        Check.Equal(RendererFailureAction.Reload, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 30_000), "three consecutive unresponsive reports reload the page");
+        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 45_000), "a reload starts the unresponsive count over");
+        var answered = new RendererFailurePolicy();
+        answered.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start);
+        answered.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 15_000);
+        Check.Equal(RendererFailureAction.LogOnly, answered.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 15_000 + RendererFailurePolicy.UnresponsiveGapMs + 1),
+            "a renderer that answered between reports (a gap over two intervals) starts a new count");
+
+        // Reloads are budgeted: a renderer that dies on every load is rebuilt or ends the host.
+        foreach (var (wallpaper, exhausted) in new[] { (true, RendererFailureAction.Recreate), (false, RendererFailureAction.Exit) })
+        {
+            var crashing = new RendererFailurePolicy();
+            for (var i = 0; i < RendererFailurePolicy.ReloadBudget; i++)
+                Check.Equal(RendererFailureAction.Reload, crashing.Decide(RendererFailureKind.RenderProcessExited, wallpaper, start + i * 1000), $"reload {i + 1} is within the budget (wallpaper={wallpaper})");
+            Check.Equal(exhausted, crashing.Decide(RendererFailureKind.RenderProcessExited, wallpaper, start + 5000), $"a failure past the reload budget must not reload again (wallpaper={wallpaper})");
+            Check.Equal(RendererFailureAction.Reload, crashing.Decide(RendererFailureKind.RenderProcessExited, wallpaper, start + RendererFailurePolicy.ReloadWindowMs),
+                $"the budget refills once the first reload is ten minutes old (wallpaper={wallpaper})");
+        }
+        Check.Equal(3, RendererFailurePolicy.ReloadBudget, "three reloads per window");
+        Check.Equal(600_000L, RendererFailurePolicy.ReloadWindowMs, "the reload window is ten minutes");
+
+        Check.False(RendererFailurePolicy.StayedHealthy(true, start, start + 59_999), "a renderer ready for under a minute keeps the rebuild backoff");
+        Check.True(RendererFailurePolicy.StayedHealthy(true, start, start + 60_000), "a renderer ready for a minute resets the rebuild backoff");
+        Check.False(RendererFailurePolicy.StayedHealthy(false, start, start + 600_000), "a renderer that is not ready never resets the backoff");
+    }
 
     // An elevated wallpaper creates the guard's objects with a High label, so a normal launch is
     // refused when it opens them; that must not throw out of the launch. A different-type object

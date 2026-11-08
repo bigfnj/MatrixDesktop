@@ -80,3 +80,65 @@ internal static class SurfaceClosePolicy
     internal static SurfaceCloseDecision Decide(bool wallpaper, bool startupFailed, int consecutiveFailures) =>
         wallpaper && !startupFailed ? new(false, RetryDelayMs(consecutiveFailures)) : new(true, 0);
 }
+
+// What the host does when a WebView2 process fails. Nothing handled ProcessFailed, so a lost
+// renderer left a long-running wallpaper blank until an unrelated shell event. Per WebView2's
+// guidance: a lost browser process needs a new WebView, a lost main-frame renderer can be
+// reloaded, an unresponsive renderer is reported again about every 15 s until it answers, and
+// WebView2 restarts every other process itself. These kinds are this file's own, so the core
+// harness can test the table without WebView2.
+internal enum RendererFailureKind { Other, BrowserProcessExited, RenderProcessExited, RenderProcessUnresponsive }
+
+internal enum RendererFailureAction { LogOnly, Reload, Recreate, Exit }
+
+internal sealed class RendererFailurePolicy
+{
+    internal const int ReloadBudget = 3;
+    internal const long ReloadWindowMs = 10 * 60 * 1000;
+    internal const int UnresponsiveLimit = 3;
+    // A longer gap than two report intervals means the renderer answered in between.
+    internal const long UnresponsiveGapMs = 30_000;
+    // The host's rebuild backoff starts over only after a renderer stayed ready this long, so one
+    // that fails right after every load backs off instead of being rebuilt every 500 ms.
+    internal const long HealthyAfterMs = 60_000;
+
+    private readonly Queue<long> _reloads = new();
+    private int _unresponsive;
+    private long _lastUnresponsiveMs;
+
+    internal RendererFailureAction Decide(RendererFailureKind kind, bool wallpaper, long nowMs)
+    {
+        switch (kind)
+        {
+            case RendererFailureKind.BrowserProcessExited:
+                return Lost(wallpaper);
+            case RendererFailureKind.RenderProcessExited:
+                return Reload(wallpaper, nowMs);
+            case RendererFailureKind.RenderProcessUnresponsive:
+                _unresponsive = _unresponsive > 0 && nowMs - _lastUnresponsiveMs <= UnresponsiveGapMs ? _unresponsive + 1 : 1;
+                _lastUnresponsiveMs = nowMs;
+                return _unresponsive < UnresponsiveLimit ? RendererFailureAction.LogOnly : Reload(wallpaper, nowMs);
+            default:
+                return RendererFailureAction.LogOnly;
+        }
+    }
+
+    internal static bool StayedHealthy(bool ready, long readySinceMs, long nowMs) => ready && nowMs - readySinceMs >= HealthyAfterMs;
+
+    // Reloads are budgeted, so a renderer that dies on every load is rebuilt (wallpaper, with the
+    // host's capped backoff) or ends the host instead of reloading in a tight loop.
+    private RendererFailureAction Reload(bool wallpaper, long nowMs)
+    {
+        while (_reloads.Count > 0 && nowMs - _reloads.Peek() >= ReloadWindowMs) _reloads.Dequeue();
+        if (_reloads.Count >= ReloadBudget) return Lost(wallpaper);
+        _unresponsive = 0;
+        _reloads.Enqueue(nowMs);
+        return RendererFailureAction.Reload;
+    }
+
+    private RendererFailureAction Lost(bool wallpaper)
+    {
+        _unresponsive = 0;
+        return wallpaper ? RendererFailureAction.Recreate : RendererFailureAction.Exit;
+    }
+}
