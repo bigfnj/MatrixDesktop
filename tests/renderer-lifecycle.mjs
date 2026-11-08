@@ -8,7 +8,7 @@ import { wantsWebGPU } from "../MatrixDesktop/web/js/rendererChoice.js";
 import makeConfig from "../MatrixDesktop/web/js/config.js";
 import getLKG from "../MatrixDesktop/web/js/regl/lkgHelper.js";
 import { makePipeline, loadTexture } from "../MatrixDesktop/web/js/webgpu/utils.js";
-import { createShaderTime, rebaseLimits, shaderTick } from "../MatrixDesktop/web/js/shaderTime.js";
+import { createShaderTime, introSafeLimits, rebaseLimits, shaderTick } from "../MatrixDesktop/web/js/shaderTime.js";
 import createClickRipples from "../MatrixDesktop/web/js/clickRipples.js";
 
 const root = new URL("../MatrixDesktop/web/", import.meta.url);
@@ -473,6 +473,57 @@ await test("shader time stays small over days and moves its origin only when the
 	ripples.cleanup();
 });
 
+// R2-20: whether every column's intro has passed the bottom row at a shader time, from the
+// column offsets in rainPass.intro.frag.glsl and rainPass.wgsl (WebGPU divides the column by
+// the row count, so volumetric density above 1 reaches the sine term's lower half). Done means
+// no brightness boost (1 - 5 * progress) and the cell below counts as activated.
+const introDone = (config, shaderSeconds) => {
+	const rows = config.numColumns, columns = Math.max(1, Math.floor(config.numColumns * (config.volumetric ? config.density : 1)));
+	const random = (x) => { const v = Math.sin((x * 12.9898) % Math.PI) * 43758.5453; return v - Math.floor(v); };
+	const simTime = shaderSeconds * config.animationSpeed;
+	for (let x = 0; x < columns; x++) {
+		const offset = x === Math.trunc(rows / 2) ? -1 : x === Math.trunc(rows * 0.75) ? -2 : random(x) * -4 + (Math.sin((x / rows) * Math.PI) - 1) * 2 - 2.5;
+		const intro = (((simTime + offset) * config.fallSpeed) / rows) * 100;
+		if (!(intro - 1 >= 0.2 && intro - (1 + 1 / rows) > 0)) return false;
+	}
+	return true;
+};
+
+await test("a shader time move with the intro on restarts after the slowest column's intro is done (R2-20)", () => {
+	// 50 s frames to 3500 s, then a 61 s gap the page spent hidden.
+	const moveAfterHiddenGap = (config) => {
+		const time = createShaderTime(introSafeLimits(config));
+		let wall = 0, seconds = 0;
+		time.frame(0, wall, 0);
+		while (seconds < 3500) time.frame((seconds += 50), (wall += 50_000), 0);
+		return time.frame(seconds + 0.016, wall + 61_000, 1);
+	};
+	for (const query of [{ numColumns: "80" }, { numColumns: "80", volumetric: "true", density: "2" }, { numColumns: "40", animationSpeed: "-0.01", fallSpeed: "-0.3" }]) {
+		const config = makeConfig({ skipIntro: "false", animationSpeed: "0.01", fallSpeed: "0.3", ...query }), label = JSON.stringify(query);
+		assert.equal(config.skipIntro, false, `the intro must stay on (${label})`);
+		const moved = moveAfterHiddenGap(config);
+		assert(moved < 3500, `the hidden gap must move shader time (${label}: ${moved} s)`);
+		assert(introDone(config, moved), `shader time restarted at ${moved} s, inside the slowest column's intro (${label})`);
+	}
+	const skipped = makeConfig({ skipIntro: "true", animationSpeed: "0.01", fallSpeed: "0.3", numColumns: "80" });
+	assert.equal(introSafeLimits(skipped), rebaseLimits, "skipIntro must keep the plain limits");
+	near(moveAfterHiddenGap(skipped), rebaseLimits.restartSeconds, "with skipIntro a move must still restart at ten minutes");
+	// A restart point past the plain six-hour bound must not pin time there.
+	const slow = makeConfig({ skipIntro: "false", animationSpeed: "0.001", fallSpeed: "0.05", numColumns: "80" }), limits = introSafeLimits(slow);
+	assert(limits.restartSeconds > rebaseLimits.hardSeconds, `the probe needs a restart point past six hours, got ${limits.restartSeconds} s`);
+	const time = createShaderTime(limits);
+	let seconds = 0, wall = 0, previous = time.frame(0, wall, 0), moves = 0;
+	time.onRebase(() => moves++);
+	while (seconds < 4 * limits.hardSeconds) {
+		const before = moves, value = time.frame((seconds += 60), (wall += 16), 0);
+		if (moves === before) near(value, previous + 60, `time must keep advancing at ${seconds} s`, 1e-6);
+		else assert(introDone(slow, value), `a move restarted at ${value} s, inside the intro`);
+		previous = value;
+	}
+	assert(moves >= 2, `a long run must still move the origin (${moves} moves)`);
+	near(time.frame((seconds += 60), (wall += 16), 0), previous + 60, "time must advance after a move, not stay pinned at the restart point", 1e-6);
+});
+
 await test("rain and mirror passes move their click stamps with the shader time origin", async () => {
 	const borrowed = { createView: () => ({}), destroy() { throw new Error("borrowed resource destroyed"); } };
 	for (const [backend, name] of [["regl", "rain"], ["regl", "mirror"], ["webgpu", "rain"], ["webgpu", "mirror"]]) {
@@ -743,6 +794,21 @@ await test("WebGPU Matrix renderer moves shader time only across a gap the page 
 		pageDocument.fire("visibilitychange");
 		run.frame(1_861_000);
 		near(seconds(), rebaseLimits.restartSeconds, "a minute the page spent hidden must restart shader time", 1e-3);
+	} finally { run.dispose(); }
+});
+
+await test("WebGPU Matrix renderer restarts shader time after a slow intro is done (R2-20)", async () => {
+	const params = { skipIntro: "false", animationSpeed: "0.01" };
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params });
+	try {
+		const { restartSeconds } = introSafeLimits(makeConfig({ numColumns: "4", camera: "false", ...params }));
+		assert(restartSeconds > 1000, `the probe needs an intro longer than ten minutes, got a restart at ${restartSeconds} s`);
+		const seconds = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0]).map(([, data]) => new Float32Array(data)[0]).at(-1);
+		run.frame(16); run.frame(33);
+		run.frame(3_500_000);
+		pageDocument.fire("visibilitychange");
+		run.frame(3_561_000);
+		near(seconds(), restartSeconds, "a move must restart shader time after the intro, where introSafeLimits puts it", 1e-2);
 	} finally { run.dispose(); }
 });
 

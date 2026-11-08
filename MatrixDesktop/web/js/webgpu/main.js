@@ -1,6 +1,6 @@
 import createCanvasSize from "../canvasSize.js";
 import { createPlaybackClock, unseenEpoch } from "../hostPlayback.js";
-import { createShaderTime } from "../shaderTime.js";
+import { createShaderTime, introSafeLimits } from "../shaderTime.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
 
@@ -178,7 +178,7 @@ export default async (canvas, config) => {
 	// rAF frame, so before then this reads 0 rather than NaN.
 	// AUD-64: the f32 seconds count from an origin that moves forward (js/shaderTime.js).
 	let start = NaN;
-	const shaderTime = createShaderTime();
+	const shaderTime = createShaderTime(introSafeLimits(config));
 	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : shaderTime.seconds(clock.seconds() - start / 1000));
 
 	const context = {

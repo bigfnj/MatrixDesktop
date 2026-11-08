@@ -10,7 +10,7 @@ import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
 import { createPlaybackClock, unseenEpoch } from "../hostPlayback.js";
-import { createShaderTime, shaderTick } from "../shaderTime.js";
+import { createShaderTime, introSafeLimits, shaderTick } from "../shaderTime.js";
 
 const effects = {
 	none: null,
@@ -148,7 +148,7 @@ export default async (canvas, config) => {
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	let activeFrames = 0;
 	// AUD-64: shaders get float32 time measured from an origin that moves forward (js/shaderTime.js).
-	const shaderTime = createShaderTime();
+	const shaderTime = createShaderTime(introSafeLimits(config));
 	let shaderSeconds = 0;
 	// AUD-65: tick wraps before float32 loses integers (js/shaderTime.js).
 	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => shaderTick(activeFrames, config.cycleFrameSkip) } });

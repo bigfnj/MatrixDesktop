@@ -10,8 +10,9 @@
 // drawing), after such a gap of a second or more once shader time passes an hour, and
 // unconditionally past six hours. R2-19: a manual, fullscreen-app or battery pause keeps the
 // paused frame on screen, so a gap without a visibility change never moves the origin.
-// Shader time restarts at ten minutes, not zero: with skipIntro off the intro is a function
-// of time, and restarting it would sweep its cursor wave over a screen already full of rain.
+// Shader time restarts at ten minutes, not zero, or later for a slow intro (introSafeLimits):
+// with skipIntro off the intro is a function of time, and restarting it would sweep its
+// cursor wave over a screen already full of rain.
 export const rebaseLimits = Object.freeze({ gapMs: 60_000, briefGapMs: 1_000, softSeconds: 3_600, hardSeconds: 21_600, restartSeconds: 600 });
 
 export const createShaderTime = (limits = rebaseLimits) => {
@@ -40,6 +41,23 @@ export const createShaderTime = (limits = rebaseLimits) => {
 			return () => listeners.delete(listener);
 		},
 	};
+};
+
+// R2-20: with skipIntro off, the rain pass draws a cell the intro front has not reached with
+// extra brightness (1 - 5 * introProgress) over its sticky activated flag, so restarting shader
+// time inside a slow intro whites out the screen under a new cursor wave. A column's intro
+// passes the bottom row once (simTime + offset) * fallSpeed / numRows * 100 reaches
+// 1.2 + 1 / numRows. The rain grid has numColumns rows, the column offset goes down to -10.5
+// (WebGPU reaches the lower half of its sine term at volumetric density above 1), and two
+// negative speeds progress the same way. Shader time restarts a minute after the slowest column
+// is done; the soft and hard limits move by the same amount, so the hard rule never pins time
+// at the restart point. skipIntro keeps the plain limits.
+export const introSafeLimits = (config, numRows = config.numColumns) => {
+	if (config.skipIntro) return rebaseLimits;
+	const simSeconds = ((1.2 + 1 / numRows) * numRows) / (100 * Math.abs(config.fallSpeed)) + 10.5;
+	const raise = Math.max(0, simSeconds / Math.abs(config.animationSpeed) + 60 - rebaseLimits.restartSeconds);
+	return Object.freeze({ ...rebaseLimits, softSeconds: rebaseLimits.softSeconds + raise,
+		hardSeconds: rebaseLimits.hardSeconds + raise, restartSeconds: rebaseLimits.restartSeconds + raise });
 };
 
 // AUD-65: regl feeds the frame counter to the shaders as the float32 tick uniform, and

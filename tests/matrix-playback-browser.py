@@ -286,6 +286,48 @@ def check_regl_visible_pause(context, port):
         page.close()
 
 
+def bright_fraction(image, threshold=150):
+    histogram = image.convert("L").histogram()
+    return sum(histogram[threshold + 1:]) / max(1, sum(histogram))
+
+
+def check_regl_intro_rebase(context, port):
+    """A shader time move with the intro on must not replay it over a screen full of rain (R2-20).
+
+    With skipIntro off at animationSpeed 0.01 the slowest column's intro takes about 20 minutes
+    of active time. A move back to ten minutes would put every column inside it again, where the
+    rain pass boosts the cells below the intro front toward white. The 61 s gap comes with a
+    visibility change, as a lock or display-off pause brings.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(TIME_HOOK)
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&numColumns=40&skipIntro=false&animationSpeed=0.01", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 2", timeout=30000)
+        for _ in range(70):  # 3500 s of active time in 50 s steps, past the end of the intro
+            page.evaluate("window.__clockOffset += 50000")
+            page.wait_for_timeout(60)
+        page.wait_for_timeout(1500)
+        before = page.evaluate("window.__shaderUniforms.time.at(-1)")
+        bright_before = bright_fraction(capture(page))
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 61000")
+        page.wait_for_timeout(1500)
+        after = page.evaluate("window.__shaderUniforms.time.at(-1)")
+        bright_after = bright_fraction(capture(page))
+        assert before > 3000, f"shader time was {before} s before the gap, so the intro had not run its course and the check proved nothing"
+        assert after < before - 1000, f"the hidden 61 s gap did not move shader time ({before} s to {after} s), so the check proved nothing"
+        assert bright_after <= 2 * bright_before + 0.01, (
+            f"a shader time move from {before:.0f} s to {after:.0f} s replayed the intro: {bright_before:.2%} of pixels above luma 150 before, {bright_after:.2%} after")
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+        return {"before": before, "after": after, "brightBefore": bright_before, "brightAfter": bright_after}
+    finally:
+        page.close()
+
+
 def check_regl_single_frame(context, port):
     """fps=0 must draw one still frame, as UC3D and ZMatrix do, not a black canvas (AUD-47)."""
     page = context.new_page()
@@ -388,6 +430,9 @@ def main():
                         pauses = check_regl_visible_pause(context, server.server_port)
                         print("PASS original Matrix regl visible 61 s pause resumes where it froze ({:.2%} of pixels changed, 30 s control {:.2%}); a hidden one still restarts shader time ({:.2%})".format(
                             pauses["visible"]["changed"], pauses["control"]["changed"], pauses["hidden"]["changed"]), flush=True)
+                        intro = check_regl_intro_rebase(context, server.server_port)
+                        print("PASS original Matrix regl shader time move with skipIntro=false restarts after the intro ({:.0f} s to {:.0f} s, {:.2%} to {:.2%} bright pixels)".format(
+                            intro["before"], intro["after"], intro["brightBefore"], intro["brightAfter"]), flush=True)
                         check_regl_single_frame(context, server.server_port)
                         print("PASS original Matrix regl fps=0 draws one still frame and an fps=30 control keeps animating", flush=True)
                 finally:
