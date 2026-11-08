@@ -841,6 +841,57 @@ try {
             @{ Label = 'a third publish'; Text = "$one`n$two`n$two"; Want = "expected 2 'dotnet publish' commands in release.yml, found 3*" }
         )
     }
+
+    # ------------------------------------------------------------ R2-36 render verdict and display hold
+
+    Invoke-TestCase 'R2-36 (a) a black frame is UNCHECKED when the case logged a display-off suspension, and a FAIL without one' {
+        $black = [pscustomobject]@{ Std = 0.0; Mean = 0.0; NonBlack = 0.0 }
+        $start = New-Record 'INFO' 'CrashDumpWriter installed for process 4242'
+        $displayOff = New-Record 'INFO' "WebView suspended (reason='DisplayOff')."
+        $with = @(Get-RenderVerdict -Stats $black -Changed 0 -Records @($start, $displayOff) -Detail 'std=0.00000')
+        Assert-Equal 'rendered content|unchecked' (@($with | ForEach-Object { "$($_.Check)|$($_.Outcome)" }) -join ',') 'a black frame after a display-off suspension'
+        if ($with[0].Detail -notlike "std=0.00000 (std floor 0.04*)*WebView suspended (reason='DisplayOff').*") { throw "the reason does not quote the suspension ($($with[0].Detail))" }
+        $without = @(Get-RenderVerdict -Stats $black -Changed 0 -Records @($start) -Detail 'std=0.00000')
+        Assert-Equal 'rendered content|fail' (@($without | ForEach-Object { "$($_.Check)|$($_.Outcome)" }) -join ',') 'the same black frame without a suspension record'
+        $healthy = [pscustomobject]@{ Std = 0.17; Mean = 0.09; NonBlack = 0.3 }
+        $frozen = @(Get-RenderVerdict -Stats $healthy -Changed 0 -Records @($displayOff))
+        Assert-Equal 'rendered content|ok,animation is running|unchecked' (@($frozen | ForEach-Object { "$($_.Check)|$($_.Outcome)" }) -join ',') 'a static frame after a suspension'
+        $static = @(Get-RenderVerdict -Stats $healthy -Changed 0 -Records @())
+        Assert-Equal 'rendered content|ok,animation is running|fail' (@($static | ForEach-Object { "$($_.Check)|$($_.Outcome)" }) -join ',') 'a static frame without one'
+        $live = @(Get-RenderVerdict -Stats $healthy -Changed 0.3 -Records @())
+        Assert-Equal 'rendered content|ok,animation is running|ok' (@($live | ForEach-Object { "$($_.Check)|$($_.Outcome)" }) -join ',') 'a healthy, moving frame'
+        Assert-Equal 'moved=0.30000' $live[1].Detail 'the animation pass reports the moved fraction'
+        $dim = @(Get-RenderVerdict -Stats ([pscustomobject]@{ Std = 0.09; Mean = 0.01; NonBlack = 0.01 }) -Changed 0.3 -Records @())
+        Assert-Equal 'rendered content|fail' (@($dim | ForEach-Object { "$($_.Check)|$($_.Outcome)" }) -join ',') 'a frame under the non-black floor'
+    }
+
+    Invoke-TestCase 'R2-36 (b) only a display, session or power suspension record counts' {
+        foreach ($message in "WebView suspended (reason='DisplayOff').", "WebView suspended (reason='Session').", "WebView suspended (reason='Manual, Suspend').",
+            "TrySuspendAsync declined (reason='DisplayOff'); restored visibility.", "Failed to suspend WebView (reason='Session'): gone") {
+            Assert-Equal $message (Find-HostSuspension -Records @((New-Record 'INFO' 'MatrixDesktop starting'), (New-Record 'WARN' $message))) "'$message' is a host suspension"
+        }
+        foreach ($message in "WebView suspended (reason='ShellRecovery').", "WebView suspended (reason='Manual').", "Could not apply wallpaper playback state: DisplayOff",
+            "WebView2 profile requested=a effective=b") {
+            Assert-Equal '' (Find-HostSuspension -Records @((New-Record 'INFO' $message))) "'$message' is not a display, session or power suspension"
+        }
+        Assert-Equal '' (Find-HostSuspension -Records @()) 'no records'
+    }
+
+    Invoke-TestCase 'R2-36 (c) the display hold asks Windows to keep the display and the system on, and lets go' {
+        $api = Get-GatePowerApi
+        Assert-Equal $true (Enter-GateDisplayHold) 'SetThreadExecutionState took the request'
+        try {
+            # ES_CONTINUOUS alone clears this thread's request and returns the one it replaced.
+            $held = $api::SetThreadExecutionState([uint32]2147483648)
+            Assert-Equal 3 ($held -band 3) ('the thread asked for ES_SYSTEM_REQUIRED and ES_DISPLAY_REQUIRED (state 0x{0:X8})' -f $held)
+            [void](Enter-GateDisplayHold)
+            Assert-Equal $true (Exit-GateDisplayHold) 'the release was taken'
+            $after = $api::SetThreadExecutionState([uint32]2147483648)
+            Assert-Equal 0 ($after -band 3) ('Exit-GateDisplayHold cleared both requests (state 0x{0:X8})' -f $after)
+        } finally {
+            [void](Exit-GateDisplayHold)
+        }
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }

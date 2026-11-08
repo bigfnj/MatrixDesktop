@@ -80,6 +80,7 @@ $script:Fail = 0
 $script:Unchecked = 0
 $script:Failures = New-Object 'Collections.Generic.List[string]'
 $script:Uncheckables = New-Object 'Collections.Generic.List[string]'
+$script:DisplayHeld = $false
 
 function Test-Hdr { param([string]$Msg) Write-Host ''; Write-Host "=== $Msg" -ForegroundColor Cyan }
 function Test-Ok { param([string]$Msg) $script:Pass++; Write-Host "  ok         $Msg" -ForegroundColor DarkGray }
@@ -128,6 +129,9 @@ $StartMarker = "CrashDumpWriter installed for process"
 $RenderStdFloor = 0.04
 $RenderNonBlackFloor = 0.02
 $RenderChangedFloor = 0.005
+# A cold first launch was still a uniform fill at the fixed settle and failed (R2-36), so the
+# first frame is polled from $SettleMs until it clears the floors or this many ms have passed.
+$RenderSettleLimitMs = 20000
 
 # ---------------------------------------------------------------- win32
 
@@ -244,6 +248,22 @@ function Get-ChangedFraction {
     return [double]$v
 }
 
+# Captures $Path after $SettleMs, then again every second until the frame clears the render
+# floors or $RenderSettleLimitMs has passed since the window appeared (R2-36). A healthy warm
+# launch still returns after $SettleMs. Returns the capture size, or $null without a bitmap.
+function Wait-RenderedCapture {
+    param([IntPtr]$Hwnd, [string]$Path, [double]$NonBlackFloor = 0)
+    Start-Sleep -Milliseconds $SettleMs
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $size = Get-WindowCapture -Hwnd $Hwnd -Path $Path
+        if (-not $size -or $SettleMs + $clock.ElapsedMilliseconds -ge $RenderSettleLimitMs) { return $size }
+        $probe = Get-RenderStats $Path
+        if ($probe.Std -ge $RenderStdFloor -and $probe.NonBlack -ge $NonBlackFloor) { return $size }
+        Start-Sleep -Milliseconds 1000
+    }
+}
+
 # ---------------------------------------------------------------- process
 
 function Assert-NoStaleInstance {
@@ -294,9 +314,10 @@ function Get-WebViewDescendantCount {
 # shutdown gets reported as leaked. That produced a real intermittent FAIL on one smoke case
 # out of three while the other two passed, which is the signature of a timing bug rather
 # than a product defect. Returns as soon as the count reaches zero, so a genuinely clean
-# shutdown costs nothing; a real leak still fails, it just takes $TimeoutMs to say so.
+# shutdown costs nothing; a real leak still fails, it just takes $TimeoutMs to say so. 5 s
+# still failed under load and on a cold profile (R2-36), so the wait is 15 s.
 function Wait-WebViewDescendantsGone {
-    param([int]$RootPid, [int]$TimeoutMs = 5000)
+    param([int]$RootPid, [int]$TimeoutMs = 15000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     while ($true) {
         $n = Get-WebViewDescendantCount -RootPid $RootPid
@@ -366,7 +387,8 @@ function Test-SessionChurn {
 # hide records. Attribution is by pid, which rotation cannot destroy, with a byte offset
 # only used to detect that rotation happened.
 function Get-LogRecordsForPid {
-    param([int]$ProcessId, [datetime]$Since)
+    # -AnyProcess keeps every pid's records: tier 3's Python harnesses start the app themselves.
+    param([int]$ProcessId, [datetime]$Since, [switch]$AnyProcess)
     $out = New-Object 'Collections.Generic.List[object]'
     $header = '^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[pid=(?<pid>\d+) tid=\d+\] (?<lvl>INFO|WARN|ERROR) (?<msg>.*)$'
     foreach ($path in @("$LogPath.old", $LogPath)) {
@@ -396,7 +418,7 @@ function Get-LogRecordsForPid {
             $fs.Dispose()
         }
     }
-    return @($out | Where-Object { $_.Pid -eq $ProcessId -and $_.Ts -ge $Since.AddSeconds(-3) })
+    return @($out | Where-Object { ($AnyProcess -or $_.Pid -eq $ProcessId) -and $_.Ts -ge $Since.AddSeconds(-3) })
 }
 
 # ---------------------------------------------------------------- run
@@ -1097,6 +1119,13 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         Write-Host '  runtime smoke omitted by -Tier1Only, an explicit caller decision' -ForegroundColor DarkGray
     } else {
 
+        # Tiers 2 and 3 photograph real windows, and every host hides its renderer when the
+        # console display powers off, so the gate keeps the display and the system on until it
+        # exits (Enter-GateDisplayHold, gate-lib.ps1; R2-36). Said on every run, held or not.
+        $script:DisplayHeld = Enter-GateDisplayHold
+        if ($script:DisplayHeld) { Write-Host 'display hold: on (SetThreadExecutionState, until the gate exits)' }
+        else { Write-Host 'display hold: unavailable (SetThreadExecutionState refused), so an idle display can still power off' -ForegroundColor Yellow }
+
         # -------------------------------------------------------- tier 2
 
         Test-Hdr 'tier 2: MatrixDesktop runtime smoke'
@@ -1170,11 +1199,12 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         Test-Ok "smoke [$caseName] window appeared in $($started.MsToWindow) ms"
 
                         # Calibrated: black at 500 ms, a uniform fill at 1-2 s, real content
-                        # by 3 s. Two frames 700 ms apart so the animation can be proven live.
-                        Start-Sleep -Milliseconds $SettleMs
+                        # by 3 s on a warm profile; a cold first launch takes longer, so frame A
+                        # is polled (Wait-RenderedCapture). Two frames 700 ms apart so the
+                        # animation can be proven live.
                         $shotA = Join-Path $ShotDir "$caseName-a.png"
                         $shotB = Join-Path $ShotDir "$caseName-b.png"
-                        $sizeA = Get-WindowCapture -Hwnd $started.Hwnd -Path $shotA
+                        $sizeA = Wait-RenderedCapture -Hwnd $started.Hwnd -Path $shotA -NonBlackFloor $RenderNonBlackFloor
                         Start-Sleep -Milliseconds 700
                         $sizeB = Get-WindowCapture -Hwnd $started.Hwnd -Path $shotB
 
@@ -1186,17 +1216,16 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                             $stats = Get-RenderStats $shotA
                             $changed = Get-ChangedFraction -PathA $shotA -PathB $shotB
                             $detail = "std={0:N5} mean={1:N5} nonBlack={2:N5} moved={3:N5} {4}" -f $stats.Std, $stats.Mean, $stats.NonBlack, $changed, $sizeA
-                            if ($stats.Std -lt $RenderStdFloor) {
-                                Test-Fail "smoke [$caseName] rendered content" "$detail (std floor $RenderStdFloor; a black or uniform frame measures like this)"
-                            } elseif ($stats.NonBlack -lt $RenderNonBlackFloor) {
-                                Test-Fail "smoke [$caseName] rendered content" "$detail (non-black floor $RenderNonBlackFloor)"
-                            } else {
-                                Test-Ok "smoke [$caseName] rendered content ($detail)"
-                                if ($changed -lt $RenderChangedFloor) {
-                                    Test-Fail "smoke [$caseName] animation is running" "$detail (moved floor $RenderChangedFloor; the frame is static)"
-                                } else {
-                                    Test-Ok ("smoke [$caseName] animation is running (moved={0:N5})" -f $changed)
-                                }
+                            # A black or static frame is UNCHECKED when this pid logged that it hid
+                            # its renderer for the display, session or power state (Get-RenderVerdict,
+                            # gate-lib.ps1; R2-36), and a FAIL otherwise.
+                            $frameRecords = @(Get-LogRecordsForPid -ProcessId $proc.Id -Since $launchedAt)
+                            foreach ($verdict in @(Get-RenderVerdict -Stats $stats -Changed $changed -Records $frameRecords -Detail $detail `
+                                    -StdFloor $RenderStdFloor -NonBlackFloor $RenderNonBlackFloor -ChangedFloor $RenderChangedFloor)) {
+                                $verdictName = "smoke [$caseName] $($verdict.Check)"
+                                if ($verdict.Outcome -eq 'ok') { Test-Ok "$verdictName ($($verdict.Detail))" }
+                                elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $verdictName $verdict.Detail }
+                                else { Test-Fail $verdictName $verdict.Detail }
                             }
                         }
 
@@ -1304,9 +1333,8 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         Test-Fail 'configurator creates a visible window' 'MainWindowHandle never became visible'
                     } else {
                         Test-Ok "configurator window appeared in $($started.MsToWindow) ms"
-                        Start-Sleep -Milliseconds $SettleMs
                         $shot = Join-Path $ShotDir 'configurator.png'
-                        $size = Get-WindowCapture -Hwnd $started.Hwnd -Path $shot
+                        $size = Wait-RenderedCapture -Hwnd $started.Hwnd -Path $shot
                         if (-not $size) {
                             Test-Unchecked 'configurator rendered content' 'PrintWindow returned no bitmap'
                         } else {
@@ -1366,9 +1394,14 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         } else {
             $nativeScript = Join-Path $RepoRoot 'tests\native-uc3d-smoke.py'
             $nativeLog = Join-Path $ShotDir 'native-uc3d.log'
+            $nativeStarted = Get-Date
             $nativeRun = Start-Process -FilePath $py -ArgumentList ('"' + $nativeScript + '" --renderer regl --publish "' + $GatePublishDir + '"') `
                 -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeLog -RedirectStandardError "$nativeLog.err"
+            # The script starts the app itself, so any MatrixDesktop pid's suspension record since
+            # it started marks the failure as environmental (Find-HostSuspension; R2-36).
+            $nativeSuspension = if ($nativeRun.ExitCode -ne 0) { Find-HostSuspension -Records @(Get-LogRecordsForPid -AnyProcess -Since $nativeStarted) } else { '' }
             if ($nativeRun.ExitCode -eq 0) { Test-Ok 'published UC3D media and preview' }
+            elseif ($nativeSuspension) { Test-Unchecked 'published UC3D media and preview' "exit $($nativeRun.ExitCode) after a MatrixDesktop process logged '$nativeSuspension'; see $nativeLog" }
             else { Test-Fail 'published UC3D media and preview' "exit $($nativeRun.ExitCode); see $nativeLog" }
         }
     }
@@ -1390,9 +1423,12 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 continue
             }
             $log = Join-Path $ShotDir (($case.Name -replace ' ', '-') + '.log')
+            $caseStarted = Get-Date
             $verdict = Invoke-GateChildCase -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Log $log
+            $caseSuspension = if ($verdict.Outcome -eq 'fail') { Find-HostSuspension -Records @(Get-LogRecordsForPid -AnyProcess -Since $caseStarted) } else { '' }
             if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
             elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
+            elseif ($caseSuspension) { Test-Unchecked $case.Name "$($verdict.Detail), after a MatrixDesktop process logged '$caseSuspension' (R2-36)" }
             else {
                 Test-Fail $case.Name $verdict.Detail
                 Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
@@ -1446,5 +1482,6 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     }
     Stop-Harness "unhandled exception: $($_.Exception.Message) $where"
 } finally {
+    if ($script:DisplayHeld) { [void](Exit-GateDisplayHold) }
     Pop-Location
 }

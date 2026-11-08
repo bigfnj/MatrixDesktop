@@ -624,3 +624,76 @@ function ConvertTo-PublishProperties {
     }
     return [pscustomobject]@{ Project = $project; Properties = $properties; Unknown = $unknown }
 }
+
+# ---------------------------------------------------------------- display, session and power state
+
+# Every MatrixDesktop host hides and suspends its WebView when the console display powers off,
+# the session locks or disconnects, or the system sleeps (PauseReason DisplayOff, Session,
+# Suspend; MainForm.TrySuspendWebViewAsync), and logs it with the reason. An unattended full
+# gate photographed that black or frozen window and reported a product FAIL (R2-36). Returns
+# the first such record's message, or '' when none of $Records is one.
+function Find-HostSuspension {
+    param([AllowEmptyCollection()][object[]]$Records = @())
+    $pattern = "^(?:WebView suspended|TrySuspendAsync declined|Failed to suspend WebView) \(reason='[^']*\b(?:DisplayOff|Session|Suspend)\b"
+    foreach ($record in $Records) {
+        if ($null -ne $record -and $record.Msg -match $pattern) { return [string]$record.Msg }
+    }
+    return ''
+}
+
+# The render and animation verdicts for one tier-2 frame pair. A frame under a floor is
+# UNCHECKED when the case's pid logged a host suspension (Find-HostSuspension), FAIL otherwise;
+# the same holds for a static frame. -Changed is the moved fraction between the two frames.
+# Returns one verdict per check that applies, in order: 'rendered content', then 'animation is
+# running' once the frame rendered.
+function Get-RenderVerdict {
+    param(
+        [Parameter(Mandatory = $true)][object]$Stats,
+        [Parameter(Mandatory = $true)][double]$Changed,
+        [AllowEmptyCollection()][object[]]$Records = @(),
+        [string]$Detail = '',
+        [double]$StdFloor = 0.04,
+        [double]$NonBlackFloor = 0.02,
+        [double]$ChangedFloor = 0.005
+    )
+    $suspension = Find-HostSuspension -Records $Records
+    $outcome = if ($suspension) { 'unchecked' } else { 'fail' }
+    $cause = if ($suspension) { "; the case logged '$suspension', so the host hid its renderer for the display, session or power state" } else { '' }
+    $floor = ''
+    if ($Stats.Std -lt $StdFloor) { $floor = "std floor $StdFloor; a black or uniform frame measures like this" }
+    elseif ($Stats.NonBlack -lt $NonBlackFloor) { $floor = "non-black floor $NonBlackFloor" }
+    if ($floor) { return @([pscustomobject]@{ Check = 'rendered content'; Outcome = $outcome; Detail = "$Detail ($floor)$cause" }) }
+    $verdicts = @([pscustomobject]@{ Check = 'rendered content'; Outcome = 'ok'; Detail = $Detail })
+    if ($Changed -lt $ChangedFloor) {
+        $verdicts += [pscustomobject]@{ Check = 'animation is running'; Outcome = $outcome; Detail = "$Detail (moved floor $ChangedFloor; the frame is static)$cause" }
+    } else {
+        $verdicts += [pscustomobject]@{ Check = 'animation is running'; Outcome = 'ok'; Detail = ('moved={0:N5}' -f $Changed) }
+    }
+    return $verdicts
+}
+
+# SetThreadExecutionState flags: ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED.
+function Get-GatePowerApi {
+    if (-not ('GatePowerApi' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class GatePowerApi {
+    [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
+}
+'@
+    }
+    return [GatePowerApi]
+}
+
+# Keeps the display and the system on while the gate's GUI tiers run, so an idle timeout cannot
+# power the console display off under them. The request belongs to the calling thread and ends
+# with the process; Exit-GateDisplayHold clears it sooner. Returns $true when Windows took it.
+function Enter-GateDisplayHold {
+    $api = Get-GatePowerApi
+    return ($api::SetThreadExecutionState([uint32]2147483651) -ne 0)
+}
+
+function Exit-GateDisplayHold {
+    $api = Get-GatePowerApi
+    return ($api::SetThreadExecutionState([uint32]2147483648) -ne 0)
+}
