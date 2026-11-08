@@ -117,15 +117,24 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         menu.Items.Add(refresh);
         // Only a scene that applies native resources while it runs can be refreshed (AUD-09).
         menu.Opening += (_, _) => refresh.Visible = _form?.NativeResourcesRefreshable == true;
-        var autostart = new ToolStripMenuItem("Start with Windows") { Checked = AutostartService.Enabled };
+        var autostart = new ToolStripMenuItem("Start with Windows");
+        // R2-03: ticked only when the shortcut starts this launch's settings. A shortcut another
+        // launch stored says so, and one click replaces it with these settings.
+        void ShowAutostart()
+        {
+            var state = AutostartService.State(_plan.Arguments);
+            autostart.Checked = state == AutostartState.ThisLaunch;
+            autostart.Text = state == AutostartState.OtherSettings ? "Start with Windows (other settings)" : "Start with Windows";
+        }
+        ShowAutostart();
         autostart.Click += (_, _) =>
         {
-            try { AutostartService.SetEnabled(!AutostartService.Enabled, _plan.Arguments); autostart.Checked = AutostartService.Enabled; }
+            try { AutostartService.SetEnabled(AutostartService.ClickEnables(AutostartService.State(_plan.Arguments)), _plan.Arguments); ShowAutostart(); }
             catch (Exception error) { Report(error.Message); }
         };
         menu.Items.Add(autostart);
-        // The shortcut can change outside this process (the configurator, Explorer, another launch).
-        menu.Opening += (_, _) => autostart.Checked = AutostartService.Enabled;
+        // The shortcut can change outside this process (Explorer, another launch's tray).
+        menu.Opening += (_, _) => ShowAutostart();
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _tray = new NotifyIcon { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone(),
