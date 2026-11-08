@@ -333,6 +333,19 @@ def check_preview_race(page, _fixture):
     assert page.locator("#previewFrame").get_attribute("src") == expected, "a preview reply navigated after the pane was hidden"
 
 
+def check_doc_labels(page, _fixture):
+    # README, docs/ZMATRIX.md and the guide (shown by the configurator's own ? modal) name
+    # these controls; each rendered label must appear in each document, read-only from disk.
+    docs = {name: " ".join((ROOT / name).read_text(encoding="utf-8").split())
+            for name in ("README.md", "docs/ZMATRIX.md", "MatrixDesktop_Argument_Guide.txt")}
+    problems = []
+    for selector in ("#screensaverButton", "#restoreScreensaverButton"):
+        label = " ".join(page.locator(selector).inner_text().split())
+        assert label, selector + " rendered no label"
+        problems += [name + " does not name " + selector + " '" + label + "'" for name, text in docs.items() if label not in text]
+    assert not problems, "; ".join(problems)
+
+
 def check_limits(page, fixture):
     choose_zmatrix(page)
     original = fixture["defaultDraft"]["zmCharacters"]
@@ -379,6 +392,7 @@ CHECKS = [
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
     ("Preview ignores obsolete and hidden asynchronous query replies", check_preview_race),
+    ("Screensaver action labels match the controls the docs name", check_doc_labels),
 ]
 
 
