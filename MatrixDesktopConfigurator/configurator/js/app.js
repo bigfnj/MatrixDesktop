@@ -1,4 +1,4 @@
-﻿import { openColorPicker } from "./colorPicker.js";
+﻿import { closeColorPicker, openColorPicker } from "./colorPicker.js";
 
 const state = {
 	metadata: null,
@@ -395,6 +395,10 @@ const sceneSections = (scene) => {
 // field moved for the scene is still found by its catalog name. Scroll position is
 // preserved so a gating-triggered re-render doesn't jump the view.
 const renderFields = () => {
+	// The popover is bound to the row that opened it. A rebuild without a pointerdown
+	// (keyboard activation, a gating select, refreshAll) used to leave it writing through
+	// that detached row's closure: a removed stop came back, or a reorder lost a neighbour.
+	closeColorPicker();
 	const surface = el.fieldSurface;
 	const prevScroll = surface.scrollTop;
 	surface.replaceChildren();

@@ -251,6 +251,17 @@ def check_cfg_chooser(page, _fixture):
     assert field(page, "zmCharacters").locator("textarea").input_value() == "ABΩ"
 
 
+def popover_hidden(page):
+    return page.evaluate("document.querySelector('.color-popover')?.hidden ?? true")
+
+
+def late_hex(page, value):
+    # Dispatched rather than typed: a hidden popover takes no keystrokes, but a stale
+    # listener would still act on an input event.
+    page.evaluate("""value => { const box = document.querySelector('.color-popover .cp-hex');
+        box.value = value; box.dispatchEvent(new Event('input', {bubbles: true})); }""", value)
+
+
 def check_late_picker(page, _fixture):
     for key, effect in (("palette", "palette"), ("stripeColors", "stripes")):
         field(page, "scene").locator("select").select_option("matrix")
@@ -264,12 +275,44 @@ def check_late_picker(page, _fixture):
         assert abs(expected[0]["r"] - 35 / 255) < 1e-10, "the enabled picker must first persist its color"
         field(page, "scene").locator("select").select_option("zmatrix")
         assert field(page, key).locator(".color-swatch").first.is_disabled()
-        assert picker.is_visible(), "the test must retain the open picker callback across the scene change"
-        picker.fill("#ff0000")
-        assert saved(page)[key] == expected, key + " changed saved state through a late disabled picker callback"
-        page.keyboard.press("Escape")
+        assert popover_hidden(page), key + ": the scene change re-rendered the editor but left its popover open"
+        late_hex(page, "#ff0000")
+        assert saved(page)[key] == expected, key + " changed saved state through a late picker callback"
         field(page, "scene").locator("select").select_option("matrix")
         assert saved(page)[key] == expected, key + " lost its saved color after returning to Matrix"
+
+
+def check_picker_closes_on_rerender(page, _fixture):
+    stops = page.evaluate("configHost.snapshotDraft().draft.palette")
+    assert len(stops) == 4, "the default palette must have four stops for this check"
+    rows = field(page, "palette").locator(".list-row")
+    # Opened by Enter and re-rendered by a click that sends no pointerdown and moves no focus,
+    # as keyboard and assistive-technology activation do, so neither the popover's outside
+    # pointer handler nor any focus handler can close it: only the rebuild can.
+    rows.nth(0).locator(".color-swatch").focus()
+    page.keyboard.press("Enter")
+    assert not popover_hidden(page), "Enter on a palette swatch did not open the popover"
+    rows.nth(0).locator("button", has_text="↓").evaluate("node => node.click()")
+    assert popover_hidden(page), "moving a stop re-rendered the palette but left the popover open on the detached row"
+    late_hex(page, "#00ff00")
+    assert saved(page)["palette"] == [stops[1], stops[0], stops[2], stops[3]], "a late picker edit rewrote the reordered palette"
+    rows.nth(3).locator(".color-swatch").focus()
+    page.keyboard.press("Enter")
+    assert not popover_hidden(page), "Enter on the last swatch did not open the popover"
+    rows.nth(3).locator("button", has_text="×").evaluate("node => node.click()")
+    assert popover_hidden(page), "removing a stop left the popover open on the removed row"
+    late_hex(page, "#ff0000")
+    assert len(saved(page)["palette"]) == 3, "a late picker edit brought a removed stop back"
+    # Defence in depth: an anchor detached by anything other than renderFields still refuses the edit.
+    rows.nth(0).locator(".color-swatch").focus()
+    page.keyboard.press("Enter")
+    assert not popover_hidden(page), "Enter on the first swatch did not open the popover"
+    before = page.evaluate("window.__smokeMessages.filter(m=>m.type==='saveDraft').length")
+    rows.nth(0).locator(".color-swatch").evaluate("node => node.remove()")
+    late_hex(page, "#0000ff")
+    page.wait_for_timeout(400)
+    assert page.evaluate("window.__smokeMessages.filter(m=>m.type==='saveDraft').length") == before, "a popover whose anchor left the document still saved its edit"
+    assert popover_hidden(page), "a popover whose anchor left the document stayed open"
 
 
 def check_close_snapshot(page, _fixture):
@@ -375,6 +418,7 @@ CHECKS = [
     ("ZMatrix CFG import preserves launch choices and reports migration", check_cfg),
     ("CFG chooser retains selected file text and cancellation", check_cfg_chooser),
     ("Late picker callbacks preserve disabled palette and stripe saved values", check_late_picker),
+    ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
     ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
@@ -394,6 +438,8 @@ def main():
     assert len([field for group in fixture["metadata"]["groups"] for field in group["fields"] if field["id"].startswith("zm")]) == 27, "stale fixture: rebuild the C# harness and dump loadState"
     source = args.app_js or CONFIGURATOR / "js" / "app.js"
     print("SOURCE", source, "sha256=" + hashlib.sha256(source.read_bytes()).hexdigest(), flush=True)
+    picker_source = CONFIGURATOR / "js" / "colorPicker.js"
+    print("PICKER", picker_source, "sha256=" + hashlib.sha256(picker_source.read_bytes()).hexdigest(), flush=True)
     print("HARNESS", HARNESS, "sha256=" + hashlib.sha256(HARNESS.with_suffix(".dll").read_bytes()).hexdigest(), flush=True)
     try:
         from playwright.sync_api import sync_playwright
@@ -421,6 +467,7 @@ def main():
                     page.goto(origin + "/index.html", wait_until="load")
                     page.wait_for_function("document.querySelectorAll('.field').length>40")
                     assert page.request.get(origin + "/js/app.js").body() == source.read_bytes(), "served source witness mismatch"
+                    assert page.request.get(origin + "/js/colorPicker.js").body() == picker_source.read_bytes(), "served colorPicker witness mismatch"
                     function(page, fixture)
                     assert not errors, "; ".join(errors)
                     print("PASS", name, flush=True)

@@ -97,7 +97,16 @@ const build = () => {
 	return root;
 };
 
+// The popover lives in document.body and outlives the editor that opened it. An edit that
+// arrives after its anchor left the document belongs to a row that no longer exists, so it
+// closes the popover instead of writing through that row's stale closure.
+const liveContext = () => {
+	if (ctx && !ctx.anchor.isConnected) closeColorPicker();
+	return ctx;
+};
+
 const emit = (skip) => {
+	if (!liveContext()) return;
 	ctx.color = hsvToRgb(ctx.hsv);
 	render(skip);
 	if (ctx.onChange) ctx.onChange({ ...ctx.color });
@@ -181,7 +190,7 @@ const wire = () => {
 	refs.hue.addEventListener("pointerdown", startDrag((x) => dragHue(x)));
 
 	refs.hex.addEventListener("input", () => {
-		if (!ctx) return;
+		if (!liveContext()) return;
 		ctx.color = hexToColor(refs.hex.value);
 		ctx.hsv = hsvFromColor(ctx.color);
 		render(refs.hex);
@@ -190,7 +199,7 @@ const wire = () => {
 
 	for (const channel of ["r", "g", "b"]) {
 		refs[channel].addEventListener("input", () => {
-			if (!ctx) return;
+			if (!liveContext()) return;
 			ctx.color = { ...ctx.color, [channel]: clamp01(Number.parseFloat(refs[channel].value)) };
 			ctx.hsv = hsvFromColor(ctx.color);
 			render(refs[channel]);
