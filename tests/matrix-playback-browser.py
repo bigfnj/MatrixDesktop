@@ -272,12 +272,14 @@ def check_regl_visible_pause(context, port):
             results[name] = {"changed": changed_fraction(frozen, capture(page)), "before": before, "after": after}
         control, visible, hidden = results["control"], results["visible"], results["hidden"]
         assert control["before"] > 900, f"shader time was {control['before']} s before the pauses, below the restart point, so the check proved nothing"
-        assert visible["changed"] <= 3 * control["changed"] + 0.02, (
+        # Natural motion between the two screenshots grows with load (a 30 s control measured
+        # 0.5% to 4.3%); a move of shader time changes about 27% of pixels.
+        assert visible["changed"] <= 3 * control["changed"] + 0.05, (
             f"a visible 61 s pause changed {visible['changed']:.2%} of pixels on resume against {control['changed']:.2%} after a 30 s pause")
         assert visible["after"] > visible["before"], f"a visible 61 s pause moved shader time from {visible['before']} s to {visible['after']} s"
         assert hidden["after"] < 650, f"a hidden 61 s pause kept shader time at {hidden['after']} s instead of restarting it"
-        assert hidden["changed"] > 3 * control["changed"] + 0.02, (
-            f"a hidden 61 s pause changed only {hidden['changed']:.2%} of pixels on resume, so the rebase was not visible to this check")
+        assert hidden["changed"] >= 0.1, (
+            f"a hidden 61 s pause changed only {hidden['changed']:.2%} of pixels on resume, so this check cannot see a move of shader time")
         page.evaluate("matrixRuntimeDiagnostics.dispose()")
         page.wait_for_timeout(100)
         assert not errors, errors
