@@ -452,7 +452,12 @@ const renderFields = () => {
 			? fields.filter((field) => [field.label, field.catalogLabel, group.title, field.catalogGroupTitle]
 				.some((text) => typeof text === "string" && text.toLowerCase().includes(filter)))
 			: fields;
-		if (matching.length === 0) continue;
+		// The screensaver actions belong to the Launch section and are also found by their own text.
+		const actions = group.id === "launch" && el.screensaverButton && el.restoreScreensaverButton
+			? [el.screensaverButton, el.restoreScreensaverButton] : [];
+		const showActions = actions.length > 0
+			&& (matching.length > 0 || actions.some((button) => button.textContent.toLowerCase().includes(filter)));
+		if (matching.length === 0 && !showActions) continue;
 
 		const section = document.createElement("section");
 		section.className = "field-section";
@@ -468,10 +473,10 @@ const renderFields = () => {
 		for (const field of matching) {
 			grid.append(renderField(field));
 		}
-		section.append(grid);
-		if (group.id === "launch" && el.screensaverButton && el.restoreScreensaverButton) {
-			const actions = document.createElement("div"); actions.className = "screensaver-actions";
-			actions.append(el.screensaverButton, el.restoreScreensaverButton); section.append(actions);
+		if (matching.length > 0) section.append(grid);
+		if (showActions) {
+			const row = document.createElement("div"); row.className = "screensaver-actions";
+			row.append(...actions); section.append(row);
 		}
 		if (group.id === "zmatrix" && state.draft.scene === "zmatrix" && state.draft.zmImportNotes?.length) {
 			const report = document.createElement("details");

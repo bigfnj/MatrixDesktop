@@ -444,6 +444,20 @@ def check_font_list(page, _fixture):
     assert now["options"] == len(FONT_NAMES), "the page holds " + str(now["options"]) + " font options for " + str(len(FONT_NAMES)) + " fonts"
 
 
+def check_filter_actions(page, _fixture):
+    for text, shown in (("screensaver", True), ("RESTORE SCREEN", True), ("cursor", True), ("palette", False), ("", True)):
+        page.locator("#fieldFilter").fill(text)
+        now = page.evaluate("""() => ({buttons: ['#screensaverButton', '#restoreScreensaverButton'].map(id => document.querySelector(id)?.isConnected ?? false),
+            empty: Boolean(document.querySelector('.empty-hint')), grids: document.querySelectorAll('#section-launch .field-grid').length,
+            fields: document.querySelectorAll('#section-launch .field').length})""")
+        assert now["buttons"] == [shown, shown], "filter " + repr(text) + (" lost" if shown else " kept") + " the screensaver actions: " + str(now)
+        if text in ("screensaver", "RESTORE SCREEN"):
+            assert not now["empty"] and now["grids"] == 0, "an action-only match showed an empty hint or an empty field grid: " + str(now)
+            assert page.locator("#screensaverButton").is_visible() and page.locator("#restoreScreensaverButton").is_visible()
+        if text == "cursor":
+            assert now["fields"] > 0, "control: 'cursor' must match a Launch field: " + str(now)
+
+
 def check_close_snapshot(page, _fixture):
     choose_zmatrix(page)
     saved(page)
@@ -551,6 +565,7 @@ CHECKS = [
     ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
     ("Field controls have accessible names and their labels operate them", check_accessible_names),
     ("Font-name boxes share one installed-font list across re-renders", check_font_list),
+    ("Filter finds the screensaver actions by their own text", check_filter_actions),
     ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
