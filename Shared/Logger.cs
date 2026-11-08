@@ -15,13 +15,27 @@ internal static class Logger
     private const string AppFolder = "MatrixDesktop";
     private const string LogFileName = "MatrixDesktop.log";
     private const long MaxBytes = 2_000_000;          // ~2MB before rotating to .old
-    private const int RotationCheckInterval = 10;     // stat the file every N writes
+    private const int RotationCheckInterval = 10;     // stat the file on the first write, then every N writes
 
     private static readonly object _gate = new();
     private static volatile bool _dirCreated;
+    private static bool _rotationChecked;
     private static int _writeCount;
 
-    private static readonly string _logPath = ResolveLogPath();
+    private static string _logPath = ResolveLogPath();
+
+    // Test seam: points the logger at a fixture file (null restores the real path) and puts
+    // it back in a fresh process's state, so tests never write to the owner's log.
+    internal static void ResetForTests(string? logPath)
+    {
+        lock (_gate)
+        {
+            _logPath = logPath ?? ResolveLogPath();
+            _dirCreated = false;
+            _rotationChecked = false;
+            _writeCount = 0;
+        }
+    }
 
     public static void Info(string message) => Write("INFO", message, null);
     public static void Warn(string message) => Write("WARN", message, null);
@@ -49,9 +63,13 @@ internal static class Logger
 
             lock (_gate)
             {
-                if (System.Threading.Interlocked.Increment(ref _writeCount) >= RotationCheckInterval)
+                // Check on a process's first write too. A screensaver run writes two or three
+                // lines and exits, so a check that first fired on the 10th write never ran for
+                // it, and a screensaver-only user's log grew past the cap without bound.
+                if (!_rotationChecked || ++_writeCount >= RotationCheckInterval)
                 {
-                    System.Threading.Interlocked.Exchange(ref _writeCount, 0);
+                    _rotationChecked = true;
+                    _writeCount = 0;
                     RotateIfNeeded();
                 }
 

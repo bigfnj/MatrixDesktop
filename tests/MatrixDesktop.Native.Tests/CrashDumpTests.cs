@@ -7,6 +7,8 @@ internal static class CrashDumpTests
     [
         ("Native crash diagnostics never release an unreserved slot", BeforeReservation),
         ("Native crash diagnostics release only failed reserved writes", FailedWrites),
+        ("Native diagnostics log rotates on the first write of a short-lived process", FirstWriteRotation),
+        ("Native diagnostics log checks rotation again 10 writes after a check", PeriodicRotation),
     ];
 
     private static readonly FieldInfo Counter = typeof(CrashDumpWriter).GetField("_dumpsWritten", BindingFlags.NonPublic | BindingFlags.Static)!;
@@ -20,9 +22,12 @@ internal static class CrashDumpTests
         var previous = Count;
         Counter.SetValue(null, 0);
         Directory.CreateDirectory(root);
+        // The writer logs every outcome; keep those lines out of the owner's real log.
+        Logger.ResetForTests(Path.Combine(root, "MatrixDesktop.log"));
         try { test(root); }
         finally
         {
+            Logger.ResetForTests(null);
             Counter.SetValue(null, previous);
             var parent = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar);
             Require(Path.GetDirectoryName(root) == parent && Path.GetFileName(root).StartsWith("matrix-dump-reservation-", StringComparison.Ordinal), "Cleanup must remain in the owned synthetic dump fixture.");
@@ -74,5 +79,39 @@ internal static class CrashDumpTests
         }
         Require(writes == 2, "Both the false-result and throwing backend must actually execute.");
         VerifyCap(root);
+    });
+
+    // A screensaver run writes two or three lines and exits, so the log must check its size on
+    // a process's first write, not only after several.
+    private static void FirstWriteRotation() => WithFixture(root =>
+    {
+        var log = Path.Combine(root, "MatrixDesktop.log");
+        File.WriteAllBytes(log, new byte[2_100_000]);
+        Logger.Info("synthetic short-lived process line");
+        var old = new FileInfo(log + ".old");
+        Require(old.Exists, "An oversized log must rotate on a process's first write: no .old file was created.");
+        Require(old.Length == 2_100_000, $"The rotated file must hold the whole previous log, got {old.Length} bytes.");
+        var live = new FileInfo(log);
+        Require(live.Exists && live.Length < 200, $"The live log must restart with only the new line, got {(live.Exists ? live.Length : -1)} bytes.");
+        Require(File.ReadAllText(log).Contains("synthetic short-lived process line", StringComparison.Ordinal), "The line must land in the fixture log.");
+    });
+
+    // Anchored to an observed check rather than to process start, so this case does not depend
+    // on which write performs the first check.
+    private static void PeriodicRotation() => WithFixture(root =>
+    {
+        var log = Path.Combine(root, "MatrixDesktop.log");
+        var old = log + ".old";
+        File.WriteAllBytes(log, new byte[2_100_000]);
+        for (var line = 1; line <= 10 && !File.Exists(old); line++) Logger.Info($"synthetic line {line} before the first check");
+        Require(File.Exists(old), "An oversized log must rotate within a process's first 10 writes.");
+        File.Delete(old);
+        using (var grow = new FileStream(log, FileMode.Append, FileAccess.Write)) grow.Write(new byte[2_100_000]);
+        for (var line = 1; line <= 10; line++)
+        {
+            Logger.Info($"synthetic line {line} after a check");
+            Require(line == 10 || !File.Exists(old), $"The log rotated early, on write {line} after the previous check.");
+        }
+        Require(File.Exists(old), "The log must check its size again on the 10th write after the previous check: no .old file was created.");
     });
 }
