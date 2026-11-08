@@ -23,6 +23,10 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     private uint _screensaverInputTick;
     private readonly DesktopPointerBridge? _pointer;
 
+    // True once the context has ended, including inside its own constructor; HostLoop then
+    // disposes it instead of starting a message loop nothing could end.
+    internal bool ExitRequested => _exiting;
+
     internal MatrixApplicationContext(HostLaunchPlan plan)
     {
         _plan = plan;
@@ -113,7 +117,18 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         {
             Shared.Logger.Warn($"Renderer host could not attach: {error.Message}");
             if (_form is not null) { var old = _form; _form = null; old.FormClosed -= OnSurfaceClosed; old.Dispose(); }
-            if (!_wallpaper) { Report(error.Message); ExitThread(); return; }
+            if (!_wallpaper)
+            {
+                Report(error.Message);
+                // A standard launch has no tray to report through; /s only logs and /p stays silent.
+                if (!_exiting && _plan.Kind == HostLaunchKind.Standard)
+                {
+                    try { MessageBox.Show($"MatrixDesktop failed to start:\n{error.Message}", "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                    catch { /* the dialog itself may fail in degraded states */ }
+                }
+                ExitThread();
+                return;
+            }
             _playback.Set(PauseReason.ShellRecovery, true);
             _retryAt = Environment.TickCount64 + Math.Min(10000, 500 * (1 << Math.Min(4, _retryCount++)));
             if (_tray is not null) _tray.Text = "MatrixDesktop: waiting for desktop";

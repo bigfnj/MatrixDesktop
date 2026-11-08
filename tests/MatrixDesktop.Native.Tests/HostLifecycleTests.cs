@@ -7,10 +7,63 @@ internal static class HostLifecycleTests
     [
         ("Native host detaches a dead controller before disposal", DetachBeforeDispose),
         ("Native host creates modern WorkerW before bounded legacy fallback", WorkerRequests),
+        ("Native host loop ends a context that exited while it was constructed", ConstructorExit),
     ];
 
     private static void Require(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }
+
+    // AUD-04. MatrixApplicationContext can end inside its constructor (a preview parent that is
+    // already gone, a renderer that cannot be created); Application.Run then pumped forever.
+    private static void ConstructorExit()
+    {
+        Require(!ReturnsWithin(() => Application.Run(new SelfEndingContext(endWhileConstructing: true)), 1000),
+            "Control: plain Application.Run must keep pumping for a context that ended in its constructor, or this test cannot see the hang.");
+        SelfEndingContext? ended = null;
+        Require(ReturnsWithin(() => { ended = new SelfEndingContext(endWhileConstructing: true); HostLoop.Run(ended, () => ended.Exited); }, 5000),
+            "A context that ended while it was constructed must not leave the message loop pumping.");
+        SelfEndingContext? live = null;
+        Require(ReturnsWithin(() => { live = new SelfEndingContext(endWhileConstructing: false); HostLoop.Run(live, () => live.Exited); }, 5000) && live!.Exited,
+            "A live context must still run its loop until it ends itself from inside that loop.");
+    }
+
+    // Runs body on its own STA thread. A thread still pumping at the deadline is ended with
+    // WM_QUIT so the harness itself can exit.
+    private static bool ReturnsWithin(Action body, int timeoutMs)
+    {
+        uint nativeThread = 0;
+        Exception? failure = null;
+        using var started = new ManualResetEventSlim();
+        var thread = new Thread(() =>
+        {
+            nativeThread = GetCurrentThreadId();
+            started.Set();
+            try { body(); } catch (Exception error) { failure = error; }
+        }) { IsBackground = true };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        started.Wait();
+        var returned = thread.Join(timeoutMs);
+        if (!returned) { PostThreadMessage(nativeThread, 0x0012, 0, 0); thread.Join(5000); }
+        if (failure is not null) throw new InvalidOperationException("The loop body threw: " + failure.Message, failure);
+        return returned;
+    }
+
+    private sealed class SelfEndingContext : ApplicationContext
+    {
+        internal bool Exited { get; private set; }
+        internal SelfEndingContext(bool endWhileConstructing)
+        {
+            if (endWhileConstructing) { ExitThread(); return; }
+            var timer = new System.Windows.Forms.Timer { Interval = 50 };
+            timer.Tick += (_, _) => { timer.Dispose(); ExitThread(); };
+            timer.Start();
+        }
+        protected override void ExitThreadCore() { Exited = true; base.ExitThreadCore(); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool PostThreadMessage(uint thread, int message, nint wParam, nint lParam);
 
     private static void DetachBeforeDispose()
     {
