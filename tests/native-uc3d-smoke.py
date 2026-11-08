@@ -171,6 +171,20 @@ def assert_default_snapshot(report, preview=False, volumetric=True):
     assert not bootstrap["images"] and not any(bootstrap.get(name) for name in (
         "desktopUrl", "audioUrl", "effectsUrl", "glyphUrl")), "default UC3D launch granted optional local media"
 
+# Optional media that a default launch must not serve. These IDs are fixed names, so probing
+# them can fail. Picture IDs are not: they are derived from each file (AUD-10), so no fixed
+# picture ID exists whose 404 proves anything, and the bootstrap's image list is the
+# authority on which pictures the bridge grants.
+OPTIONAL_MEDIA_IDS = ("desktop", "music", "effects", "glyphs")
+
+def assert_no_optional_media(bootstrap, probe):
+    """A default launch grants no pictures and the bridge serves no fixed-name optional media."""
+    images = bootstrap.get("images")
+    assert images == [], f"default UC3D launch granted pictures: {[image.get('id') for image in images or []]}"
+    statuses = probe(OPTIONAL_MEDIA_IDS)
+    assert statuses == [404] * len(OPTIONAL_MEDIA_IDS), \
+        f"default UC3D launch exposed optional media: {dict(zip(OPTIONAL_MEDIA_IDS, statuses))}"
+
 def assert_no_runtime_errors(page_errors, runtime_errors, case):
     """A printed browser error must also fail the published-application check."""
     assert isinstance(runtime_errors, list), f"{case}: missing runtime error witness"
@@ -193,9 +207,8 @@ def default_case(playwright, exe, renderer):
         assert_default_snapshot(report)
         assert report["runtime"]["backend"] == renderer, "default UC3D requested backend silently fell back"
         assert report["aspect"] >= 1 and report["grid"]["columns"] == 500, report["grid"]
-        statuses = page.evaluate("""async () => Promise.all(['desktop','image-0'].map(async id =>
-            (await fetch('https://uc3d-media.local/__uc3d/' + id)).status))""")
-        assert statuses == [404, 404], f"default UC3D launch exposed optional media: {statuses}"
+        assert_no_optional_media(report["bootstrap"], lambda ids: page.evaluate("""async ids => Promise.all(ids.map(async id =>
+            (await fetch('https://uc3d-media.local/__uc3d/' + id)).status))""", list(ids)))
         canvas = page.locator("canvas").first
         first_png = canvas.screenshot()
         first = Image.open(io.BytesIO(first_png)).convert("RGB")

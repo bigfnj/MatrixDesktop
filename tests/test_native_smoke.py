@@ -154,5 +154,37 @@ class PortablePresetOwnershipTests(unittest.TestCase):
             self.assertFalse(preset.exists() or backup.exists(), "GUI smoke left files absent before the successful case")
 
 
+class DefaultMediaGrantTests(unittest.TestCase):
+    """AUD-10: the default launch's media check must be able to fail under per-file picture IDs."""
+
+    @staticmethod
+    def probe(served):
+        def statuses(ids):
+            return [200 if media_id in served else 404 for media_id in ids]
+        return statuses
+
+    def test_a_hashed_picture_grant_fails_although_image_0_is_404(self):
+        # Killing mutation: drop the image-list assertion and probe a fixed 'image-0' again.
+        # Under per-file IDs that probe answers 404 for a granted picture, so the check passes.
+        picture = "image-3f2a9c6d1e0b4a57"
+        bootstrap = {"images": [{"id": picture, "url": "https://uc3d-media.local/__uc3d/" + picture}]}
+        with self.assertRaisesRegex(AssertionError, "granted pictures: \\['image-3f2a9c6d1e0b4a57'\\]"):
+            native.assert_no_optional_media(bootstrap, self.probe({picture}))
+
+    def test_a_served_fixed_name_resource_fails(self):
+        with self.assertRaisesRegex(AssertionError, "'music': 200"):
+            native.assert_no_optional_media({"images": []}, self.probe({"music"}))
+
+    def test_no_grant_and_no_served_media_passes(self):
+        probed = []
+
+        def statuses(ids):
+            probed.extend(ids)
+            return [404] * len(ids)
+
+        native.assert_no_optional_media({"images": []}, statuses)
+        self.assertEqual(probed, ["desktop", "music", "effects", "glyphs"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
