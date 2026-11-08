@@ -50,7 +50,11 @@ export default async (canvas, config) => {
 	window.matrixRuntimeDiagnostics = diagnostics; window.__matrixRuntime = diagnostics;
 	canvas.dataset.scene = "matrix"; canvas.dataset.renderer = "regl";
 
+	// R2-22: assigning the canvas size clears it, and a still frame (fps 0, or once) is never
+	// drawn again, so once it is shown the backing size stays as drawn, as in the other scenes.
+	let stillShown = false;
 	const resize = () => {
+		if (stillShown) return;
 		const devicePixelRatio = window.devicePixelRatio ?? 1;
 		canvas.width = Math.max(1, Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution));
 		canvas.height = Math.max(1, Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution));
@@ -214,6 +218,7 @@ export default async (canvas, config) => {
 		diagnostics.simulationTime = clock.seconds();
 		if (singleFrame) {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
+			stillShown = true;
 			if (config.useCamera) stopCamera();
 		}
 	});

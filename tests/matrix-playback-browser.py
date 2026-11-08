@@ -331,25 +331,43 @@ def check_regl_intro_rebase(context, port):
 
 
 def check_regl_single_frame(context, port):
-    """fps=0 must draw one still frame, as UC3D and ZMatrix do, not a black canvas (AUD-47)."""
+    """fps=0 must draw one still frame, as UC3D and ZMatrix do, not a black canvas (AUD-47).
+
+    R2-22: the still frame (fps=0, and once) must also survive a real window resize, which
+    used to assign the canvas size and clear it while ready stayed true.
+    """
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    viewport = page.viewport_size
     try:
-        for fps in ("0", "30"):
-            page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&fps={fps}", wait_until="load")
+        for query, still in (("fps=0", True), ("once=true", True), ("fps=30", False)):
+            page.set_viewport_size(viewport)
+            page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&{query}", wait_until="load")
             page.wait_for_function("window.matrixRuntimeDiagnostics?.frames > 0", timeout=30000)
             page.wait_for_timeout(2000)
             frames = page.evaluate("matrixRuntimeDiagnostics.frames")
             image = capture(page).convert("L")
             bright = sum(image.histogram()[41:]) / (image.width * image.height)
-            assert bright > 0.01, f"fps={fps} canvas is black: {bright:.2%} of pixels above luma 40"
+            assert bright > 0.01, f"{query} canvas is black: {bright:.2%} of pixels above luma 40"
             page.wait_for_timeout(300)
             later = page.evaluate("matrixRuntimeDiagnostics.frames")
-            if fps == "0":
-                assert frames == 1 and later == 1, f"fps=0 must draw exactly one frame: {frames} then {later}"
+            if still:
+                assert frames == 1 and later == 1, f"{query} must draw exactly one frame: {frames} then {later}"
             else:
-                assert later > frames, f"fps=30 control stopped animating at {frames} frames"
+                assert later > frames, f"{query} control stopped animating at {frames} frames"
+            width = page.evaluate("document.querySelector('canvas').clientWidth")
+            page.set_viewport_size({"width": viewport["width"] - 80, "height": viewport["height"] - 40})
+            page.wait_for_timeout(1000)
+            resized = page.evaluate("({ width: document.querySelector('canvas').clientWidth, frames: matrixRuntimeDiagnostics.frames, ready: matrixRuntimeDiagnostics.ready })")
+            assert resized["width"] != width, f"the canvas kept its {width} px width, so the resize check proved nothing"
+            image = capture(page).convert("L")
+            bright = sum(image.histogram()[41:]) / (image.width * image.height)
+            assert bright > 0.01, f"{query} canvas is black after a resize: {bright:.2%} of pixels above luma 40 (ready {resized['ready']})"
+            if still:
+                assert resized["frames"] == 1, f"{query} drew again after a resize: {resized['frames']} frames"
+            else:
+                assert resized["frames"] > later, f"{query} control stopped animating after a resize at {later} frames"
         page.evaluate("matrixRuntimeDiagnostics.dispose()")
         page.wait_for_timeout(100)
         assert not errors, errors
@@ -436,7 +454,7 @@ def main():
                         print("PASS original Matrix regl shader time move with skipIntro=false restarts after the intro ({:.0f} s to {:.0f} s, {:.2%} to {:.2%} bright pixels)".format(
                             intro["before"], intro["after"], intro["brightBefore"], intro["brightAfter"]), flush=True)
                         check_regl_single_frame(context, server.server_port)
-                        print("PASS original Matrix regl fps=0 draws one still frame and an fps=30 control keeps animating", flush=True)
+                        print("PASS original Matrix regl fps=0 and once draw one still frame that survives a window resize, and an fps=30 control keeps animating", flush=True)
                 finally:
                     context.close()
             browser.close()
