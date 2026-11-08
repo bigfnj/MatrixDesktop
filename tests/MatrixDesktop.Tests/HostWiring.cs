@@ -147,6 +147,22 @@ internal static class HostWiring
             Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::WndProc" && call.Callee == "System.Windows.Forms.Form::WndProc"),
                 "MainForm must mark the WM_QUERYENDSESSION dispatch in its own WndProc");
         });
+        // R2-04. The guard's claim has its own tests; this proves the action the takeover listener
+        // posts claims the request, and branches on the claim, before it ends the context.
+        failures += Run($"the wallpaper claims a takeover request before it exits: {path}", () =>
+        {
+            var listeners = DelegateTargets(calls, functionLoads, "MatrixDesktop.MatrixApplicationContext::TakeWallpaperOwnership",
+                "System.Action::.ctor", "MatrixDesktop.WallpaperInstanceGuard::ListenForTakeover");
+            Check.Equal(1, listeners.Count, "witness: the scan must resolve the takeover listener TakeWallpaperOwnership registers");
+            var posted = DelegateTargets(calls, functionLoads, listeners[0], "System.Action::.ctor", "MatrixDesktop.MatrixApplicationContext/CoordinatorWindow::Post");
+            Check.Equal(1, posted.Count, "the takeover listener must post one action to the UI thread: " + listeners[0]);
+            var body = calls.Where(call => call.Caller == posted[0]).ToList();
+            var exit = body.FirstOrDefault(call => call.Callee.EndsWith("::ExitThread", StringComparison.Ordinal));
+            var claim = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.WallpaperInstanceGuard::ClaimTakeover");
+            Check.True(exit is not null, "witness: the posted takeover action must be able to end the context: " + posted[0]);
+            Check.True(claim is not null && claim.Offset < exit!.Offset, "the posted takeover action must claim the request before ExitThread: " + posted[0]);
+            Check.True(claim!.NextOpcode is 0x2C or 0x2D or 0x39 or 0x3A, $"the posted takeover action must branch on the claim (next opcode 0x{claim.NextOpcode:X2})");
+        });
         return failures;
     }
 

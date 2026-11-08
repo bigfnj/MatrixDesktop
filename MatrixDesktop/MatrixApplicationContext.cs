@@ -85,18 +85,36 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             ExitThread();
             return false;
         }
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.Superseded)
+        {
+            // A newer launch asked for the desktop while this one waited; it shows its own settings.
+            Shared.Logger.Info("A newer wallpaper launch superseded this one before it took over; stopping.");
+            ExitThread();
+            return false;
+        }
         if (_instance.Result == WallpaperInstanceGuard.Outcome.Unavailable)
         {
             Shared.Logger.Warn($"The wallpaper single-instance guard is unavailable ({_instance.Problem}); this launch cannot replace another running wallpaper.");
             return true;
         }
         if (_instance.Result == WallpaperInstanceGuard.Outcome.TookOver) Shared.Logger.Info($"Took over from the running wallpaper (scope {scope}).");
-        _instance.ListenForTakeover(() => _coordinator.Post(() =>
-        {
-            Shared.Logger.Info("A newer wallpaper launch took over; exiting.");
-            ExitThread();
-        }));
+        _instance.ListenForTakeover(() => _coordinator.Post(OnTakeoverRequested));
         return true;
+    }
+
+    // R2-04: the request is claimed here, on the UI thread, before the exit. A newcomer that gave
+    // up at its bound has withdrawn it, so this wallpaper keeps the desktop and listens again.
+    private void OnTakeoverRequested()
+    {
+        if (_exiting || _instance is null) return;
+        if (!_instance.ClaimTakeover())
+        {
+            Shared.Logger.Info("A wallpaper takeover request was withdrawn before this launch claimed it; keeping the desktop.");
+            _instance.ListenForTakeover(() => _coordinator.Post(OnTakeoverRequested));
+            return;
+        }
+        Shared.Logger.Info("A newer wallpaper launch took over; exiting.");
+        ExitThread();
     }
 
     private void CreateTray()

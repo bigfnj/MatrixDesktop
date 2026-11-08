@@ -19,7 +19,95 @@ internal static class HostLifecyclePolicyTests
         ("Host wallpaper guard that cannot open its objects lets the launch run and says why", WallpaperGuardUnavailable),
         ("Host renderer process failure reloads, rebuilds or exits as WebView2 requires", RendererFailure),
         ("Host answers a session-end query without tearing down its renderer", SessionEndQuery),
+        ("Host wallpaper guard withdraws a request the holder had not claimed by the newcomer's deadline", WallpaperTakeoverWithdrawn),
+        ("Host wallpaper guard lets the newer of two overlapping launches win", WallpaperNewerOfTwoWins),
     ];
+
+    // R2-04. A newcomer that timed out left its request standing, so a holder slower than the
+    // bound exited afterwards anyway and left no wallpaper at all.
+    private static void WallpaperTakeoverWithdrawn()
+    {
+        var scope = "test-" + Guid.NewGuid().ToString("N");
+        using var holding = new ManualResetEventSlim();
+        using var asked = new ManualResetEventSlim();
+        using var newcomerDone = new ManualResetEventSlim();
+        using var decided = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var claimed = true;
+        var holder = new Thread(() =>
+        {
+            using var held = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+            held.ListenForTakeover(asked.Set);
+            holding.Set();
+            // Slower than the newcomer's bound: the holder reaches the request only afterwards.
+            newcomerDone.Wait(TimeSpan.FromSeconds(20));
+            claimed = held.ClaimTakeover();
+            decided.Set();
+            release.Wait(TimeSpan.FromSeconds(20));
+        }) { IsBackground = true };
+        holder.Start();
+        Check.True(holding.Wait(TimeSpan.FromSeconds(10)), "the holder must acquire");
+        WallpaperInstanceGuard.Outcome late;
+        using (var newcomer = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromMilliseconds(700))) late = newcomer.Result;
+        newcomerDone.Set();
+        Check.True(decided.Wait(TimeSpan.FromSeconds(10)), "the holder must reach the request");
+        Check.True(asked.IsSet, "the newcomer must have asked the holder to exit");
+        Check.Equal(WallpaperInstanceGuard.Outcome.TimedOut, late, "a holder that does not hand over in time keeps the desktop");
+        Check.False(claimed, "a request the newcomer withdrew at its deadline must not make the slow holder exit");
+        using (var scopeMutex = Mutex.OpenExisting($"Local\\MatrixDesktop.Wallpaper.{scope}"))
+        {
+            var taken = false;
+            try { taken = scopeMutex.WaitOne(0); } catch (AbandonedMutexException) { taken = true; }
+            if (taken) scopeMutex.ReleaseMutex();
+            Check.False(taken, "the holder must still own the scope after the newcomer gave up");
+        }
+        release.Set();
+        Check.True(holder.Join(TimeSpan.FromSeconds(10)), "the holder must finish");
+    }
+
+    // R2-04. Of two overlapping newcomers the first to acquire was ended, so the older launch
+    // often won. The holder here claims and takes 300 ms to tear down, as a real one does.
+    private static void WallpaperNewerOfTwoWins()
+    {
+        for (var trial = 0; trial < 12; trial++)
+        {
+            var scope = "test-" + Guid.NewGuid().ToString("N");
+            var offset = trial * 20;
+            using var holding = new ManualResetEventSlim();
+            WallpaperInstanceGuard.Outcome older = default, newer = default;
+            var newerClaimed = false;
+            var holder = new Thread(() =>
+            {
+                using var held = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                using var asked = new ManualResetEventSlim();
+                held.ListenForTakeover(asked.Set);
+                holding.Set();
+                if (asked.Wait(TimeSpan.FromSeconds(10)) && held.ClaimTakeover()) Thread.Sleep(300);
+            }) { IsBackground = true };
+            holder.Start();
+            Check.True(holding.Wait(TimeSpan.FromSeconds(10)), "the holder must acquire");
+            var first = new Thread(() =>
+            {
+                using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(10));
+                older = guard.Result;
+            }) { IsBackground = true };
+            var second = new Thread(() =>
+            {
+                using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(10));
+                newer = guard.Result;
+                using var asked = new ManualResetEventSlim();
+                guard.ListenForTakeover(asked.Set);
+                if (asked.Wait(300)) newerClaimed = guard.ClaimTakeover();
+            }) { IsBackground = true };
+            first.Start();
+            Thread.Sleep(offset);
+            second.Start();
+            Check.True(first.Join(TimeSpan.FromSeconds(15)) && second.Join(TimeSpan.FromSeconds(15)) && holder.Join(TimeSpan.FromSeconds(15)), $"all three launches must finish (trial {trial})");
+            Check.Equal(WallpaperInstanceGuard.Outcome.TookOver, newer, $"the newer launch must take over (trial {trial}, {offset} ms apart)");
+            Check.Equal(WallpaperInstanceGuard.Outcome.Superseded, older, $"the older newcomer must stop quietly and never take over (trial {trial}, {offset} ms apart)");
+            Check.False(newerClaimed, $"nothing may ask the winner to leave once the older newcomer stopped (trial {trial})");
+        }
+    }
 
     // R2-01. A fullscreen, windowed or screensaver surface disposed its WebView on
     // WM_QUERYENDSESSION and stayed black after WM_ENDSESSION(FALSE). MainForm's use of this
