@@ -644,6 +644,44 @@ def check_glyph_intensity(browser, origin):
                f"luma {dark:.1f} at 0 vs {bright:.1f} at 2")
 
 
+def check_inherited_effect_names(browser, origin):
+    """An unknown effect name falls back to palette, including names every object inherits.
+
+    The renderer picked its effect with `config.effect in effects`, which is also true for
+    constructor, toString and __proto__, so effect=constructor handed Object to the pipeline
+    as a pass factory and the renderer failed to start instead of falling back (AUD-79).
+    """
+    problems, frames = [], []
+    for name in ("constructor", "toString", "__proto__"):
+        page = browser.new_page(viewport={"width": 320, "height": 240})
+        errors = []
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        try:
+            page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=20&effect={name}", wait_until="load")
+            try:
+                page.wait_for_function("window.matrixRuntimeDiagnostics?.frames > 3"
+                                       " || window.matrixRuntimeDiagnostics?.errors.length > 0"
+                                       " || document.querySelector('.notice') != null", timeout=30000)
+            except Exception:
+                pass  # reported below from the state the page reached
+            state = page.evaluate("""() => ({
+                frames: window.matrixRuntimeDiagnostics?.frames ?? 0,
+                errors: window.matrixRuntimeDiagnostics?.errors ?? [],
+                notice: document.querySelector('.notice')?.textContent.trim() ?? null })""")
+        finally:
+            page.close()
+        found = [(text.splitlines() or [""])[0] for text in
+                 errors + state["errors"] + ([state["notice"]] if state["notice"] else [])]
+        frames.append(f"{name} {state['frames']}")
+        if state["frames"] <= 3 or found:
+            problems.append(f"effect={name}: {state['frames']} frames; " + "; ".join(found[:2]))
+    if problems:
+        fail("inherited effect names fall back to the palette render", " | ".join(problems))
+    else:
+        ok("inherited effect names fall back to the palette render", "frames: " + ", ".join(frames))
+
+
 def check_matrix_web(page, origin):
     """The vendored bundle. Asserts it boots and draws, which nothing in CI covered before."""
     errors = []
@@ -722,6 +760,7 @@ def main():
             page = browser.new_page(viewport=VIEWPORT)
             check_matrix_web(page, web_origin)
             page.close()
+            check_inherited_effect_names(browser, web_origin)
 
             print("=== web smoke: flags actually do something ===")
             check_glyph_intensity(browser, web_origin)

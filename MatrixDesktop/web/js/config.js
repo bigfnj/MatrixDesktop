@@ -638,7 +638,7 @@ paramMapping.colors = paramMapping.stripeColors;
 export default (urlParams) => {
 	const validParams = Object.fromEntries(
 		Object.entries(urlParams)
-			.filter(([key]) => key in paramMapping)
+			.filter(([key]) => Object.hasOwn(paramMapping, key))
 			.map(([key, value]) => [paramMapping[key].key, paramMapping[key].parser(value)])
 			.filter(([_, value]) => value != null),
 	);
@@ -667,8 +667,8 @@ export default (urlParams) => {
 		}
 	}
 
-	const version = validParams.version in versions ? versions[validParams.version] : versions.classic;
-	const fontName = [validParams.font, version.font, defaults.font].find((name) => name in fonts);
+	const version = Object.hasOwn(versions, validParams.version) ? versions[validParams.version] : versions.classic;
+	const fontName = [validParams.font, version.font, defaults.font].find((name) => Object.hasOwn(fonts, name));
 	const font = fonts[fontName];
 
 	const baseTextureURL = textureURLs[[version.baseTexture, defaults.baseTexture].find((name) => name in textureURLs)];

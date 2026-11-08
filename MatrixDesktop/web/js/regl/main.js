@@ -137,7 +137,7 @@ export default async (canvas, config) => {
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	let activeFrames = 0;
 	const withClock = regl({ context: { time: () => clock.seconds(), tick: () => activeFrames } });
-	const effectName = config.effect in effects ? config.effect : "palette";
+	const effectName = Object.hasOwn(effects, config.effect) ? config.effect : "palette";
 	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas, elapsedSeconds: () => clock.seconds() };
 	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };

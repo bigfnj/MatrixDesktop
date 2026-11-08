@@ -172,7 +172,7 @@ export default async (canvas, config) => {
 		elapsedSeconds,
 	};
 
-	const effectName = config.effect in effects ? config.effect : "palette";
+	const effectName = Object.hasOwn(effects, config.effect) ? config.effect : "palette";
 	pipeline = await makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeEndPass]);
 
 	const targetFrameTimeMilliseconds = 1000 / config.fps;
