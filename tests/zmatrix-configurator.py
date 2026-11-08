@@ -667,13 +667,21 @@ def check_font_list(page, _fixture):
 
 
 def check_filter_actions(page, _fixture):
-    for text, shown in (("screensaver", True), ("RESTORE SCREEN", True), ("cursor", True), ("palette", False), ("", True)):
+    # The second case is the restore button's own label cut mid-word and upper-cased: partial, in
+    # another case and naming that button only. Taken from the page, it follows a rename as the
+    # filter does; AUD-61 relabelled "Restore screensaver" (cut: 'RESTORE SCREEN') to the docs' name.
+    label = lambda selector: " ".join(page.locator(selector).inner_text().split())
+    restore, use = label("#restoreScreensaverButton"), label("#screensaverButton")
+    partial = restore[:-5].upper()
+    assert len(partial) > 8 and partial != partial.lower() and partial.lower() not in use.lower(), \
+        "witness: " + repr(partial) + " must be a case-changed part of the restore label only: " + repr([restore, use])
+    for text, shown in (("screensaver", True), (partial, True), ("cursor", True), ("palette", False), ("", True)):
         page.locator("#fieldFilter").fill(text)
         now = page.evaluate("""() => ({buttons: ['#screensaverButton', '#restoreScreensaverButton'].map(id => document.querySelector(id)?.isConnected ?? false),
             empty: Boolean(document.querySelector('.empty-hint')), grids: document.querySelectorAll('#section-launch .field-grid').length,
             fields: document.querySelectorAll('#section-launch .field').length})""")
         assert now["buttons"] == [shown, shown], "filter " + repr(text) + (" lost" if shown else " kept") + " the screensaver actions: " + str(now)
-        if text in ("screensaver", "RESTORE SCREEN"):
+        if text in ("screensaver", partial):
             assert not now["empty"] and now["grids"] == 0, "an action-only match showed an empty hint or an empty field grid: " + str(now)
             assert page.locator("#screensaverButton").is_visible() and page.locator("#restoreScreensaverButton").is_visible()
         if text == "cursor":
