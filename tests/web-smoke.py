@@ -55,10 +55,22 @@ def fail(name, detail):
     print(f"  FAIL  {name}: {detail}")
 
 
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    """Static files without a stderr line per request.
+
+    The override has to live on the class. It used to be assigned to the functools.partial,
+    which the server never consults: it instantiates the class, so log_message still resolved
+    to BaseHTTPRequestHandler's and every request went to stderr. The gate prints all of
+    stderr as the detail of a harness error, so that noise buried the line naming the error.
+    """
+
+    def log_message(self, format, *args):
+        pass
+
+
 def serve(directory):
     """A localhost origin, because <script type="module"> will not load over file://."""
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
-    handler.log_message = lambda *a, **k: None
+    handler = functools.partial(_QuietHandler, directory=str(directory))
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -66,6 +78,41 @@ def serve(directory):
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{port}"
+
+
+def check_server_is_quiet():
+    """serve() answers a found and a missing path without writing anything to stderr."""
+    import contextlib
+    import tempfile
+    import urllib.error
+    import urllib.request
+
+    captured = io.StringIO()
+    statuses = []
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+        (Path(folder) / "present.txt").write_text("present", encoding="utf-8")
+        httpd, origin = serve(folder)
+        try:
+            with contextlib.redirect_stderr(captured):
+                with urllib.request.urlopen(f"{origin}/present.txt", timeout=10) as response:
+                    response.read()
+                    statuses.append(response.status)
+                try:
+                    urllib.request.urlopen(f"{origin}/missing.txt", timeout=10).close()
+                    statuses.append(200)
+                except urllib.error.HTTPError as error:
+                    statuses.append(error.code)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+    noise = [line for line in captured.getvalue().splitlines() if line.strip()]
+    if statuses != [200, 404]:
+        fail("the static server writes nothing to stderr", f"expected statuses [200, 404], got {statuses}")
+    elif noise:
+        fail("the static server writes nothing to stderr",
+             f"{len(noise)} stderr line(s) for two requests, first: {noise[0]}")
+    else:
+        ok("the static server writes nothing to stderr", "one 200 and one 404 request")
 
 
 STUB = """
@@ -691,6 +738,9 @@ def main():
     except ImportError as exc:
         print(f"  a dependency is missing for this interpreter: {exc}", file=sys.stderr)
         return 2
+
+    print("=== web smoke: harness ===")
+    check_server_is_quiet()
 
     cfg_httpd, cfg_origin = serve(CONFIGURATOR)
     web_httpd, web_origin = serve(WEB)
