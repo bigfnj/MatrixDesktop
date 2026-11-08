@@ -762,6 +762,85 @@ try {
         Assert-Equal 'unchecked' $verdict.Outcome "the exit 2 carries its witness ($($verdict.Detail))"
         if ($verdict.Detail -notlike 'UNVERIFIED: chromium is unavailable: *') { throw "the reason does not say chromium is unavailable ($($verdict.Detail))" }
     }
+
+    # ------------------------------------------------------------ R2-33 release publish parity
+
+    # The gate's own publish arguments, read back from run-gate.ps1 as AUD-63 (b) reads them.
+    function Get-GatePublishArguments {
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $assignments = @($gateAst.FindAll({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] }, $true))
+        $arguments = @()
+        foreach ($name in '$PublishArguments', '$PublishFlags') {
+            $found = @($assignments | Where-Object { $_.Left.Extent.Text -eq $name })
+            Assert-Equal 1 $found.Count "run-gate.ps1 assigns $name once"
+            $arguments += [string[]]@($found[0].Right.Expression.SafeGetValue())
+        }
+        return $arguments
+    }
+
+    # Every sub-assertion runs, so a mutation shows exactly which ones it breaks.
+    function Assert-ParityVariants {
+        param([string[]]$GateArguments, [object[]]$Variants)
+        $wrong = @()
+        foreach ($variant in $Variants) {
+            $problems = @(Get-ReleasePublishParityProblems -YamlText $variant.Text -GateArguments $GateArguments)
+            $want = @($variant.Want)
+            $ok = $problems.Count -eq $want.Count
+            for ($k = 0; $ok -and $k -lt $want.Count; $k++) { $ok = $problems[$k] -like $want[$k] }
+            if (-not $ok) { $wrong += "$($variant.Label): expected $($want.Count) problem(s) like '$($want -join ''' / ''')', got $($problems.Count): '$($problems -join ''' / ''')'" }
+        }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
+    Invoke-TestCase 'R2-33 (a) release publish parity is two-way and last-wins, over the real release.yml' {
+        $gateArguments = @(Get-GatePublishArguments)
+        $lines = @([IO.File]::ReadAllText((Join-Path (Split-Path -Parent $here) '.github\workflows\release.yml')) -split "`r?`n")
+        function Find-Lines { param([string]$Pattern) @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match $Pattern) { $i } }) }
+        # The text with some lines replaced (a replacement may hold "`n" for added lines) or removed.
+        function Edit-Lines {
+            param([hashtable]$Replace = @{}, [int[]]$Remove = @())
+            $out = for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($Remove -contains $i) { continue }
+                if ($Replace.ContainsKey($i)) { $Replace[$i] } else { $lines[$i] }
+            }
+            return (@($out) -join "`n")
+        }
+        $r2r = @(Find-Lines '^\s*-p:PublishReadyToRun=true `$')
+        $symbols = @(Find-Lines '^\s*-p:DebugSymbols=true `$')
+        $runtime = @(Find-Lines '^\s*--no-self-contained `$')
+        $last = @(Find-Lines '^\s*-p:FileVersion=[^`]*$')
+        Assert-Equal '2,2,2,2' "$($r2r.Count),$($symbols.Count),$($runtime.Count),$($last.Count)" 'release.yml has two publish steps with the lines the variants edit'
+        $indent = $lines[$symbols[0]] -replace '\S.*$', ''
+        Assert-ParityVariants -GateArguments $gateArguments -Variants @(
+            @{ Label = 'as committed'; Text = (Edit-Lines); Want = @() }
+            @{ Label = '+InvariantGlobalization in step 1'; Text = (Edit-Lines -Replace @{ $symbols[0] = $lines[$symbols[0]] + "`n" + $indent + '-p:InvariantGlobalization=true `' })
+                Want = 'publish step 1 (release.yml line *) sets InvariantGlobalization=true, which only release.yml sets*' }
+            @{ Label = '+PublishReadyToRun=false as the last argument of step 2'; Text = (Edit-Lines -Replace @{ $last[1] = $lines[$last[1]] + ' `' + "`n" + $indent + '-p:PublishReadyToRun=false' })
+                Want = 'publish step 2 (release.yml line *) sets PublishReadyToRun=false; the gate publishes with PublishReadyToRun=true' }
+            @{ Label = '--self-contained in step 1'; Text = (Edit-Lines -Replace @{ $runtime[0] = $lines[$runtime[0]] -replace '--no-self-contained', '--self-contained' })
+                Want = 'publish step 1 (release.yml line *) sets SelfContained=true; the gate publishes with SelfContained=false' }
+            # pwsh ends the command at a comment line, even after a backtick.
+            @{ Label = 'step 2 ReadyToRun only in a comment'; Text = (Edit-Lines -Remove @($r2r[1]) -Replace @{ $last[1] = $lines[$last[1]] + ' `' + "`n" + $indent + '# -p:PublishReadyToRun=true' })
+                Want = 'publish step 2 (release.yml line *) does not set PublishReadyToRun; the gate publishes with PublishReadyToRun=true' }
+            @{ Label = 'control: step 2 ReadyToRun removed'; Text = (Edit-Lines -Remove @($r2r[1]))
+                Want = 'publish step 2 (release.yml line *) does not set PublishReadyToRun; the gate publishes with PublishReadyToRun=true' }
+        )
+    }
+
+    Invoke-TestCase 'R2-33 (b) the parity parser reads every property form, and names a profile, an unknown switch and a third publish' {
+        $gateArguments = @('-c', 'Release', '-r', 'win-x64', '--no-self-contained', '-p:PublishReadyToRun=true', '-p:DebugType=embedded')
+        $one = @('      - name: Publish one (dotnet publish in a step name is not a command)', '        shell: pwsh', '        run: |',
+            '          dotnet publish A.csproj /p:PublishReadyToRun=true;AssemblyVersion=1.2.3.0 -c:Release `',
+            '            --runtime "win-x64" --self-contained false -property:DebugType=embedded `',
+            '            -p:Version=${{ steps.version.outputs.version }} -p:PublishDir="bin\out dir\" --nologo -v minimal') -join "`n"
+        $two = "      - name: Publish two`n        run: dotnet publish B.csproj -c Release -r win-x64 --no-self-contained -p:PublishReadyToRun=true -p:DebugType=embedded"
+        Assert-ParityVariants -GateArguments $gateArguments -Variants @(
+            @{ Label = 'every form'; Text = "$one`n$two"; Want = @() }
+            @{ Label = 'a publish profile'; Text = "$one`n$two -p:PublishProfile=Portable"; Want = 'publish step 2 (release.yml line 8) loads the publish profile Portable*' }
+            @{ Label = 'an unknown switch'; Text = "$one`n$two --use-current-runtime"; Want = "publish step 2 (release.yml line 8) passes '--use-current-runtime', which this check does not understand" }
+            @{ Label = 'a third publish'; Text = "$one`n$two`n$two"; Want = "expected 2 'dotnet publish' commands in release.yml, found 3*" }
+        )
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }

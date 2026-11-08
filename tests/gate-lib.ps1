@@ -504,3 +504,123 @@ function Get-FixtureSuiteVerdicts {
         [pscustomobject]@{ Name = $_; Outcome = $(if ($why) { 'unchecked' } else { 'run' }); Detail = $why }
     })
 }
+
+# ---------------------------------------------------------------- release publish parity
+
+# release.yml publishes each executable with its own 'dotnet publish' command, and the gate
+# signs off on what its own publish builds, so the two must build the same thing. Checking that
+# each gate flag appears somewhere in each step passed a property set only in release.yml, a
+# later override of a gate flag (MSBuild keeps the last value), --self-contained and a flag left
+# only in a comment (R2-33). This compares the EFFECTIVE properties both ways instead. -Ignore
+# holds what may differ: the output folder and the version stamps taken from the tag. Problems
+# name the step; an empty list means parity.
+function Get-ReleasePublishParityProblems {
+    param(
+        [Parameter(Mandatory = $true)][string]$YamlText,
+        [Parameter(Mandatory = $true)][string[]]$GateArguments,
+        [string[]]$Ignore = @('PublishDir', 'Version', 'AssemblyVersion', 'FileVersion'),
+        [int]$StepCount = 2
+    )
+    $problems = @()
+    $expected = ConvertTo-PublishProperties -Arguments $GateArguments
+    foreach ($token in $expected.Unknown) { $problems += "the gate's own publish passes '$token', which this check does not understand" }
+    $commands = @(Get-PublishCommands -YamlText $YamlText)
+    if ($commands.Count -ne $StepCount) {
+        return @($problems + "expected $StepCount 'dotnet publish' commands in release.yml, found $($commands.Count); the parity check cannot be trusted")
+    }
+    for ($n = 0; $n -lt $commands.Count; $n++) {
+        $step = "publish step $($n + 1) (release.yml line $($commands[$n].Line))"
+        $actual = ConvertTo-PublishProperties -Arguments $commands[$n].Arguments
+        foreach ($token in $actual.Unknown) { $problems += "$step passes '$token', which this check does not understand" }
+        foreach ($name in @($expected.Properties.Keys | Sort-Object)) {
+            if ($Ignore -contains $name) { continue }
+            $want = $expected.Properties[$name]
+            if (-not $actual.Properties.ContainsKey($name)) { $problems += "$step does not set $name; the gate publishes with $name=$want" }
+            elseif ($actual.Properties[$name] -ne $want) { $problems += "$step sets $name=$($actual.Properties[$name]); the gate publishes with $name=$want" }
+        }
+        foreach ($name in @($actual.Properties.Keys | Sort-Object)) {
+            if ($Ignore -contains $name -or $expected.Properties.ContainsKey($name)) { continue }
+            if ($name -eq 'PublishProfile') { $problems += "$step loads the publish profile $($actual.Properties[$name]), whose properties the gate does not publish with" }
+            else { $problems += "$step sets $name=$($actual.Properties[$name]), which only release.yml sets; the gate publishes without it" }
+        }
+    }
+    return $problems
+}
+
+# Each 'dotnet publish' command in a workflow: its line number and its argument tokens after
+# 'publish'. A comment starts at a '#' that opens a line or follows whitespace, as in pwsh and
+# YAML, and a line ending in a backtick continues on the next, so a flag commented out at the
+# end of the chain ends the command there, as it does in pwsh.
+function Get-PublishCommands {
+    param([Parameter(Mandatory = $true)][string]$YamlText)
+    $lines = @($YamlText -split "`r?`n" | ForEach-Object { ($_ -replace '(^|\s)#.*$', '').TrimEnd() })
+    $commands = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*(-\s+)?name\s*:') { continue }
+        $m = [regex]::Match($lines[$i], '\bdotnet\s+publish\b(?<rest>.*)$')
+        if (-not $m.Success) { continue }
+        $start = $i + 1
+        $text = $m.Groups['rest'].Value
+        while ($text.EndsWith('`') -and $i + 1 -lt $lines.Count) {
+            $i++
+            $text = $text.Substring(0, $text.Length - 1) + ' ' + $lines[$i]
+        }
+        $commands += [pscustomobject]@{ Line = $start; Arguments = @(Split-PublishArguments -Text $text) }
+    }
+    return $commands
+}
+
+# Splits a command line on whitespace, keeping quoted text and each GitHub '${{ ... }}'
+# expression in one token, and removes the quotes.
+function Split-PublishArguments {
+    param([AllowEmptyString()][string]$Text)
+    $flat = [regex]::Replace($Text, '\$\{\{.*?\}\}', { param($m) $m.Value -replace '\s+', '' })
+    return @([regex]::Matches($flat, '(?:"[^"]*"|''[^'']*''|[^\s"''])+') | ForEach-Object { $_.Value -replace '["'']', '' })
+}
+
+# The MSBuild global properties a 'dotnet publish' argument list sets, the last value winning
+# as in MSBuild: -p:, -property:, --property:, /p: and /property: (several per flag with ';'),
+# -c and -r and their long forms, --self-contained [true|false] or --sc, --no-self-contained.
+# --nologo and -v change console output only. The first bare token is the project. Anything
+# else lands in Unknown, so a switch this function was never taught fails the parity check.
+function ConvertTo-PublishProperties {
+    param([AllowEmptyCollection()][string[]]$Arguments = @())
+    $properties = @{}
+    $unknown = @()
+    $project = $null
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $token = $Arguments[$i]
+        $m = [regex]::Match($token, '^(?:--?property|-p|/p(?:roperty)?):(?<list>.*)$', 'IgnoreCase')
+        if ($m.Success) {
+            foreach ($pair in @($m.Groups['list'].Value -split ';' | Where-Object { $_ })) {
+                $eq = $pair.IndexOf('=')
+                if ($eq -lt 1) { $unknown += $token; continue }
+                $properties[$pair.Substring(0, $eq).Trim()] = $pair.Substring($eq + 1).Trim()
+            }
+            continue
+        }
+        $m = [regex]::Match($token, '^(?<switch>-c|--configuration|-r|--runtime|-v|--verbosity)(?:[:=](?<value>.*))?$', 'IgnoreCase')
+        if ($m.Success) {
+            if ($m.Groups['value'].Success) { $value = $m.Groups['value'].Value }
+            elseif ($i + 1 -lt $Arguments.Count) { $i++; $value = $Arguments[$i] }
+            else { $unknown += $token; continue }
+            $switch = $m.Groups['switch'].Value.ToLowerInvariant()
+            if ($switch -eq '-c' -or $switch -eq '--configuration') { $properties['Configuration'] = $value }
+            elseif ($switch -eq '-r' -or $switch -eq '--runtime') { $properties['RuntimeIdentifier'] = $value }
+            continue
+        }
+        $m = [regex]::Match($token, '^(?:--self-contained|--sc)(?:[:=](?<value>.*))?$', 'IgnoreCase')
+        if ($m.Success) {
+            $value = 'true'
+            if ($m.Groups['value'].Success) { $value = $m.Groups['value'].Value }
+            elseif ($i + 1 -lt $Arguments.Count -and $Arguments[$i + 1] -match '^(?:true|false)$') { $i++; $value = $Arguments[$i] }
+            $properties['SelfContained'] = $value.ToLowerInvariant()
+            continue
+        }
+        if ($token -eq '--no-self-contained') { $properties['SelfContained'] = 'false'; continue }
+        if ($token -eq '--nologo') { continue }
+        if ($null -eq $project -and $token -notmatch '^[-/]') { $project = $token; continue }
+        $unknown += $token
+    }
+    return [pscustomobject]@{ Project = $project; Properties = $properties; Unknown = $unknown }
+}

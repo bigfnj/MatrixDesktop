@@ -976,7 +976,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     # difference between what is measured and what a user downloads. DebugType/DebugSymbols
     # matter just as much, because without them the "no .pdb" assertion below was passing on a
     # publish that had no reason to emit one, which is a check that cannot fail.
-    # The release-parity check further down holds the two lists together.
+    # The release-parity check further down compares the effective properties of this publish
+    # and of each release.yml publish step, both ways (R2-33).
+    $PublishArguments = @('-c', 'Release', '-r', 'win-x64', '--no-self-contained')
     $PublishFlags = @(
         '-p:PublishSingleFile=false'
         '-p:PublishReadyToRun=true'
@@ -990,7 +992,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
     $publishOk = $true
     foreach ($proj in 'MatrixDesktop\MatrixDesktop.csproj', 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj') {
-        & dotnet publish (Join-Path $RepoRoot $proj) -c Release -r win-x64 --no-self-contained `
+        & dotnet publish (Join-Path $RepoRoot $proj) @PublishArguments `
             @PublishFlags -p:PublishDir="$GatePublishDir\" --nologo -v:minimal | Out-Null
         if ($LASTEXITCODE -ne 0) { $publishOk = $false; Test-Fail "publish $proj" }
     }
@@ -1047,39 +1049,24 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             Test-Fail 'repository has a LICENSE' 'no LICENSE at the repo root, and this is a public repo'
         }
 
-        # Assert the CONDITION, not the presence of a line: every flag the gate publishes with
-        # must appear in each of release.yml's two publish steps. Checking only that the file
-        # mentions PublishReadyToRun somewhere would still pass if it were moved, commented out,
-        # or applied to just one of the two executables.
+        # Each of release.yml's two publish steps must set every property this publish sets, to
+        # the same EFFECTIVE value, and nothing else but its output folder and the version
+        # stamps: comments dropped, continuations joined, the last value winning as in MSBuild
+        # (Get-ReleasePublishParityProblems, gate-lib.ps1). The substring check this replaces
+        # passed a property set only in release.yml, a later override, --self-contained and a
+        # flag left only in a comment (R2-33).
         $releaseYml = Join-Path $RepoRoot '.github\workflows\release.yml'
         if (-not (Test-Path -LiteralPath $releaseYml -PathType Leaf)) {
             Test-Fail 'gate publishes what release.yml publishes' "not found: $releaseYml"
         } else {
-            $ymlText = Get-Content -LiteralPath $releaseYml -Raw
-            # Bounded by the next step header or end of file, NOT by a blank line. A blank
-            # line terminator looked fine until a mutation removed one flag and left the line
-            # whitespace-only, which truncated the capture and made the gate report four
-            # missing flags instead of the one that was actually removed. It still failed, but
-            # a check that misidentifies what broke is most of the way to being useless.
-            $steps = @([regex]::Matches($ymlText, '(?s)dotnet publish\s+(.*?)(?=\r?\n\s{6}- name|\Z)'))
-            if ($steps.Count -ne 2) {
+            $gatePublish = @($PublishArguments) + @($PublishFlags)
+            $drift = @(Get-ReleasePublishParityProblems -YamlText ([IO.File]::ReadAllText($releaseYml)) -GateArguments $gatePublish)
+            if ($drift.Count -gt 0) {
                 Test-Fail 'gate publishes what release.yml publishes' `
-                    "expected 2 'dotnet publish' steps in release.yml, found $($steps.Count); the parity check cannot be trusted"
+                    ("the gate would measure a payload the release does not build: " + ($drift -join '; '))
             } else {
-                $drift = @()
-                foreach ($flag in $PublishFlags) {
-                    for ($i = 0; $i -lt $steps.Count; $i++) {
-                        if ($steps[$i].Groups[1].Value -notmatch [regex]::Escape($flag)) {
-                            $drift += "$flag (missing from publish step $($i + 1))"
-                        }
-                    }
-                }
-                if ($drift.Count -gt 0) {
-                    Test-Fail 'gate publishes what release.yml publishes' `
-                        ("the gate would measure a payload the release does not build: " + ($drift -join '; '))
-                } else {
-                    Test-Ok "gate publishes what release.yml publishes ($($PublishFlags.Count) flags matched in both steps)"
-                }
+                $gateProperties = (ConvertTo-PublishProperties -Arguments $gatePublish).Properties.Count
+                Test-Ok "gate publishes what release.yml publishes (both steps set the gate's $gateProperties properties to the same values, and nothing else but the output folder and version stamps)"
             }
         }
     }
