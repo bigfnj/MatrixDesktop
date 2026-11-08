@@ -28,12 +28,12 @@ internal static class ScreensaverProtocol
         }
         if (command == "--register-screensaver")
         {
-            ScreensaverRegistration.Register(Path.Combine(AppContext.BaseDirectory, "MatrixDesktop.scr"));
+            ReportRefusal(command, ScreensaverRegistration.RunRegisterCommand(Path.Combine(AppContext.BaseDirectory, "MatrixDesktop.scr")));
             return true;
         }
         if (command == "--restore-screensaver")
         {
-            ScreensaverRegistration.Restore();
+            ReportRefusal(command, ScreensaverRegistration.RunRestoreCommand());
             return true;
         }
         var profile = ScreensaverProfile.Load();
@@ -47,5 +47,14 @@ internal static class ScreensaverProtocol
             throw new ArgumentException("Screensaver preview requires /p followed by a valid parent window handle.");
         plan = new HostLaunchPlan(profile, HostLaunchKind.ScreensaverPreview, (nint)handle);
         return true;
+    }
+
+    // A refused registration command is a warning and exit code 1, not a crash dialog and a dump.
+    private static void ReportRefusal(string command, (bool Ok, string? Message) result)
+    {
+        if (result.Ok) return;
+        Environment.ExitCode = 1;
+        Shared.Logger.Warn($"{command} refused: {result.Message}");
+        MessageBox.Show(result.Message, "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }

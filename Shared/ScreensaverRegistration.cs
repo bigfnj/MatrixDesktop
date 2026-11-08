@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security;
 using Microsoft.Win32;
 
 namespace Shared;
@@ -16,12 +17,19 @@ internal static class ScreensaverRegistration
 
     public static void Register(string scrPath)
     {
-        scrPath = Path.GetFullPath(scrPath);
-        if (!File.Exists(scrPath) || !scrPath.EndsWith(".scr", StringComparison.OrdinalIgnoreCase))
-            throw new FileNotFoundException("The MatrixDesktop screensaver is missing. Publish or build the complete application first.", scrPath);
+        scrPath = RequireScreensaverFile(scrPath);
         using var desktop = Registry.CurrentUser.CreateSubKey(DesktopKey);
         using var backup = Registry.CurrentUser.CreateSubKey(BackupKey);
         RegisterWithKeys(scrPath, desktop, backup, GetActive(), SetActive);
+    }
+
+    // Runs before any registry access, so a missing saver never touches the current selection.
+    internal static string RequireScreensaverFile(string scrPath)
+    {
+        scrPath = Path.GetFullPath(scrPath);
+        if (!File.Exists(scrPath) || !scrPath.EndsWith(".scr", StringComparison.OrdinalIgnoreCase))
+            throw new ScreensaverRegistrationRefusedException("The MatrixDesktop screensaver is missing. Publish or build the complete application first.");
+        return scrPath;
     }
 
     internal static void RegisterWithKeys(string scrPath, RegistryKey desktop, RegistryKey backup, bool previousActive, Action<bool> setActive)
@@ -76,20 +84,42 @@ internal static class ScreensaverRegistration
         Registry.CurrentUser.DeleteSubKeyTree(BackupKey, throwOnMissingSubKey: false);
     }
 
+    // The CLI commands report a designed refusal or an expected Windows failure as a warning.
+    // Escaping Main made a documented refusal look like a crash: a minidump that could evict a
+    // real one, an ERROR log line and "MatrixDesktop crashed.". Anything else is a defect and
+    // still propagates to the crash handler.
+    public static (bool Ok, string? Message) RunRegisterCommand(string scrPath) => RunCommand(() => Register(scrPath));
+    public static (bool Ok, string? Message) RunRestoreCommand() => RunCommand(Restore);
+    internal static (bool Ok, string? Message) RunRestoreCommandWithKeys(RegistryKey desktop, RegistryKey backup, bool currentActive, Action<bool> setActive)
+        => RunCommand(() => RestoreWithKeys(desktop, backup, currentActive, setActive));
+
+    internal static (bool Ok, string? Message) RunCommand(Action command)
+    {
+        try
+        {
+            command();
+            return (true, null);
+        }
+        catch (Exception error) when (error is ScreensaverRegistrationRefusedException or Win32Exception or UnauthorizedAccessException or SecurityException)
+        {
+            return (false, error.Message);
+        }
+    }
+
     internal static void RestoreWithKeys(RegistryKey desktop, RegistryKey backup, bool currentActive, Action<bool> setActive)
     {
         // Do not overwrite a replacement the owner selected after MatrixDesktop.
         var ours = backup.GetValue("RegisteredPath") as string;
         var current = desktop.GetValue("SCRNSAVE.EXE") as string;
         if (!string.Equals(current, ours, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The current screensaver has changed since MatrixDesktop was selected. The saved previous choice was retained.");
+            throw new ScreensaverRegistrationRefusedException("The current screensaver has changed since MatrixDesktop was selected. The saved previous choice was retained.");
         var restored = new System.Collections.Generic.Dictionary<string, (object? Value, RegistryValueKind Kind)>();
         foreach (var name in Values)
         {
             if (backup.GetValue(name + ".present") is int present && present == 1)
             {
                 var value = backup.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames)
-                    ?? throw new InvalidDataException("The previous screensaver backup is incomplete.");
+                    ?? throw new ScreensaverRegistrationRefusedException("The previous screensaver backup is incomplete.");
                 var kind = backup.GetValue(name + ".kind") is int savedKind ? (RegistryValueKind)savedKind : RegistryValueKind.String;
                 restored[name] = (value, kind);
             }
@@ -149,3 +179,6 @@ internal static class ScreensaverRegistration
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SystemParametersInfoSet(uint action, uint parameter, IntPtr value, uint flags);
 }
+
+// A request that was understood and declined to protect the owner's selection or a damaged backup.
+internal sealed class ScreensaverRegistrationRefusedException(string message) : InvalidOperationException(message);
