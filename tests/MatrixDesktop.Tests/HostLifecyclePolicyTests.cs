@@ -47,16 +47,18 @@ internal static class HostLifecyclePolicyTests
             Check.Equal(RendererFailureAction.LogOnly, new RendererFailurePolicy().Decide(RendererFailureKind.Other, wallpaper, start),
                 $"WebView2 restarts GPU, utility and other processes itself (wallpaper={wallpaper})");
 
-        // An unresponsive renderer is reported again about every 15 s while it stays hung.
+        // An unresponsive renderer is reported again about every 15 s while it stays hung. R2-05:
+        // WebView2 reports it only for unanswered input or navigation, so only a fullscreen or
+        // windowed host (wallpaper: false) gets it; the disabled wallpaper window never does.
         var hung = new RendererFailurePolicy();
-        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start), "one unresponsive report only logs");
-        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 15_000), "two unresponsive reports only log");
-        Check.Equal(RendererFailureAction.Reload, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 30_000), "three consecutive unresponsive reports reload the page");
-        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 45_000), "a reload starts the unresponsive count over");
+        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start), "one unresponsive report only logs");
+        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start + 15_000), "two unresponsive reports only log");
+        Check.Equal(RendererFailureAction.Reload, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start + 30_000), "three consecutive unresponsive reports reload a fullscreen or windowed page");
+        Check.Equal(RendererFailureAction.LogOnly, hung.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start + 45_000), "a reload starts the unresponsive count over");
         var answered = new RendererFailurePolicy();
-        answered.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start);
-        answered.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 15_000);
-        Check.Equal(RendererFailureAction.LogOnly, answered.Decide(RendererFailureKind.RenderProcessUnresponsive, true, start + 15_000 + RendererFailurePolicy.UnresponsiveGapMs + 1),
+        answered.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start);
+        answered.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start + 15_000);
+        Check.Equal(RendererFailureAction.LogOnly, answered.Decide(RendererFailureKind.RenderProcessUnresponsive, false, start + 15_000 + RendererFailurePolicy.UnresponsiveGapMs + 1),
             "a renderer that answered between reports (a gap over two intervals) starts a new count");
 
         // Reloads are budgeted: a renderer that dies on every load is rebuilt or ends the host.
