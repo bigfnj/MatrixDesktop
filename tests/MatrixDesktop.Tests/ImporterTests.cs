@@ -25,6 +25,8 @@ internal static class ImporterTests
         ("Stripe colours need groups of three and reject a partial group", StripeArity),
         ("Legacy aliases width, dropLength and angle are mapped", LegacyAliases),
         ("An image URL containing a scheme is not treated as a query string", ImageUrlNotQuery),
+        ("Copied local text values containing equals import exactly", LocalTextValuesKeepEquals),
+        ("A text flag with no value is reported as ignored, not applied", TextFlagWithoutValueIgnored),
         ("Stripe effects are recognised by name", StripeEffectRecognition),
         ("UC3D profile imports without replacing explicit options in any order", Uc3dSceneProfile),
     ];
@@ -208,6 +210,44 @@ internal static class ImporterTests
     {
         var r = Import("--effect image --url https://example.com/a.png?x=1&y=2");
         Check.Contains(Str(r.Draft, "url"), "example.com", "a URL with its own query must not be parsed as MatrixDesktop parameters");
+    }
+
+    // AUD-75. A following token containing '=' started the next key unless the flag was url and
+    // the token held "://", so a local folder or file containing '=' became an empty value that
+    // was reported as applied, and its fragment an unknown key. Killing mutation: restore the
+    // equals-as-next-key rule in ArgumentImporter.SplitKeyValue only.
+    private static void LocalTextValuesKeepEquals()
+    {
+        var uc3d = Builder.CreateSceneDefaultDraft("uc3d");
+        uc3d["sound"] = "music";
+        uc3d["musicFile"] = @"C:\Music\Side A\a=b.mp3";
+        uc3d["showPictures"] = true;
+        uc3d["pictureSource"] = "custom";
+        uc3d["pictureDirectory"] = @"D:\My Pictures\x=y";
+        uc3d["donorDirectory"] = @"D:\Donor Media\k=v";
+        var imported = Import(Builder.BuildCommand(uc3d, false, false));
+        foreach (var key in new[] { "musicFile", "pictureDirectory", "donorDirectory" })
+        {
+            Check.Equal((string)uc3d[key]!, Str(imported.Draft, key), key + " must import exactly from a copied command");
+            Check.True(imported.Applied.Contains(key), key + " must be reported as applied");
+        }
+        Check.Equal(0, imported.Ignored.Length, "no fragment of a value may be reported as an unknown key: " + string.Join(", ", imported.Ignored));
+
+        // Positive control that already held: an absolute image URL with a query.
+        Check.Equal("https://example.com/a.png?x=1&y=2", Str(Import("--effect image --url https://example.com/a.png?x=1&y=2").Draft, "url"),
+            "an absolute URL keeps its whole query");
+        // Bare pairs after a value-free flag, and explicit flags after a text flag, parse as before.
+        var bare = Import("--windowed effect=stripes version=3d");
+        Check.Equal("stripes", Str(bare.Draft, "effect"), "a bare pair after a value-free flag is still a key");
+        Check.Equal("3d", Str(bare.Draft, "version"), "and so is the next bare pair");
+    }
+
+    private static void TextFlagWithoutValueIgnored()
+    {
+        var r = Import("--scene uc3d --musicFile --sound music");
+        Check.True(r.Ignored.Contains("musicFile", StringComparer.OrdinalIgnoreCase), "a text flag without a value must be reported as ignored");
+        Check.False(r.Applied.Contains("musicFile", StringComparer.OrdinalIgnoreCase), "a missing value must not be reported as applied");
+        Check.Equal("music", Str(r.Draft, "sound"), "the explicit flag after it must still apply");
     }
 
     private static void StripeEffectRecognition()

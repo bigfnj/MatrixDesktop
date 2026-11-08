@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using MatrixDesktopConfigurator;
 
@@ -11,6 +12,7 @@ internal static class CommandBuilderTests
         ("Only values that differ from the default are emitted", DefaultsAreSkipped),
         ("Stripe colours are omitted for a non stripe effect", StripeColorsGatedOff),
         ("Stripe colours are emitted for a stripe effect", StripeColorsGatedOn),
+        ("Camera is omitted unless the effect is mirror", CameraRequiresMirror),
         ("Window mode emits the matching wrapper flag", WindowModeFlags),
         ("A monitor index is dropped unless single monitor is selected", MonitorRequiresSingleMonitor),
         ("A test launch forces windowed and disables any-key exit", TestLaunchIsSafe),
@@ -30,7 +32,196 @@ internal static class CommandBuilderTests
         ("The untouched version 4 UC3D starter migrates without changing custom drafts", Uc3dVersion4Migration),
         ("UC3D randomization edits active controls and retains the alternate unit set", Uc3dRandomization),
         ("Scene placements name real fields groups and anchors and UC3D shows its colours together", ScenePlacementsResolve),
+        ("Untouched editors show what the renderer draws for each version and effect", UntouchedEditorsShowTheRender),
+        ("Use for screensaver saves exactly what the preview renders", ScreensaverMatchesPreview),
+        ("Stored drafts keep their render when version and effect defaults arrive", StoredDraftsKeepTheirRender),
+        ("A base value chosen after the migration survives save and reload", FreshBaseValueSurvivesReload),
     ];
+
+    // Values read from web/js/config.js and regl/stripePass.js, not from the catalog, so a wrong
+    // C# table cannot agree with itself here. White is hsl(0, 0, 1); operator's cursor is
+    // hsl(0.375, 1, 0.66) at config.js:201, neomatrixology's hsl(0.167, 1, 0.75) at :197.
+    private static readonly Dictionary<string, (string Cursor, double Intensity, double Columns)> RenderedByVersion = new()
+    {
+        ["classic"] = ("{\"r\":0.756,\"g\":1,\"b\":0.46}", 2, 80),
+        ["operator"] = ("{\"r\":0.32,\"g\":1,\"b\":0.49}", 3, 108),
+        ["neomatrixology"] = ("{\"r\":0.999,\"g\":1,\"b\":0.5}", 2, 40),
+    };
+
+    private static string Rows(int repeat, params string[] colors)
+        => "[" + string.Join(",", colors.SelectMany(color => Enumerable.Repeat(color, repeat))) + "]";
+
+    private static readonly string TransPrideRows = Rows(3, "{\"r\":0.36,\"g\":0.81,\"b\":0.98}", "{\"r\":0.96,\"g\":0.66,\"b\":0.72}",
+        "{\"r\":1,\"g\":1,\"b\":1}", "{\"r\":0.96,\"g\":0.66,\"b\":0.72}", "{\"r\":0.36,\"g\":0.81,\"b\":0.98}");
+
+    private static readonly string PrideRows = Rows(2, "{\"r\":0.89,\"g\":0.01,\"b\":0.01}", "{\"r\":1,\"g\":0.55,\"b\":0}",
+        "{\"r\":1,\"g\":0.93,\"b\":0}", "{\"r\":0,\"g\":0.5,\"b\":0.15}", "{\"r\":0,\"g\":0.3,\"b\":1}", "{\"r\":0.46,\"g\":0.03,\"b\":0.53}");
+
+    private static string Json(JsonNode? node) => node?.ToJsonString() ?? "null";
+
+    // config.js:652-685 and stripePass.js:39: an imported command that names only a version and an
+    // effect must leave every editor on what that command renders, and the regenerated command
+    // must leave those fields out so the renderer draws exactly that.
+    private static void UntouchedEditorsShowTheRender()
+    {
+        var failures = new List<string>();
+        foreach (var (version, rendered) in RenderedByVersion)
+        foreach (var effect in new[] { "palette", "plain", "stripes", "customStripes", "pride", "trans", "transPride" })
+        {
+            var draft = Importer.Import($"--version {version} --effect {effect}", Draft()).Draft;
+            var named = effect != "palette";
+            var expected = new Dictionary<string, string>
+            {
+                ["cursorColor"] = named ? "{\"r\":1,\"g\":1,\"b\":1}" : rendered.Cursor,
+                ["cursorIntensity"] = (named ? 2 : rendered.Intensity).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["numColumns"] = rendered.Columns.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            };
+            if (ArgumentImporter.IsStripeEffect(effect)) expected["stripeColors"] = effect == "pride" ? PrideRows : TransPrideRows;
+            var query = Builder.BuildWebQueryString(draft);
+            foreach (var (field, value) in expected)
+            {
+                if (Json(draft[field]) != value) failures.Add($"{version}/{effect} {field} editor shows {Json(draft[field])}, renderer draws {value}");
+                if (query.Contains(field + "=", StringComparison.Ordinal)) failures.Add($"{version}/{effect} sends {field} although it is untouched: {query}");
+            }
+        }
+        Check.True(failures.Count == 0, string.Join("; ", failures));
+    }
+
+    private static Dictionary<string, string> WebPairs(IEnumerable<string> arguments)
+    {
+        var webNames = Metadata.Groups.SelectMany(group => group.Fields).Where(field => field.Scope == "web").Select(field => field.ArgName).ToHashSet(StringComparer.Ordinal);
+        var list = arguments.ToList();
+        var pairs = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i < list.Count - 1; i++)
+            if (list[i].StartsWith("--", StringComparison.Ordinal) && webNames.Contains(list[i][2..])) pairs[list[i][2..]] = list[++i];
+        return pairs;
+    }
+
+    private static Dictionary<string, string> QueryPairs(string query)
+        => query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries).Select(pair => pair.Split('=', 2))
+            .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
+
+    // ConfiguratorForm.UseScreensaver saves BuildScreensaverArguments. It used to emit every
+    // default, which drew the catalog's stripe rows on pride and classic values on paradise.
+    private static void ScreensaverMatchesPreview()
+    {
+        foreach (var command in new[] { "--effect pride", "--version paradise --effect stripes", "--version operator", "--scene uc3d --version operator --effect plain", "--numColumns 90 --cursorColor 1,0,0" })
+        {
+            var draft = Importer.Import(command, Draft()).Draft;
+            var saver = WebPairs(Builder.BuildScreensaverArguments(draft));
+            var preview = QueryPairs(Builder.BuildWebQueryString(draft));
+            Check.Equal(string.Join(" ", preview.OrderBy(pair => pair.Key).Select(pair => pair.Key + "=" + pair.Value)),
+                string.Join(" ", saver.OrderBy(pair => pair.Key).Select(pair => pair.Key + "=" + pair.Value)),
+                $"the screensaver profile for '{command}' must carry exactly the preview's settings");
+        }
+    }
+
+    // What the renderer draws for each active web field: the emitted value, or what config.js
+    // draws without it (EffectiveDefault, which tests/effective-defaults-tests.mjs holds to the
+    // real config.js and the golden values above hold to the source).
+    private static Dictionary<string, string> Rendered(JsonObject draft, Func<ArgumentDefinition, bool> emitted)
+    {
+        var scene = draft["scene"]?.GetValue<string>() ?? "matrix";
+        var mode = Uc3dControlProfile.Mode(draft);
+        var version = draft["version"]?.GetValue<string>() ?? "classic";
+        var effect = draft["effect"]?.GetValue<string>() ?? "palette";
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var field in Metadata.Groups.SelectMany(group => group.Fields).Where(field => field.Scope == "web"))
+        {
+            if (!Uc3dControlProfile.IsActive(field.Id, draft) || !ZMatrixControlProfile.IsActive(field.Id, draft) || CommandBuilder.IsInactiveForEffect(field.Id, effect) || field.Id == "uc3dControls") continue;
+            result[field.Id] = emitted(field) ? Json(draft[field.Id]) : Json(JsonSerializer.SerializeToNode(Metadata.EffectiveDefault(field, scene, mode, version, effect), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        }
+        return result;
+    }
+
+    private static JsonObject StoredDraft(params (string Key, JsonNode? Value)[] values) => StoredDraft(Draft(), values);
+
+    private static JsonObject StoredDraft(JsonObject draft, params (string Key, JsonNode? Value)[] values)
+    {
+        foreach (var (key, value) in values) draft[key] = value;
+        return draft;
+    }
+
+    // Every seeded starter as builds before AUD-13 stored it: the command's own values, and each
+    // field it does not name on the scene or catalog value the old importer left there. Read
+    // from PresetSeeder itself so a new starter joins this replay.
+    private static IEnumerable<JsonObject> StartersAsStoredBefore()
+    {
+        var starters = (System.Collections.IEnumerable)typeof(PresetSeeder)
+            .GetField("StarterPresets", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        foreach (var starter in starters)
+        {
+            var imported = Importer.Import((string)starter.GetType().GetProperty("Command")!.GetValue(starter)!, Draft());
+            var draft = imported.Draft;
+            var scene = draft["scene"]!.GetValue<string>();
+            var mode = Uc3dControlProfile.Mode(draft);
+            foreach (var field in Metadata.Groups.SelectMany(group => group.Fields).Where(field => field.Scope == "web" && field.Id is not ("scene" or "uc3dControls")))
+                if (draft[field.Id] is not null && !imported.Applied.Contains(field.Id, StringComparer.OrdinalIgnoreCase))
+                    draft[field.Id] = JsonSerializer.SerializeToNode(Metadata.LegacyDefault(field, scene, mode), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            yield return draft;
+        }
+    }
+
+    // Drafts as builds before AUD-13 saved them: fully populated, with untouched fields on the
+    // catalog or scene value that the old builder left out, and the seeded starters. The
+    // migration in PresetSeeder must keep every one rendering exactly what it rendered then,
+    // Test and preview alike.
+    private static void StoredDraftsKeepTheirRender()
+    {
+        var drafts = new[]
+        {
+            StoredDraft(("version", "operator")),
+            StoredDraft(("version", "operator"), ("numColumns", 108.0)),
+            StoredDraft(("version", "neomatrixology"), ("effect", "plain")),
+            StoredDraft(("effect", "pride")),
+            StoredDraft(("effect", "stripes"), ("version", "paradise"), ("font", "resurrections"), ("numColumns", 150.0)),
+            StoredDraft(("effect", "customStripes"), ("stripeColors", JsonNode.Parse("[{\"r\":1,\"g\":0,\"b\":0},{\"r\":0,\"g\":0,\"b\":1}]"))),
+            StoredDraft(("version", "trinity"), ("effect", "mirror"), ("camera", true)),
+            StoredDraft(Builder.CreateSceneDefaultDraft("uc3d"), ("version", "operator")),
+            StoredDraft(Builder.CreateSceneDefaultDraft("uc3d"), ("uc3dControls", "legacy"), ("version", "paradise"), ("effect", "plain")),
+            StoredDraft(("scene", "zmatrix"), ("version", "operator"), ("effect", "pride")),
+        }.Concat(StartersAsStoredBefore()).ToArray();
+        const int starterStart = 10;
+        Check.Equal(starterStart + 5, drafts.Length, "the replay must include the five seeded starters");
+        var state = new ConfiguratorState { SchemaVersion = 1, PresetSeedVersion = 6, LastDraft = drafts[0].DeepClone().AsObject() };
+        foreach (var draft in drafts) state.UserPresets.Add(new UserPreset { Values = draft.DeepClone().AsObject() });
+        Check.True(PresetSeeder.Seed(state, Builder, Importer), "the first load of an old store must report the migration so the host saves it");
+        Check.Equal(PresetSeeder.EffectiveDefaultsSchemaVersion, state.SchemaVersion, "the migration must record that it ran");
+        for (var i = 0; i < drafts.Length; i++)
+        {
+            var old = drafts[i];
+            var migrated = state.UserPresets[i].Values;
+            var before = Rendered(old, field => Json(old[field.Id]) != Json(JsonSerializer.SerializeToNode(Metadata.LegacyDefault(field, old["scene"]!.GetValue<string>(), Uc3dControlProfile.Mode(old)), new JsonSerializerOptions(JsonSerializerDefaults.Web))));
+            var query = QueryPairs(Builder.BuildWebQueryString(migrated));
+            var after = Rendered(migrated, field => query.ContainsKey(field.ArgName));
+            foreach (var (field, value) in before)
+            {
+                Check.Equal(value, after[field], $"stored draft {i} ({old["scene"]}/{old["version"]}/{old["effect"]}) {field} must render as before the migration");
+                Check.Equal(value, Json(migrated[field]), $"stored draft {i} ({old["scene"]}/{old["version"]}/{old["effect"]}) {field} editor must show what renders");
+            }
+        }
+        Check.True(JsonNode.DeepEquals(state.LastDraft, state.UserPresets[0].Values), "the last draft migrates like the presets");
+        Check.True(Enumerable.Range(starterStart, 5).Any(i => !JsonNode.DeepEquals(drafts[i], state.UserPresets[i].Values)),
+            "the migration must move at least one stored starter (paradise draws its own speeds and stripe rows), or the starter replay proves nothing");
+    }
+
+    // Codex C01: the migration runs once. A base colour chosen on an effect that draws
+    // something else must be sent, survive a save and a reload, and render as chosen;
+    // re-normalising on every load would take it away again.
+    private static void FreshBaseValueSurvivesReload()
+    {
+        var draft = Importer.Import("--effect plain", Draft()).Draft;
+        draft["cursorColor"] = JsonNode.Parse("{\"r\":0.756,\"g\":1,\"b\":0.46}");
+        var state = new ConfiguratorState { SchemaVersion = PresetSeeder.EffectiveDefaultsSchemaVersion, PresetSeedVersion = 6, LastDraft = draft };
+        state.UserPresets.Add(new UserPreset { Values = draft.DeepClone().AsObject() });
+        var reloaded = JsonSerializer.Deserialize<ConfiguratorState>(JsonSerializer.Serialize(state))!;
+        PresetSeeder.Seed(reloaded, Builder, Importer);
+        foreach (var values in new[] { reloaded.LastDraft, reloaded.UserPresets[0].Values })
+        {
+            var query = QueryPairs(Builder.BuildWebQueryString(values));
+            Check.Equal("0.756,1,0.46", query.GetValueOrDefault("cursorColor") ?? "(left out)", "the base cursor colour chosen on plain must be sent after a reload");
+        }
+    }
 
     private static readonly ConfiguratorMetadata Metadata = ArgumentCatalog.Create();
     private static readonly CommandBuilder Builder = new(Metadata);
@@ -67,6 +258,36 @@ internal static class CommandBuilderTests
         d["effect"] = "stripes";
         d["stripeColors"] = new JsonArray(new JsonObject { ["r"] = 1.0, ["g"] = 0.0, ["b"] = 0.0 });
         Check.Contains(Cmd(d), "--stripeColors 1,0,0", "a stripe effect must emit its colours");
+    }
+
+    // AUD-03. The page greys Camera unless Effect is Mirror and drops edits to a greyed field, so
+    // a camera=true set under Mirror cannot be cleared from another effect, while both renderers
+    // open the webcam whenever camera is true. Killing mutation: delete the camera arm of
+    // CommandBuilder.IsInactiveForEffect; the copied-command assertion fails first.
+    private static void CameraRequiresMirror()
+    {
+        var effects = Metadata.Groups.SelectMany(group => group.Fields).Single(field => field.Id == "effect").Options.Select(option => option.Value).ToArray();
+        Check.True(effects.Contains("mirror") && effects.Length > 2, "the catalog must offer Mirror and other effects");
+        foreach (var effect in effects.Where(effect => effect != "mirror"))
+        {
+            var d = Draft();
+            d["effect"] = effect;
+            d["camera"] = true;
+            var saved = d.DeepClone();
+            Check.DoesNotContain(Cmd(d), "--camera", $"the copied command must not open the webcam for effect {effect}");
+            Check.DoesNotContain(Builder.BuildWebQueryString(d), "camera=", $"the preview must not open the webcam for effect {effect}");
+            Check.False(Builder.BuildArguments(d, true, false).Contains("--camera"), $"the screensaver profile must not open the webcam for effect {effect}");
+            Check.False(Builder.BuildArguments(d, false, true).Contains("--camera"), $"Test must not open the webcam for effect {effect}");
+            Check.True(JsonNode.DeepEquals(saved, d), "building must leave the saved camera value for a return to Mirror");
+        }
+        var mirror = Draft();
+        mirror["effect"] = "mirror";
+        mirror["camera"] = true;
+        Check.Contains(Cmd(mirror), "--effect mirror --camera true", "Mirror still asks for the webcam");
+        Check.Contains(Builder.BuildWebQueryString(mirror), "camera=true", "the Mirror preview still asks for the webcam");
+        Check.True(Builder.BuildArguments(mirror, false, true).Contains("--camera"), "a Mirror test still asks for the webcam");
+        mirror["camera"] = false;
+        Check.Contains(string.Join(" ", Builder.BuildArguments(mirror, true, false)), "--camera false", "Mirror with every default still names the camera setting");
     }
 
     private static void WindowModeFlags()
@@ -151,8 +372,11 @@ internal static class CommandBuilderTests
     {
         // stripePass.js uses an effect's built-in colours only when stripeColors is absent,
         // so emitting the default would flatten pride and trans into the same look.
+        // Since AUD-13 a draft reaches pride holding pride's own rows: through the page's effect
+        // switch, an import, or the one-time migration of a stored draft, modelled here.
         var d = Draft();
         d["effect"] = "pride";
+        CommandBuilder.AdoptRenderedDefaults(Metadata, d);
         var query = Builder.BuildWebQueryString(d);
         Check.DoesNotContain(query, "stripeColors",
             "pride supplies its own colours, and sending the default set would override them");

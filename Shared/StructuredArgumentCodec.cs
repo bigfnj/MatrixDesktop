@@ -43,4 +43,27 @@ internal static class StructuredArgumentCodec
         }
         catch (Exception error) when (error is FormatException or DecoderFallbackException or EncoderFallbackException) { return false; }
     }
+
+    // A text value (an image URL, a folder or a file) uses the same alphabet in a copied
+    // command when it holds a character cmd or PowerShell expands even inside double quotes:
+    // %, ! (delayed expansion), $ or a backtick. The payload is the value's JSON string
+    // literal, so a decoder can tell it from a structured object or array, and no real URL
+    // or Windows path starts with json64:. Anything else decodes to itself.
+    private static readonly System.Text.Json.JsonSerializerOptions TextJsonOptions = new()
+        { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    public static bool TextNeedsEncoding(string text) => text.AsSpan().IndexOfAny("%!$`") >= 0;
+
+    public static string EncodeText(string text) => Encode(System.Text.Json.JsonSerializer.Serialize(text, TextJsonOptions));
+
+    public static string DecodeText(string text)
+    {
+        if (text is null || !text.StartsWith(Prefix, StringComparison.Ordinal) || !TryDecode(text, out var json)) return text!;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == System.Text.Json.JsonValueKind.String ? document.RootElement.GetString()! : text;
+        }
+        catch (System.Text.Json.JsonException) { return text; }
+    }
 }

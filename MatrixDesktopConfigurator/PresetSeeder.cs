@@ -7,6 +7,7 @@ namespace MatrixDesktopConfigurator;
 internal static class PresetSeeder
 {
     private const int CurrentSeedVersion = 6;
+    internal const int EffectiveDefaultsSchemaVersion = 2;
     // Full draft keys that existed before ZMatrix. Historical comparisons must
     // never acquire fields introduced by a later catalogue or host feature.
     private static readonly HashSet<string> HistoricalFields = new(
@@ -57,6 +58,16 @@ internal static class PresetSeeder
         var normalized = Uc3dControlProfile.NormalizeSavedDraft(state.LastDraft);
         foreach (var preset in state.UserPresets)
             normalized |= Uc3dControlProfile.NormalizeSavedDraft(preset.Values);
+        // AUD-13, once per store and after the starter checks above: values that rendered the
+        // version's or effect's own default take that default, so they render as before.
+        if (state.SchemaVersion < EffectiveDefaultsSchemaVersion)
+        {
+            CommandBuilder.AdoptRenderedDefaults(commandBuilder.Metadata, state.LastDraft);
+            foreach (var preset in state.UserPresets)
+                CommandBuilder.AdoptRenderedDefaults(commandBuilder.Metadata, preset.Values);
+            state.SchemaVersion = EffectiveDefaultsSchemaVersion;
+            normalized = true;
+        }
         if (state.PresetSeedVersion >= CurrentSeedVersion) return normalized;
         foreach (var preset in StarterPresets)
         {

@@ -19,6 +19,8 @@ internal sealed partial class CommandBuilder
         _metadata = metadata;
     }
 
+    internal ConfiguratorMetadata Metadata => _metadata;
+
     public JsonObject CreateDefaultDraft()
     {
         var draft = new JsonObject();
@@ -153,11 +155,10 @@ internal sealed partial class CommandBuilder
     private void AddWebTokens(List<string> tokens, JsonObject values, bool includeDefaults, bool encodeStructured)
     {
         var effect = GetString(values, "effect", "palette");
-        var scene = GetString(values, "scene", "matrix");
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
             if (!Uc3dControlProfile.IsActive(field.Id, values) || !ZMatrixControlProfile.IsActive(field.Id, values)) continue;
-            if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
+            if (IsInactiveForEffect(field.Id, effect))
             {
                 continue;
             }
@@ -169,7 +170,7 @@ internal sealed partial class CommandBuilder
                 continue;
             }
 
-            if (!includeDefaults && IsDefault(field, value, scene, Uc3dControlProfile.Mode(values)))
+            if (!includeDefaults && IsDefault(field, value, values))
             {
                 continue;
             }
@@ -177,6 +178,8 @@ internal sealed partial class CommandBuilder
             var serialized = SerializeWebValue(field, value);
             if (encodeStructured && field.Kind is "font" or "characters" or "phrases")
                 serialized = global::Shared.StructuredArgumentCodec.Encode(serialized);
+            else if (encodeStructured && field.Kind == "text" && global::Shared.StructuredArgumentCodec.TextNeedsEncoding(serialized))
+                serialized = global::Shared.StructuredArgumentCodec.EncodeText(serialized);
             if (string.IsNullOrWhiteSpace(serialized))
             {
                 continue;
@@ -186,6 +189,47 @@ internal sealed partial class CommandBuilder
             tokens.Add(serialized);
         }
     }
+
+    // Use for screensaver saves what the preview and Test render. It used to emit every
+    // default, which wrote the catalog's stripe rows and base values over each version's own.
+    public IReadOnlyList<string> BuildScreensaverArguments(JsonObject values) => BuildArguments(values, includeDefaults: false, forTest: false);
+
+    // AUD-13: a value equal to the old scene-or-catalog default was left out, so it rendered the
+    // version's or effect's own value instead; replacing it with that rendered value keeps the
+    // render and lets the editor show it. Runs once over a stored draft (PresetSeeder, schema 2)
+    // and on every import for the fields the command did not name, never over fresh edits, so a
+    // deliberately chosen base colour stays chosen. Inactive fields keep their value.
+    internal static bool AdoptRenderedDefaults(ConfiguratorMetadata metadata, JsonObject draft, ICollection<string>? explicitKeys = null)
+    {
+        var scene = GetString(draft, "scene", "matrix");
+        var uc3dMode = Uc3dControlProfile.Mode(draft);
+        var version = GetString(draft, "version", "classic");
+        var effect = GetString(draft, "effect", "palette");
+        var changed = false;
+        foreach (var field in metadata.Groups.SelectMany(static g => g.Fields).Where(static f => f.Scope == "web"))
+        {
+            if (explicitKeys?.Contains(field.Id) == true || draft[field.Id] is not { } value) continue;
+            if (!Uc3dControlProfile.IsActive(field.Id, draft) || !ZMatrixControlProfile.IsActive(field.Id, draft) || IsInactiveForEffect(field.Id, effect)) continue;
+            var rendered = JsonSerializer.SerializeToNode(metadata.EffectiveDefault(field, scene, uc3dMode, version, effect), NormalizeOptions);
+            var legacy = JsonSerializer.SerializeToNode(metadata.LegacyDefault(field, scene, uc3dMode), NormalizeOptions);
+            if (rendered is null || legacy is null || NormalizeJson(rendered) == NormalizeJson(legacy) || NormalizeJson(value) != NormalizeJson(legacy)) continue;
+            draft[field.Id] = rendered;
+            changed = true;
+        }
+        return changed;
+    }
+
+    // A value the selected effect cannot use stays out of every command and the preview, as
+    // app.js getDisabledReason greys its editor, while the saved draft keeps it so returning
+    // to that effect restores it. Camera matters most: both renderers open the webcam
+    // whenever camera is true, and the page will not let a greyed checkbox be cleared.
+    // Effect names compare as the renderers look them up (regl/main.js effects[name]).
+    internal static bool IsInactiveForEffect(string fieldId, string effect) => fieldId switch
+    {
+        "stripeColors" => !ArgumentImporter.IsStripeEffect(effect),
+        "camera" => !string.Equals(effect, "mirror", StringComparison.Ordinal),
+        _ => false,
+    };
 
     private string SerializeWebValue(ArgumentDefinition field, JsonNode value)
     {
@@ -209,15 +253,19 @@ internal sealed partial class CommandBuilder
     // once ArgumentCatalog.Create has run, so caching is safe by construction.
     private readonly Dictionary<string, string?> _defaultJsonByFieldId = [];
 
-    private bool IsDefault(ArgumentDefinition field, JsonNode value, string scene, string? uc3dMode = null)
+    // AUD-13: a value is left out only when it equals what the renderer draws without it for
+    // this scene, version and effect, so an editor showing that value shows the render, and any
+    // other value, the catalog's base colours included, can be set.
+    private bool IsDefault(ArgumentDefinition field, JsonNode value, JsonObject values)
     {
-        var cacheKey = scene + ":" + uc3dMode + ":" + field.Id;
+        var scene = GetString(values, "scene", "matrix");
+        var uc3dMode = Uc3dControlProfile.Mode(values);
+        var version = GetString(values, "version", "classic");
+        var effect = GetString(values, "effect", "palette");
+        var cacheKey = scene + ":" + uc3dMode + ":" + version + ":" + effect + ":" + field.Id;
         if (!_defaultJsonByFieldId.TryGetValue(cacheKey, out var defaultJson))
         {
-            var defaultValue = _metadata.SceneDefaults.TryGetValue(scene, out var defaults) && defaults.TryGetValue(field.Id, out var sceneDefault)
-                ? sceneDefault : field.DefaultValue;
-            if (scene == "uc3d" && uc3dMode == "legacy" && field.Id == "bloomStrength") defaultValue = field.DefaultValue;
-            var defaultNode = JsonSerializer.SerializeToNode(defaultValue, _jsonOptions);
+            var defaultNode = JsonSerializer.SerializeToNode(_metadata.EffectiveDefault(field, scene, uc3dMode, version, effect), _jsonOptions);
             defaultJson = defaultNode is null ? null : NormalizeJson(defaultNode);
             _defaultJsonByFieldId[cacheKey] = defaultJson;
         }
@@ -419,8 +467,11 @@ internal sealed partial class CommandBuilder
 
     // A copied command may be pasted into cmd.exe or PowerShell, where these
     // characters are shell-significant (an unquoted '&' in an image URL, for
-    // instance, would truncate the command). Wrapping the token in double
-    // quotes makes the whole value literal in both shells.
+    // instance, would truncate the command). Double quotes keep whitespace, '&',
+    // '|', '<', '>', '^' and parentheses literal in both shells, but not '%'
+    // (cmd and batch files expand it), '!' (delayed expansion), '$' or a
+    // backtick (PowerShell expands both). Text values holding those travel as
+    // json64 instead (AddWebTokens), as structured values always do.
     private static bool NeedsQuoting(string token)
     {
         foreach (var c in token)
@@ -457,12 +508,11 @@ internal sealed partial class CommandBuilder
     {
         var pairs = new List<string>();
         var effect = GetString(values, "effect", "palette");
-        var scene = GetString(values, "scene", "matrix");
 
         foreach (var field in Fields.Where(static f => f.Scope == "web"))
         {
             if (!Uc3dControlProfile.IsActive(field.Id, values) || !ZMatrixControlProfile.IsActive(field.Id, values)) continue;
-            if (field.Id == "stripeColors" && !ArgumentImporter.IsStripeEffect(effect))
+            if (IsInactiveForEffect(field.Id, effect))
             {
                 continue;
             }
@@ -471,7 +521,7 @@ internal sealed partial class CommandBuilder
                 ? JsonValue.Create(Uc3dControlProfile.Mode(values)) : values[field.Id];
             if (value is null) continue;
 
-            if (IsDefault(field, value, scene, Uc3dControlProfile.Mode(values))) continue;
+            if (IsDefault(field, value, values)) continue;
 
             var serialized = SerializeWebValue(field, value);
             if (string.IsNullOrWhiteSpace(serialized)) continue;

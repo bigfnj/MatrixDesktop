@@ -1,3 +1,5 @@
+using MatrixDesktopConfigurator;
+
 namespace MatrixDesktop.Tests;
 
 internal static class MatrixArgsTests
@@ -24,6 +26,8 @@ internal static class MatrixArgsTests
         ("An already encoded raw query is not encoded twice", RawQueryPathDoesNotDoubleEncode),
         ("Boolean aliases normalise on the raw query path too", RawQueryNormalisesBooleans),
         ("An ampersand joined string without a leading question mark is accepted", BareAmpersandStringAccepted),
+        ("Text values containing equals survive the native parser", TextValuesKeepEquals),
+        ("The native text-key list matches the catalog's text fields", TextKeysMatchCatalog),
     ];
 
     private static string Build(params string[] args) => MatrixArgs.BuildQueryString(args);
@@ -144,4 +148,51 @@ internal static class MatrixArgsTests
     private static void BareAmpersandStringAccepted()
         => Check.Equal("a=b&c=d", Build("a=b&c=d"),
             "people paste query strings without the leading question mark, which the parser accepts");
+
+    // AUD-75. A following token containing '=' used to start the next key, so a text value
+    // such as C:\Music\Side A\a=b.mp3 or an image URL query was dropped and its fragment
+    // arrived as a junk key. Real drafts travel BuildArguments -> AppCli -> MatrixArgs.
+    // Killing mutation: restore the equals-as-next-key rule in MatrixArgs only.
+    private static void TextValuesKeepEquals()
+    {
+        var builder = new CommandBuilder(ArgumentCatalog.Create());
+        var uc3d = builder.CreateSceneDefaultDraft("uc3d");
+        uc3d["sound"] = "music";
+        uc3d["musicFile"] = @"C:\Music\Side A\a=b.mp3";
+        uc3d["showPictures"] = true;
+        uc3d["pictureSource"] = "custom";
+        uc3d["pictureDirectory"] = @"D:\My Pictures\x=y";
+        uc3d["donorDirectory"] = @"D:\Donor Media\k=v";
+        var image = builder.CreateDefaultDraft();
+        image["effect"] = "image";
+        image["url"] = "https://example.test/a.png?a=b";
+        foreach (var draft in new[] { uc3d, image })
+        {
+            AppCli.Parse(builder.BuildArguments(draft, false, false).ToArray(), out var passthrough);
+            var query = Query(MatrixArgs.BuildQueryString(passthrough));
+            var keys = MatrixArgs.TextKeys.Where(key => ((string?)draft[key])?.Length > 0).ToArray();
+            Check.True(keys.Length > 0, "each draft must exercise at least one text value");
+            foreach (var key in keys)
+                Check.Equal((string)draft[key]!, query.GetValueOrDefault(key) ?? "(missing)", key + " must reach the renderer exactly");
+            Check.False(query.Keys.Any(key => key.Contains('\\') || key.Contains('/')),
+                "no fragment of a value may arrive as a key: " + string.Join(", ", query.Keys));
+        }
+
+        // Controls that parse as before: a text flag stops at an explicit flag, and a bare pair
+        // is a key after a value-free flag or a complete pair.
+        Check.Equal("scene=uc3d", Build("--musicFile", "--scene", "uc3d"), "a text flag without a value is dropped and the next flag survives");
+        Check.Equal("camera=true&effect=stripes", Build("--camera", "effect=stripes"), "a bare pair after a boolean flag is still a key");
+        Check.Equal("effect=mirror&version=3d", Build("--effect", "mirror", "version=3d"), "a bare pair after a complete pair is still a key");
+        Check.Equal("url=" + Uri.EscapeDataString("C:/a=b.png"), Build("--url=C:/a=b.png"), "the inline spelling splits at the first equals only");
+    }
+
+    private static void TextKeysMatchCatalog()
+        => Check.SetEqual(ArgumentCatalog.Create().Groups.SelectMany(group => group.Fields)
+                .Where(field => field.Scope == "web" && field.Kind == "text").Select(field => field.ArgName),
+            MatrixArgs.TextKeys,
+            "MatrixArgs.TextKeys must name exactly the catalog's text fields, or a new text field would lose an '=' value and its json64 decode");
+
+    private static Dictionary<string, string> Query(string query)
+        => query.Split('&', StringSplitOptions.RemoveEmptyEntries).Select(pair => pair.Split('=', 2))
+            .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair.Length > 1 ? pair[1] : string.Empty));
 }
