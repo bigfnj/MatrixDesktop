@@ -18,6 +18,9 @@ internal static class NativeBridgeTests
         ("Native bridge bootstrap marks only wallpaper, /s and /p hosts non-interactive", InteractiveFollowsHostKind),
         ("Native bridge ZMatrix startup prepares once", ZMatrixStartupPreparesOnce),
         ("Native bridge UC3D snapshot precedes show and survives startup", Uc3dSnapshotPrecedesShow),
+        ("Native bridge reads granted media off the calling thread", GrantedMediaReadsOffTheCallingThread),
+        ("Native bridge rechecks a media grant off the calling thread", MediaGrantRecheckRunsOffTheCallingThread),
+        ("Native bridge answers 404 for granted media it cannot read", UnreadableMediaAnswersNotFound),
         ("Native bridge reuses the wallpaper and atlases across a colour-only ZMatrix edit", ColourEditReusesNativeWork),
         ("Native bridge rebuilds only the native work whose input changed", ChangedInputsRebuild),
         ("Native bridge refresh keeps the generation when nothing changed", UnchangedRefreshKeepsGeneration),
@@ -203,6 +206,134 @@ internal static class NativeBridgeTests
         bridge.Prepare(query, Virtual, 96);
         Require(captures.Screen == 1 && Bootstrap(bridge).GetProperty("desktopUrl").ValueKind == JsonValueKind.String,
             $"The before-show snapshot must survive startup with no second capture: {captures.Screen} captures.");
+    }
+
+    // R2-53: one granted picture in a fixture folder, requested by the url the bootstrap publishes.
+    private static void WithPicture(Action<string, byte[]> test)
+    {
+        var folder = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "matrixdesktop-media-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            byte[] picture = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+            File.WriteAllBytes(Path.Combine(folder, "picture.png"), picture);
+            test(folder, picture);
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    private static NativeMediaBridge MediaBridge(string folder, Func<MediaEntry, bool>? check = null, Func<string, byte[]>? reader = null)
+    {
+        var bridge = new NativeMediaBridge(false)
+        {
+            ScreenCapture = bounds => [1, 2, 3],
+            AccessCheck = check ?? MediaCatalog.StillAllowed,
+            FileReader = reader ?? File.ReadAllBytes,
+        };
+        bridge.Prepare("scene=uc3d&showPictures=true&desktopBackground=true&pictureDirectory=" + Uri.EscapeDataString(folder), Small);
+        return bridge;
+    }
+
+    private static string PictureUrl(NativeMediaBridge bridge)
+    {
+        var images = Bootstrap(bridge).GetProperty("images");
+        Require(images.GetArrayLength() == 1, $"The fixture folder must grant exactly one picture: {images}.");
+        return images[0].GetProperty("url").GetString()!;
+    }
+
+    // A step of a granted read (the recheck or the read) that blocks until the test opens its gate.
+    private sealed class GatedStep : IDisposable
+    {
+        internal readonly ManualResetEventSlim Entered = new(), Gate = new();
+        internal int RanOn;
+        internal T Run<T>(Func<T> step)
+        {
+            RanOn = Environment.CurrentManagedThreadId;
+            Entered.Set();
+            Gate.Wait(5000);
+            return step();
+        }
+        public void Dispose() { Entered.Dispose(); Gate.Dispose(); }
+    }
+
+    // Asks for a url from the stand-in UI thread, as OnResourceRequested does, and opens the
+    // gate only after that thread has run again: whether the call returned before the gated step
+    // finished, and whether the UI thread ran while that step was still blocked.
+    private static (NativeMediaBridge.ResourceAnswer Answer, bool Returned, bool Ran, long Elapsed) AskWhileBlocked(NativeMediaBridge bridge, string url, GatedStep step)
+    {
+        var returned = false;
+        var ran = false;
+        long elapsed = 0;
+        var answer = UiThread.Run(async () =>
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var pending = bridge.AnswerAsync(url, "GET");
+            elapsed = clock.ElapsedMilliseconds;
+            returned = !pending.IsCompleted;
+            ran = await Task.Run(() => step.Entered.Wait(5000)) && !pending.IsCompleted;
+            step.Gate.Set();
+            return await pending;
+        });
+        return (answer, returned, ran, elapsed);
+    }
+
+    // R2-53: requests arrive on the UI thread, which services the low-level input hooks, so a
+    // granted picture's answer must come back to that thread while its file read is still blocked.
+    private static void GrantedMediaReadsOffTheCallingThread()
+    {
+        WithPicture((folder, picture) =>
+        {
+            using var read = new GatedStep();
+            using var bridge = MediaBridge(folder, reader: path => read.Run(() => File.ReadAllBytes(path)));
+            var url = PictureUrl(bridge);
+            var ui = Environment.CurrentManagedThreadId;
+            var (answer, returned, ran, elapsed) = AskWhileBlocked(bridge, url, read);
+            Require(returned, $"A granted picture's answer must return to the UI thread before its file read finishes; it returned complete after {elapsed} ms.");
+            Require(ran && read.RanOn != ui, $"The UI thread must run again while the file is read on another thread: ran during the read={ran}, reader thread={read.RanOn}, UI thread={ui}.");
+            Require(answer.Bytes is { } bytes && bytes.SequenceEqual(picture) && answer.ContentType == "image/png",
+                $"Once read, the picture must be answered with its own bytes as image/png, not {answer.ContentType}.");
+            // Controls: in-memory and ungranted requests are still answered before the call returns.
+            var resources = url[..(url.LastIndexOf('/') + 1)];
+            var desktop = bridge.AnswerAsync(resources + "desktop", "GET");
+            var ungranted = bridge.AnswerAsync(resources + "image-0000000000000000", "GET");
+            Require(desktop.IsCompleted && desktop.Result.Bytes is [1, 2, 3] && desktop.Result.ContentType == "image/png",
+                "The in-memory desktop snapshot must be answered before the call returns.");
+            Require(ungranted.IsCompleted && ungranted.Result.Bytes is null, "An ungranted id must be answered 404 before the call returns.");
+        });
+    }
+
+    // R2-53: the grant recheck is a metadata query that a remote folder can hold for the SMB
+    // timeout, so it runs off the calling thread too, and a grant it revokes is never read.
+    private static void MediaGrantRecheckRunsOffTheCallingThread()
+    {
+        WithPicture((folder, picture) =>
+        {
+            using var check = new GatedStep();
+            var reads = 0;
+            using var bridge = MediaBridge(folder, check: entry => check.Run(() => false),
+                reader: path => { Interlocked.Increment(ref reads); return File.ReadAllBytes(path); });
+            var url = PictureUrl(bridge);
+            var ui = Environment.CurrentManagedThreadId;
+            var (answer, returned, ran, elapsed) = AskWhileBlocked(bridge, url, check);
+            Require(returned, $"A granted picture's answer must return to the UI thread before its grant recheck finishes; it returned complete after {elapsed} ms.");
+            Require(ran && check.RanOn != ui, $"The UI thread must run again while the grant is rechecked on another thread: ran during the recheck={ran}, recheck thread={check.RanOn}, UI thread={ui}.");
+            Require(answer.Bytes is null && reads == 0, $"A grant the recheck revokes must be answered 404 without reading the file: {reads} reads.");
+        });
+    }
+
+    // R2-53: a file that cannot be read is answered 404 from the pool thread, not faulted back.
+    private static void UnreadableMediaAnswersNotFound()
+    {
+        WithPicture((folder, picture) =>
+        {
+            using var bridge = MediaBridge(folder, reader: path => throw new IOException("The fixture picture is locked."));
+            var url = PictureUrl(bridge);
+            NativeMediaBridge.ResourceAnswer answer;
+            try { answer = UiThread.Run(() => bridge.AnswerAsync(url, "GET")); }
+            catch (IOException error) { throw new InvalidOperationException($"An unreadable picture must be answered 404, not fault its request: {error.Message}"); }
+            Require(answer.Bytes is null && answer.ContentType.StartsWith("text/plain", StringComparison.Ordinal),
+                $"An unreadable picture must be answered 404 with the plain-text body, not {answer.ContentType}.");
+        });
     }
 
     // Counting stand-ins for the ZMatrix native work. The atlas bytes follow the injected
