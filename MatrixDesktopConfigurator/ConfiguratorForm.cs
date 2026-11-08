@@ -450,8 +450,7 @@ public sealed class ConfiguratorForm : Form
 
     private object SaveDraft(JsonElement payload)
     {
-        _state.LastDraft = ReadObject(payload, "draft");
-        _state.SelectedPresetId = ReadOptionalString(payload, "selectedPresetId");
+        PresetOperations.SaveDraft(_state, payload);
         _storage.Save(_state);
         return new { saved = true };
     }

@@ -26,6 +26,25 @@ internal static class PresetOperations
         return preset;
     }
 
+    // AUD-17: LastDraft follows every edit, so choosing a preset used to leave no copy of the
+    // unsaved work. The page sends scratchDraft; without one, an unlinked draft is the scratch
+    // draft and a linked one keeps the stored copy (an older page or close snapshot).
+    public static void SaveDraft(ConfiguratorState state, JsonElement payload)
+    {
+        state.LastDraft = ReadObject(payload, "draft");
+        state.SelectedPresetId = ReadOptionalString(payload, "selectedPresetId");
+        if (payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty("scratchDraft", out var scratch)
+            && scratch.ValueKind == JsonValueKind.Object)
+        {
+            state.ScratchDraft = ReadObject(payload, "scratchDraft");
+        }
+        else if (string.IsNullOrWhiteSpace(state.SelectedPresetId))
+        {
+            state.ScratchDraft = StorageService.CloneObject(state.LastDraft);
+        }
+    }
+
     public static JsonObject ReadObject(JsonElement payload, string propertyName)
     {
         if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(propertyName, out var element))

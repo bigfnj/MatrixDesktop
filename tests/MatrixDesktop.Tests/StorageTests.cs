@@ -20,6 +20,7 @@ internal static class StorageTests
         ("An empty live file yields fresh state rather than an error", EmptyFileIsNotCorruption),
         ("Null preset records and values recover without changing valid data or backups", NullPresetContainersRecover),
         ("Renaming a preset changes only its name", RenameChangesOnlyName),
+        ("The scratch draft survives choosing a preset and a relaunch", ScratchDraftSurvivesPresetChoice),
     ];
 
     private static void Cleanup(StorageService storage)
@@ -267,5 +268,46 @@ internal static class StorageTests
         try { Rename("""{"id":"gone","name":"Ghost"}"""); }
         catch (InvalidOperationException) { refused = true; }
         Check.True(refused && state.UserPresets.Count == 2, "renaming a preset that no longer exists is an error, never a new preset");
+    }
+
+    private static void ScratchDraftSurvivesPresetChoice()
+    {
+        // AUD-17. Killing mutation: delete the explicit ScratchDraft assignment in
+        // PresetOperations.SaveDraft; the scratch draft the page sends is then lost.
+        var state = new ConfiguratorState();
+        void Save(string json)
+        {
+            using var request = JsonDocument.Parse(json);
+            PresetOperations.SaveDraft(state, request.RootElement);
+        }
+        static int Columns(JsonObject? draft) => draft?["numColumns"]?.GetValue<int>() ?? -1;
+
+        Save("""{"draft":{"numColumns":50},"selectedPresetId":"alpha","scratchDraft":{"numColumns":33}}""");
+        Check.Equal(33, Columns(state.ScratchDraft), "the scratch draft the page sends while a preset is shown must be stored");
+        Check.True(Columns(state.LastDraft) == 50 && state.SelectedPresetId == "alpha", "the working draft and the selection are saved as before");
+        Save("""{"draft":{"numColumns":51},"selectedPresetId":"alpha"}""");
+        Check.Equal(33, Columns(state.ScratchDraft), "a linked save without a scratch draft (older page, close snapshot) keeps the stored one");
+        Save("""{"draft":{"numColumns":34},"selectedPresetId":null}""");
+        Check.True(Columns(state.ScratchDraft) == 34 && !ReferenceEquals(state.ScratchDraft, state.LastDraft),
+            "an unlinked save without a scratch draft keeps its own copy of the draft as the scratch draft");
+
+        var directory = Path.Combine(AppContext.BaseDirectory, "synthetic-storage-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var storage = new StorageService(Path.Combine(directory, "presets.json"));
+        try
+        {
+            storage.Save(state);
+            Check.Contains(File.ReadAllText(storage.StoragePath), "\"scratchDraft\"", "the scratch draft is stored under the camelCase key loadState hands the page");
+            Check.Equal(34, Columns(storage.Load().ScratchDraft), "the scratch draft survives a relaunch");
+            storage.Save(new ConfiguratorState());
+            Check.DoesNotContain(File.ReadAllText(storage.StoragePath), "scratchDraft", "a store without a scratch draft keeps the old shape");
+            Check.True(storage.Load().ScratchDraft is null, "an old store loads without one, so the page falls back to LastDraft");
+        }
+        finally
+        {
+            foreach (var path in new[] { storage.StoragePath, storage.BackupPath, storage.StoragePath + ".tmp" })
+                if (File.Exists(path)) File.Delete(path);
+            Directory.Delete(directory);
+        }
     }
 }
