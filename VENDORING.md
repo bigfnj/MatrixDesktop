@@ -35,12 +35,15 @@ inventory; regenerate the diff before every upstream refresh.
 | Files | Local responsibility |
 | --- | --- |
 | `js/camera.js` | Generation-owned camera setup, cancellation and explicit track release. |
-| `js/config.js` | Desktop defaults, accepted parameters, exact boolean parsing and UC3D/ZMatrix configuration. |
-| `js/main.js` | Renderer selection, compatibility fallback and visible initialization failures. |
-| `js/regl/main.js`, `js/webgpu/main.js` | Desktop lifecycle, pause-aware time, click ripples, camera ownership and scene entry points. |
+| `js/config.js` | Desktop defaults, accepted parameters, exact boolean parsing and UC3D/ZMatrix configuration. Query keys and the `version` and `font` names match only own table entries, so an inherited `Object` name such as `constructor` is ignored or falls back to the default. `camera=true` is dropped unless the effect is `mirror`, so only the mirror effect opens the webcam. When the Matrix intro cannot progress (`animationSpeed * fallSpeed <= 0`), `skipIntro=false` is overridden with a console warning. |
+| `js/main.js` | Renderer selection and visible startup failures: a bootstrap, configuration or renderer error shows a notice, and the notice hides every canvas so it stays in view. Installs `rendererRecovery.js` as `window.matrixRendererLost`; backend loading and the WebGPU-to-REGL fallback are in `rendererLoader.js`. Plug me in removes the software-rendering notice and shows the canvas before the renderer loads, and acts on one click only. When software rendering is detected, wallpaper, screensaver and screensaver preview (/p) hosts skip that notice, log a console warning and keep rendering, because nothing there can press the button: a wallpaper's opt-in pointer forwarding reaches only the canvas. |
+| `js/regl/main.js`, `js/webgpu/main.js` | Desktop lifecycle, pause-aware time, click ripples, camera ownership and scene entry points. Both feed the shaders time from `shaderTime.js`, draw one still frame at `fps=0` as `once` does, and use the palette effect when the effect name is not an own entry of their effect table. On a lost WebGL context or WebGPU device they stop drawing, record the loss in `matrixRuntimeDiagnostics` and call `window.matrixRendererLost`. REGL also takes its wrapped `tick` uniform from `shaderTime.js`. WebGPU requests the adapter's full 2D texture limit, sizes the canvas inside it and keeps `ready` false after an uncaptured validation error. |
 | `js/regl/bloomPass.js`, `imagePass.js`, `mirrorPass.js`, `palettePass.js`, `rainPass.js`, `stripePass.js`, `utils.js` | Local renderer behavior and resource ownership. |
 | `js/regl/lkgHelper.js`, `js/regl/quiltPass.js` | Looking Glass calibration, a 1024-view work budget and quilt resource ownership. |
 | `js/webgpu/bloomPass.js`, `imagePass.js`, `mirrorPass.js`, `palettePass.js`, `rainPass.js`, `stripePass.js`, `utils.js` | Local renderer behavior, cached views and resource ownership. |
+| `js/regl/imagePass.js`, `js/webgpu/imagePass.js` | With no `url`, or `url=`, `effect=image` uses the bundled `assets/sand.png`, a texture from the upstream import, instead of the remote Wikimedia image the imported code fetched, so it needs no network. A background that cannot load is replaced by a white 1x1 texture with a console warning and a `matrixRuntimeDiagnostics.errors` entry, so the rain draws uncoloured instead of the renderer stopping. |
+| `js/regl/rainPass.js`, `js/regl/mirrorPass.js`, `js/webgpu/rainPass.js`, `js/webgpu/mirrorPass.js` | Click and touch stamps move back by the same shift when `shaderTime.js` moves the shader time origin forward. |
+| `js/webgpu/utils.js` | `loadTexture` decodes an image again at a smaller size, aspect kept, when it exceeds the device's 2D texture limit. |
 | `shaders/glsl/palettePass.frag.glsl`, `rainPass.effect.frag.glsl`, `stripePass.frag.glsl` | Glyph intensity and click-ripple behavior. |
 | `shaders/wgsl/palettePass.wgsl`, `rainPass.wgsl`, `stripePass.wgsl` | Glyph intensity and click-ripple behavior. |
 | `lib/gl-matrix.min.js` | Minified replacement for the imported `lib/gl-matrix.js`. |
@@ -49,17 +52,29 @@ The following modules and shaders are local additions:
 
 | Files | Purpose |
 | --- | --- |
-| `js/clickRipples.js` | Shared ripple state. |
-| `js/canvasSize.js` | Cached canvas dimensions and resize observation. |
+| `js/clickRipples.js` | Shared ripple state; `shiftTime` moves stored stamps back when shader time is rebased. |
+| `js/canvasSize.js` | Cached canvas dimensions and resize observation; `fitInside` keeps the WebGPU Matrix canvas and the textures the WebGPU Matrix renderer loads within the device's 2D texture limit. |
 | `js/rendererChoice.js` | Looking Glass routing through the WebGL quilt path. |
+| `js/rendererLoader.js` | Loads the renderer backend for `main.js`. A WebGPU failure in the Matrix scene falls back to REGL on a fresh canvas; in UC3D and ZMatrix it is shown as an error instead. |
+| `js/rendererRecovery.js` | Reloads the page after a lost WebGL context or WebGPU device, at most 3 times in 5 minutes (counted in `sessionStorage`), then shows a notice asking for a restart. |
 | `js/resourceOwner.js` | Idempotent resource ownership. |
+| `js/shaderTime.js` | Float32-safe shader time origin and frame counter for the Matrix renderers. |
 | `js/hostPlayback.js`, `js/hostPointer.js` | Native pause clocks and opt-in desktop pointer forwarding shared by the scenes. |
-| `js/zmatrix/settings.js`, `scene.js`, `surface.js`, `fonts.js`, `runtime.js`, `gpu.js` | Fresh ZMatrix feature implementation, persistent bytewise raster and native/browser resources. |
+| `js/renderFailure.js` | Persistent render-failure notice shared by UC3D and ZMatrix. |
+| `js/webglProgram.js` | WebGL program builder shared by the UC3D and ZMatrix passes. |
+| `js/zmatrix/settings.js`, `scene.js`, `surface.js`, `fonts.js`, `runtime.js` | Fresh ZMatrix feature implementation, persistent bytewise raster and native/browser resources. |
 | `js/regl/zmatrixPass.js`, `js/webgpu/zmatrixPass.js` | Actual ZMatrix WebGL/WebGPU presentation. |
 | `js/uc3d/audio.js`, `defaults.js`, `media.js`, `native.js`, `overlays.js`, `runtime.js`, `scene.js` | Shared UC3D behavior, local-media consumption and lifecycle. |
 | `js/regl/uc3dPass.js`, `js/webgpu/uc3dPass.js` | UC3D backend implementations. |
 | `shaders/glsl/uc3d.vert.glsl`, `uc3d.frag.glsl`, `uc3dComposite.frag.glsl` | UC3D WebGL glyph field and composite. |
 | `shaders/wgsl/uc3d.wgsl`, `uc3dComposite.wgsl` | UC3D WebGPU glyph field and composite. |
+
+The imported upstream renderers gave the shaders raw seconds since start (regl's
+own `time`, and `(now - start) / 1000` on WebGPU) and, on REGL, regl's own frame
+counter as `tick`. Both lose float32 precision on a wallpaper that runs for days.
+`shaderTime.js`, the two renderer `main.js` files, `clickRipples.js` and the rain
+and mirror passes carry the local fix. The WGSL dither in `palettePass.wgsl` and
+`stripePass.wgsl` reads the rebased time and was not changed for it.
 
 UC3D is newly written source informed by analysis of the owner's local donor
 program. Donor binaries, recovered decompiler output and donor media are not
