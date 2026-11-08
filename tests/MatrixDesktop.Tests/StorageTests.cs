@@ -35,7 +35,7 @@ internal static class StorageTests
         {
             try { File.Delete(stray); } catch { }
         }
-        foreach (var stray in Directory.EnumerateFiles(dir, ".write-probe-*"))
+        foreach (var stray in Directory.EnumerateFiles(dir, ".write-probe*"))
         {
             try { File.Delete(stray); } catch { }
         }
@@ -70,6 +70,9 @@ internal static class StorageTests
         // MD-06. The writability probe used FileMode.OpenOrCreate, so constructing the
         // service created a zero-byte presets file, which Load then reported as an ERROR on
         // every first run.
+        // R2-17: '.write-probe*' covers the bare name and per-attempt names. The old
+        // '.write-probe-*' never matched the bare '.write-probe', so this check could not fail.
+        // Killing mutation: stop deleting the probe; the probe count below fails.
         var first = new StorageService();
         Cleanup(first);
 
@@ -80,7 +83,7 @@ internal static class StorageTests
                 "constructing the service must not create the presets file; that is what caused the first-run ERROR");
 
             var dir = Path.GetDirectoryName(storage.StoragePath)!;
-            Check.Equal(0, Directory.GetFiles(dir, ".write-probe-*").Length,
+            Check.Equal(0, Directory.GetFiles(dir, ".write-probe*").Length,
                 "the temp probe must be deleted again, not left in the publish folder");
         }
         finally
