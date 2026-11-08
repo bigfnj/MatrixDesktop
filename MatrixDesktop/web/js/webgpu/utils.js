@@ -1,3 +1,5 @@
+import { fitInside } from "../canvasSize.js";
+
 const loadTexture = async (device, url) => {
 	if (url == null) {
 		return device.createTexture({
@@ -9,7 +11,14 @@ const loadTexture = async (device, url) => {
 
 	const response = await fetch(url);
 	const data = await response.blob();
-	const source = await createImageBitmap(data);
+	let source = await createImageBitmap(data);
+	// AUD-69: an image past the device's 2D texture limit cannot be uploaded; decode it again
+	// scaled inside the limit (8192 is the WebGPU default) with its aspect kept.
+	const [resizeWidth, resizeHeight] = fitInside(source.width, source.height, device.limits?.maxTextureDimension2D ?? 8192);
+	if (resizeWidth !== source.width || resizeHeight !== source.height) {
+		source.close();
+		source = await createImageBitmap(data, { resizeWidth, resizeHeight, resizeQuality: "high" });
+	}
 	try {
 		const size = [source.width, source.height, 1];
 		const texture = device.createTexture({

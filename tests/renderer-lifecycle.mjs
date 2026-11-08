@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 import { runInThisContext } from "node:vm";
 import { fileURLToPath } from "node:url";
 import createOwner, { ownDevice } from "../MatrixDesktop/web/js/resourceOwner.js";
-import createSize from "../MatrixDesktop/web/js/canvasSize.js";
+import createSize, { fitInside } from "../MatrixDesktop/web/js/canvasSize.js";
 import { wantsWebGPU } from "../MatrixDesktop/web/js/rendererChoice.js";
 import makeConfig from "../MatrixDesktop/web/js/config.js";
 import getLKG from "../MatrixDesktop/web/js/regl/lkgHelper.js";
-import { makePipeline } from "../MatrixDesktop/web/js/webgpu/utils.js";
+import { makePipeline, loadTexture } from "../MatrixDesktop/web/js/webgpu/utils.js";
 
 const root = new URL("../MatrixDesktop/web/", import.meta.url);
 runInThisContext(await readFile(new URL("lib/gl-matrix.min.js", root), "utf8"));
@@ -204,5 +204,114 @@ for (const name of ["rain", "bloom", "palette", "stripe", "image", "mirror", "qu
 		assert.equal(canvas.count(), 0); assert.equal(window.count(), 0);
 	});
 }
+
+// A fake page for webgpu/main.js: the device records texture sizes and can raise GPU events.
+// These stubs are installed last so they cannot change any earlier case.
+const makeMatrixDevice = (maxTextureDimension2D) => {
+	const device = makeDevice(), events = new Events(), createTexture = device.createTexture;
+	let lose;
+	return Object.assign(device, {
+		limits: { maxTextureDimension2D }, sizes: [],
+		lost: new Promise((resolve) => { lose = resolve; }),
+		lose: (reason, message) => lose({ reason, message }),
+		addEventListener: (type, fn) => events.addEventListener(type, fn),
+		removeEventListener: (type, fn) => events.removeEventListener(type, fn),
+		emit: (type, event) => { for (const fn of [...(events.listeners.get(type) ?? [])]) fn(event); },
+		createTexture(config) { device.sizes.push(config.size); return createTexture.call(device, config); },
+		createCommandEncoder: () => ({ ...encoder, finish: () => ({}) }),
+		queue: { ...device.queue, submit() {} },
+		destroy() { device.destroyed = true; },
+	});
+};
+let pendingFrame = null;
+const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution }) => {
+	const run = {};
+	const borrowed = { createView: () => ({}), destroy() { throw new Error("canvas texture destroyed"); } };
+	globalThis.requestAnimationFrame = (fn) => { pendingFrame = fn; return 1; };
+	globalThis.cancelAnimationFrame = () => { pendingFrame = null; };
+	globalThis.document = { fullscreenEnabled: false, body: { appendChild: (tag) => queueMicrotask(() => tag.onload?.()) },
+		createElement: () => ({ getContext: () => ({ drawImage() {} }) }) };
+	Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: { gpu: {
+		getPreferredCanvasFormat: () => "rgba8unorm",
+		requestAdapter: async () => ({ limits: { maxTextureDimension2D: adapterLimit }, requestDevice: async (descriptor) => {
+			run.request = descriptor;
+			return (run.device = makeMatrixDevice(descriptor?.requiredLimits?.maxTextureDimension2D ?? 8192));
+		} }),
+	} } });
+	run.canvas = Object.assign(new Events(), { clientWidth: cssWidth, clientHeight: cssHeight, width: 300, height: 150, dataset: {},
+		getBoundingClientRect: () => ({ left: 0, top: 0, width: cssWidth, height: cssHeight }),
+		getContext: () => ({ configure() {}, unconfigure() {}, getCurrentTexture: () => borrowed }) });
+	const { default: start } = await import("../MatrixDesktop/web/js/webgpu/main.js");
+	await start(run.canvas, makeConfig({ numColumns: "4", camera: "false", resolution: String(resolution) }));
+	run.diagnostics = window.matrixRuntimeDiagnostics;
+	run.frame = (now) => { const frame = pendingFrame; pendingFrame = null; frame?.(now); };
+	run.dispose = () => run.diagnostics.dispose();
+	return run;
+};
+
+await test("canvas size fits a GPU texture limit with its aspect kept", () => {
+	const wide = { clientWidth: 6000, clientHeight: 1440 };
+	const clamped = createSize(wide, 2, 8192), open = createSize(wide, 2), ordinary = createSize({ clientWidth: 1280, clientHeight: 720 }, 1, 8192);
+	assert.deepEqual(clamped.get(), [8192, 1966], "a 12000x2880 backing size must fit 8192 on its long side");
+	assert.deepEqual(open.get(), [12000, 2880], "no limit must leave the size alone");
+	assert.deepEqual(ordinary.get(), [1280, 720], "an ordinary size must be unchanged");
+	assert.deepEqual(fitInside(3000, 9000, 8192), [2731, 8192], "a tall size must fit on its long side");
+	for (const tracker of [clamped, open, ordinary]) tracker.cleanup();
+});
+
+await test("WebGPU Matrix renderer requests the adapter's texture limit and keeps every target inside the device's", async () => {
+	for (const [adapterLimit, cssWidth, cssHeight, resolution, expected] of [
+		[8192, 6000, 1440, 2, [8192, 1966]],
+		[16384, 6000, 1440, 2, [12000, 2880]],
+		[8192, 1280, 720, 1, [1280, 720]],
+	]) {
+		const label = `${cssWidth}x${cssHeight} CSS px at resolution ${resolution}, adapter limit ${adapterLimit}`;
+		const run = await startMatrixWebGPU({ adapterLimit, cssWidth, cssHeight, resolution });
+		try {
+			assert.equal(run.request?.requiredLimits?.maxTextureDimension2D, adapterLimit, `requestDevice must receive the adapter's limit (${label})`);
+			run.frame(16); run.frame(33);
+			assert.deepEqual([run.canvas.width, run.canvas.height], expected, `canvas size (${label})`);
+			const limit = run.device.limits.maxTextureDimension2D;
+			const over = run.device.sizes.filter((size) => size.slice(0, 2).some((side) => side > limit));
+			assert.deepEqual(over, [], `every texture must fit the device limit (${label})`);
+			assert(run.device.sizes.some(([w, h]) => w === expected[0] && h === expected[1]), `a canvas-sized target must exist (${label})`);
+			assert.equal(run.diagnostics.frames, 2, label);
+			assert.equal(run.diagnostics.ready, true, label);
+		} finally { run.dispose(); }
+	}
+});
+
+await test("WebGPU texture loads past the device limit are decoded again inside it", async () => {
+	const saved = globalThis.createImageBitmap, decodes = [], closed = [];
+	globalThis.createImageBitmap = async (blob, options) => {
+		decodes.push(options);
+		const [width, height] = options ? [options.resizeWidth, options.resizeHeight] : [10000, 5000];
+		return { width, height, close() { closed.push(`${width}x${height}`); } };
+	};
+	try {
+		const device = makeMatrixDevice(8192);
+		await loadTexture(device, "assets/fixture.png");
+		assert.deepEqual(device.sizes, [[8192, 4096, 1]], "the uploaded texture must fit the limit with its aspect kept");
+		assert.deepEqual(decodes, [undefined, { resizeWidth: 8192, resizeHeight: 4096, resizeQuality: "high" }]);
+		assert.deepEqual(closed, ["10000x5000", "8192x4096"], "both decoded bitmaps must close");
+		decodes.length = 0;
+		await loadTexture(makeMatrixDevice(16384), "assets/fixture.png");
+		assert.deepEqual(decodes, [undefined], "an image inside the limit must decode once");
+	} finally { globalThis.createImageBitmap = saved; }
+});
+
+await test("WebGPU Matrix renderer reports uncaptured GPU errors and stops claiming ready", async () => {
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	try {
+		run.frame(16);
+		assert.equal(run.diagnostics.ready, true);
+		run.device.emit("uncapturederror", { error: { message: "synthetic validation failure" } });
+		run.frame(33);
+		assert.equal(run.diagnostics.ready, false, "ready must stay false after a GPU validation error");
+		assert.deepEqual(run.diagnostics.errors, ["WebGPU validation: synthetic validation failure"]);
+		for (let i = 0; i < 20; i++) run.device.emit("uncapturederror", { error: { message: `again ${i}` } });
+		assert.equal(run.diagnostics.errors.length, 10, "validation errors must stay bounded");
+	} finally { run.dispose(); }
+});
 
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);

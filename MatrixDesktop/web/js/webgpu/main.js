@@ -54,6 +54,8 @@ export default async (canvas, config) => {
 	let canvasContext;
 	let frameRequest;
 	let sizeTracker;
+	let gpuFailed = false;
+	let gpuErrors = 0;
 	const destroyContext = () => {
 		canvasContext?.unconfigure();
 		device?.destroy();
@@ -119,7 +121,14 @@ export default async (canvas, config) => {
 	if (!adapter) {
 		throw new Error("WebGPU not supported: no GPU adapter available");
 	}
-	device = await adapter.requestDevice();
+	// AUD-69: the default device limit is 8192 even when the adapter allows more, and a
+	// canvas past the device limit failed validation every frame while ready stayed true.
+	device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D } });
+	device.addEventListener("uncapturederror", (event) => {
+		if (cleanedUp) return;
+		gpuFailed = true; diagnostics.ready = false;
+		if (++gpuErrors <= 10) diagnostics.errors.push(`WebGPU validation: ${event.error.message}`);
+	});
 	canvasContext = canvas.getContext("webgpu");
 
 	// console.table(device.limits);
@@ -182,7 +191,7 @@ export default async (canvas, config) => {
 	let outputs;
 	let built = false;
 	const canvasSize = [0, 0];
-	sizeTracker = createCanvasSize(canvas, config.resolution);
+	sizeTracker = createCanvasSize(canvas, config.resolution, device.limits.maxTextureDimension2D);
 
 	const renderLoop = (now) => {
 		if (cleanedUp) return;
@@ -225,7 +234,7 @@ export default async (canvas, config) => {
 		// Eventually, when WebGPU allows it, we'll remove the endPass and just copy from our pipeline's output to the canvas texture.
 		// encoder.copyTextureToTexture({ texture: outputs?.primary }, { texture: canvasContext.getCurrentTexture() }, canvasSize);
 		device.queue.submit([encoder.finish()]);
-		diagnostics.frames = frames; diagnostics.ready = true; diagnostics.simulationTime = (now - start) / 1000;
+		diagnostics.frames = frames; diagnostics.ready = !gpuFailed; diagnostics.simulationTime = (now - start) / 1000;
 
 		if (!config.once) {
 			frameRequest = requestAnimationFrame(renderLoop);
