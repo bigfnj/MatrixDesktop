@@ -16,7 +16,7 @@ select that interpreter. Its browser smoke also needs Playwright Chromium.
 | --- | --- |
 | Local portable folder | `publish-portable-win-x64-fd.cmd`, producing `publish\win-x64-fd\`. |
 | Gate portable folder | `tests\run-gate.ps1`, producing `artifacts\gate\win-x64-fd\`. |
-| Tagged release | `.github/workflows/release.yml`, producing `MatrixDesktop-<tag>-win-x64-fd.zip` and a SHA256 file. |
+| Tagged release | `.github/workflows/release.yml`, producing `MatrixDesktop-<tag>-win-x64-fd.zip` and a SHA256 file, after checking the tag against both csproj and the guide header and requiring CI success on the tagged commit. |
 
 All supported folders contain both executables, `MatrixDesktop.scr`, and their `web\` and
 `configurator\` assets. Test the extracted release zip before announcing a
@@ -55,12 +55,29 @@ the importer's synthetic fixtures, embedded help and icons, version parity,
 published embedded source-line symbols and payload rules. Separate `.pdb`
 and dependency documentation `.xml` files are excluded from the portable folder.
 
+Tier 1 also holds the configurator's effective defaults for every version and
+effect to what `config.js` and both stripe passes render. It runs the UC3D
+calibration probe with its WebGPU adapter hidden (`MD_UC3D_HIDE_WEBGPU_ADAPTER=1`)
+and passes it only on exit 2 with a `CANNOT VERIFY WebGPU` line and no WebGPU pass.
+The symbol check also scans the published `MatrixDesktop.dll` IL for the host's
+startup-failure, surface-close, wallpaper single-instance and WebView2
+process-failure wiring. Version parity runs `tests\check-release-version.ps1`,
+which `release.yml` runs with the tag, and a separate check requires
+`release.yml` to run its tag and CI checks before its first `dotnet publish`. Both
+published `runtimeconfig.json` files must keep ICU globalization, and the local
+framework-dependent publish profiles must not change the build beyond what the
+release sets. The gate's own decision library runs its self-tests under Windows
+PowerShell 5.1 and PowerShell 7.
+
 The runtime tiers launch the published main app in default, stripes/3D and plain
 WebGL configurations, then launch the configurator. They check real windows,
 rendering, attributable logs, crash dumps and clean `WM_CLOSE` shutdown. Main-app
 cases compare successive frames to detect frozen animation and inspect WebView2
 child-process cleanup. A private gate profile avoids sharing the owner's live
-WebView2 browser process.
+WebView2 browser process. Because that profile replaces the folder the app
+requests, each main-app case reads the app's own log record to confirm it asked
+for `%LOCALAPPDATA%\MatrixDesktop\WebView2`, and fails if a new folder appears
+beside the exe. A crash dump fails a case only when that case's process wrote it.
 
 `PrintWindow` captures are cropped to the client area. The main-app render
 thresholds are a luminance standard deviation of at least 0.04 and a non-black
@@ -88,8 +105,11 @@ python tests\uc3d-audio-browser.py --channel msedge
 The ZMatrix browser test checks served source bytes, actual selected backends,
 visible animation, pause/resume, resize and disposal. Original Matrix also starts
 paused before renderer import; a real WebGL uniform witness must begin at active
-shader tick zero so ping-pong initialization cannot be skipped. Browser fallback
-warnings are expected when no native GDI bridge is attached.
+shader tick zero so ping-pong initialization cannot be skipped. On REGL, the
+original Matrix test also requires the shader time uniform to stay small after
+four days of page time while the tick keeps counting, and `fps=0` to draw exactly
+one non-black frame. Browser fallback warnings are expected when no native GDI
+bridge is attached.
 
 Against a complete published folder:
 
@@ -104,6 +124,14 @@ WorkerW parent, native fonts and clean shutdown. Run these focus-sensitive
 checks sequentially with configurator/UI probes. A concurrently activated
 application can invalidate the unchanged-foreground witness.
 
+Before its configurator cases, the native configurator probe works on private
+copies of the published folder with synthetic stores. A second configurator on
+the same store must exit 0 and leave the store and its backup unchanged. The
+configurator must answer `WM_QUERYENDSESSION`, keep running after a cancelled
+shutdown and exit, ending its Test host, when the session really ends. A Test
+window that closes by itself must be reported to the page once, and `Stop Test`
+must still end the current Test host after a replaced one exits.
+
 The screensaver probe supplies an owned synthetic profile and preview parent.
 It checks child bounds/resize/parent death, fullscreen coverage despite saved
 wallpaper/working-area flags, and input exit. It sends Escape only after proving
@@ -117,12 +145,25 @@ restart; the ordinary gate does not restart Explorer or change Windows startup,
 wallpaper or screensaver preferences. Pause-reason and fullscreen policy cases
 include negative-coordinate monitors and independent lock/manual/battery states.
 
-For the coordinated shell check, start an owned wallpaper instance and record its
-PID. Pause it through the tray, restart Explorer, then verify that the same PID
+For the coordinated shell check, start an owned wallpaper instance with its own
+`WEBVIEW2_USER_DATA_FOLDER` and record its PID; a wallpaper launched in the
+owner's single-instance scope would replace the owner's running wallpaper. Pause
+it through the tray, restart Explorer, then verify that the same PID
 attaches to a WorkerW owned by the new Explorer process. Manual pause must survive;
 tray Resume must restore visible animation without runtime errors. Exit through
 the tray and verify clean shutdown. Also check fresh wallpaper startup after a
 shell restart, since it must create a missing WorkerW without changing icon styles.
+
+For renderer recovery, start an owned wallpaper the same way, with a
+remote-debugging port in `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`. Crash its page
+with the DevTools Protocol `Page.crash` command: within 10 seconds the same PID
+must show the page again, and the log must contain both
+`kind=RenderProcessExited` and `Renderer failure RenderProcessExited: Reload.`
+for that PID. Then end that wallpaper's `msedgewebview2` browser process: within
+10 seconds a new surface must attach to WorkerW in the same PID, with
+`Renderer failure BrowserProcessExited: Recreate.` in the log. A fullscreen launch
+with its own profile must instead log `Renderer failure BrowserProcessExited: Exit.`
+and exit when its browser process ends.
 
 ## UC3D backend and native integration probes
 
@@ -143,7 +184,9 @@ The calibration probe checks 22 original-control cases per backend: slider
 endpoints, captured values, isolated motion, 2D and portrait. It advances a
 controlled clock to 20 and 20.25 seconds, inspects the actual running population,
 size and stream state, captures frames and verifies disposal. It records served
-source digests. `--only amount-500,flat` selects a focused subset. Optional
+source digests. A missing WebGPU adapter makes it print `CANNOT VERIFY WebGPU`
+and return exit 2; `MD_UC3D_HIDE_WEBGPU_ADAPTER=1` simulates one.
+`--only amount-500,flat` selects a focused subset. Optional
 `--donor-atlas C:\Private\UC3D-media\glyphs.bmp --output C:\Private\comparison`
 uses a local atlas and requires a destination outside the repository. Such images
 remain private. The unchanged original-process harness and comparison evidence
@@ -160,7 +203,9 @@ python tests\native-uc3d-smoke.py --publish publish\win-x64-fd --donor-directory
 The default publish input is `artifacts\gate\win-x64-fd\`. These probes open
 test-owned WebView2 debugging profiles and verify both native backends, granted
 local image resources, rejection of ungranted URLs, and configurator preview
-bootstrap data. The optional donor input also exercises the imported manifest,
+bootstrap data. Each launch's private profile is deleted when that launch ends,
+and profiles older than a day are pruned when the probe starts. The optional
+donor input also exercises the imported manifest,
 glyph atlas and explicit sound-test action. Screenshots and reports under
 `artifacts\native-uc3d\` can contain donor media; keep that directory private.
 Do not run a publish that replaces this folder while its executables are open.
@@ -200,6 +245,11 @@ shader expression without measuring its effect.
 For a new check or gate, deliberately introduce the defect it should detect,
 confirm the intended named failure, restore the source and rerun. For compiled
 tests, verify the artifact was rebuilt and its test witness actually executed.
+A probe that exits 2 for an unavailable environment must also print a line that
+starts with `CANNOT VERIFY`, `UNVERIFIED` or `UNCHECKED`. In the gate, the Python
+cases under `tier 1: UC3D importer and WebGL smoke` and the tier 3 wallpaper,
+screensaver and configurator cases treat exit 2 without that line as a failure,
+because argparse usage errors and missing scripts also exit 2.
 
 ## Interactive and hardware checks
 
