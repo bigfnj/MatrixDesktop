@@ -9,13 +9,20 @@ internal static class ScreensaverRegistrationTests
         ? [("Screensaver registration preserves the previous choice and live activation", RoundTrip),
            ("Screensaver restore preserves a later owner selection", OwnerReplacement),
            ("Explicit screensaver re-registration backs up the latest owner choice", Reregistration),
-           ("Failed screensaver activation rolls back the current selection", FailedActivation)]
+           ("Failed screensaver activation rolls back the current selection", FailedActivation),
+           ("Registry fixtures remove every key they create", FixtureCleanup)]
         : [];
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static void WithKeys(Action<RegistryKey, RegistryKey> test)
+    private static void WithKeys(Action<RegistryKey, RegistryKey> test) => WithKeysUnder("Software", test);
+
+    // One flat unique key directly under a parent that already exists. CreateSubKey creates every
+    // missing ancestor but DeleteSubKeyTree removes only the named key, so a nested fixture path
+    // leaves its parents behind in the product's own registry namespace.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void WithKeysUnder(string parent, Action<RegistryKey, RegistryKey> test)
     {
-        var path = @"Software\MatrixDesktop\TestFixtures\" + Guid.NewGuid().ToString("N");
+        var path = parent + @"\MatrixDesktop.Tests-" + Guid.NewGuid().ToString("N");
         try
         {
             using var root = Registry.CurrentUser.CreateSubKey(path);
@@ -81,4 +88,22 @@ internal static class ScreensaverRegistrationTests
         Check.Equal(@"C:\synthetic-second.scr", (string)desktop.GetValue("SCRNSAVE.EXE")!,
             "explicit re-registration must back up the owner's latest choice rather than an obsolete first choice");
     });
+
+    // A probe parent of its own, so litter from older runs or a concurrent harness cannot hide a leak.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void FixtureCleanup()
+    {
+        var probe = @"Software\MatrixDesktop.Tests-probe-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (Registry.CurrentUser.CreateSubKey(probe)) { }
+            string? created = null;
+            WithKeysUnder(probe, (desktop, _) => created = desktop.Name);
+            using var parent = Registry.CurrentUser.OpenSubKey(probe)!;
+            Check.True(created?.StartsWith(parent.Name + @"\", StringComparison.OrdinalIgnoreCase) == true,
+                "registry fixtures must create their keys under the requested parent");
+            Check.Equal("", string.Join(",", parent.GetSubKeyNames()), "registry fixtures must remove every key they create");
+        }
+        finally { Registry.CurrentUser.DeleteSubKeyTree(probe, throwOnMissingSubKey: false); }
+    }
 }
