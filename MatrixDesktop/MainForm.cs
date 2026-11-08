@@ -809,6 +809,10 @@ public sealed class MainForm : Form
         await Task.Yield();
         await _webView.EnsureCoreWebView2Async();
         if (_isShuttingDown || IsDisposed) return;
+        string effectiveProfile;
+        try { effectiveProfile = _webView.CoreWebView2.Environment.UserDataFolder; }
+        catch (Exception error) { effectiveProfile = $"(unavailable: {error.Message})"; }
+        Shared.Logger.Info(HostStorage.ProfileRecord(_webView.CreationProperties?.UserDataFolder, effectiveProfile));
 
         // Slightly reduce background features we don't need for an offline local app.
         // (This reduces "browser-y" behavior and a bit of overhead.)
