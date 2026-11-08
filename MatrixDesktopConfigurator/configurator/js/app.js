@@ -474,6 +474,31 @@ const restoreFocus = (shell, focus) => {
 	}
 };
 
+// R2-14: Chromium keeps a select's type-ahead text on the element, and a gating select's change
+// re-renders the surface. The rebuilt select took each keystroke afresh, so "mo" in Version
+// picked Mega City, then Operator. The focused select is held beside the surface with moveBefore,
+// which keeps its focus and that text (removing and re-inserting it loses both), and then takes
+// its rebuilt copy's place with that copy's value and disabled state. Without moveBefore
+// (Chromium before 133) it is rebuilt like the rest.
+const holdFocusedSelect = (focus) => {
+	const surface = el.fieldSurface;
+	if (!(focus?.node instanceof HTMLSelectElement) || !focus.field || typeof surface.moveBefore !== "function") return null;
+	surface.parentNode.moveBefore(focus.node, surface);
+	return focus.node;
+};
+const placeHeldSelect = (held, focus) => {
+	if (!held) return;
+	const fresh = el.fieldSurface.querySelector(`[data-field="${CSS.escape(focus.field)}"] > select`);
+	if (!fresh) {
+		held.remove();
+		return;
+	}
+	fresh.parentNode.moveBefore(held, fresh);
+	held.disabled = fresh.disabled;
+	if (held.value !== fresh.value) held.value = fresh.value;
+	fresh.remove();
+};
+
 // Render every group as a section (sticky header + field grid) into one
 // scrollable surface. A non-empty filter keeps only fields whose visible label,
 // catalog label or either section title matches, and drops emptied sections, so a
@@ -487,6 +512,7 @@ const renderFields = () => {
 	const surface = el.fieldSurface;
 	const prevScroll = surface.scrollTop;
 	const focus = captureFocus(surface);
+	const held = holdFocusedSelect(focus);
 	surface.replaceChildren();
 
 	const filter = state.filter.trim().toLowerCase();
@@ -555,6 +581,7 @@ const renderFields = () => {
 		surface.append(empty);
 	}
 
+	placeHeldSelect(held, focus);
 	restoreFocus(focus?.field ? surface.querySelector(`[data-field="${CSS.escape(focus.field)}"]`) : null, focus);
 	surface.scrollTop = prevScroll;
 };

@@ -1261,6 +1261,35 @@ def check_controls_switch_bloom(page, _fixture):
     expect("control: a chosen Bloom strength switched to original", 0.3, sent="0.3")
 
 
+def check_select_typeahead(page, _fixture):
+    # R2-14: Chromium keeps a select's type-ahead text on the element, and a gating select's change
+    # re-renders the field surface. A rebuilt select took each keystroke afresh, so "mo" in Version
+    # picked Mega City, then Operator, and moved every untouched editor to Operator's values.
+    assert page.evaluate("typeof Element.prototype.moveBefore") == "function", \
+        "witness: this Chromium has no Node.moveBefore, which app.js needs to keep a focused select across a re-render"
+    columns = field(page, "numColumns").locator('input[type="number"]')
+
+    def type_into(key, start, text):
+        select = field(page, key).locator("select")
+        select.select_option(start)
+        select.focus()
+        page.keyboard.type(text, delay=60)
+        now = focused(page)
+        page.wait_for_timeout(1200)  # past Chromium's one-second type-ahead window, so the next case starts clean
+        return now["value"] if (now["field"], now["tag"]) == (key, "SELECT") else "focus elsewhere: " + str(now)
+
+    # Control: a repeated letter cycles from the selection, which a fresh buffer does as well, so a
+    # failure below is the buffer and not keystrokes missing the select.
+    now = type_into("version", "classic", "mm")
+    assert now == "morpheus", "control: 'mm' in Version gave " + now
+    now = type_into("version", "classic", "mo")
+    assert now == "morpheus", "typing 'mo' in Version picked " + now + ", not morpheus"
+    assert columns.input_value() == "60" and saved(page)["version"] == "morpheus", \
+        "Version morpheus shows Columns " + columns.input_value() + ", the renderer draws 60"
+    now = type_into("effect", "palette", "im")
+    assert now == "image", "typing 'im' in Effect picked " + now + ", not image"
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1295,6 +1324,7 @@ CHECKS = [
     ("Preview button says why it is disabled without web assets", check_preview_unavailable),
     ("Every element app.js looks up has a reader", check_el_lookups),
     ("A Control units switch keeps an untouched Bloom strength on what renders", check_controls_switch_bloom),
+    ("Typing a name in a gating select picks the option it spells", check_select_typeahead),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
