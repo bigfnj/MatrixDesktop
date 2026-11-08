@@ -27,6 +27,7 @@ internal static class NativeBridgeTests
         ("Native bridge builds edit and refresh work off the UI thread", NativeWorkRunsOffTheUiThread),
         ("Native bridge keeps atlas roles apart when their inputs match", BuiltAtlasRolesStayApart),
         ("Native bridge same-query update follows a wallpaper change", SameQueryUpdateFollowsWallpaper),
+        ("Native bridge keeps native work off the UI thread when the environment changes mid-build", MidBuildChangesStayOffTheUiThread),
     ];
 
     // MainForm's startup order: the constructor runs the before-show step, then
@@ -227,6 +228,16 @@ internal static class NativeBridgeTests
         // The thread each builder and each raster-settings read ran on.
         internal readonly ConcurrentQueue<(string Step, int Thread)> Threads = new();
         internal void Ran(string step) => Threads.Enqueue((step, Environment.CurrentManagedThreadId));
+        // A broadcast that lands while a build runs: Race runs inside the next Races builds of
+        // RaceStep, each after that build has made its result.
+        internal string RaceStep = "";
+        internal int Races;
+        internal Action? Race;
+        internal T Raced<T>(string step, T result)
+        {
+            if (step == RaceStep && Race is { } race && Interlocked.Decrement(ref Races) >= 0) race();
+            return result;
+        }
     }
 
     private static NativeMediaBridge ZMatrixBridge(Work work, NativeHostKind kind = NativeHostKind.Wallpaper) => new(false, kind)
@@ -235,15 +246,15 @@ internal static class NativeBridgeTests
         {
             work.Ran("wallpaper capture");
             Interlocked.Increment(ref work.Wallpaper);
-            return new WallpaperBackground.Capture([work.Fill, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]);
+            return work.Raced("wallpaper capture", new WallpaperBackground.Capture([work.Fill, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]));
         },
         AtlasFactory = (font, repertoire, special, dpi, path, prefix, url) =>
         {
             work.Ran(special ? "special atlas" : "normal atlas");
             if (special) Interlocked.Increment(ref work.Special); else Interlocked.Increment(ref work.Normal);
             var id = prefix + "-0";
-            return new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi },
-                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{font}|{string.Concat(repertoire)}") });
+            return work.Raced(special ? "special atlas" : "normal atlas", new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi },
+                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{font}|{string.Concat(repertoire)}") }));
         },
         RasterEnvironment = () => { work.Ran("raster settings read"); return work.Raster; },
     };
@@ -410,5 +421,43 @@ internal static class NativeBridgeTests
         Update(bridge, "scene=zmatrix");
         Require(Url() != first && Served(bridge, Url()) is [9, ..] && Generation(bridge) == 2,
             $"A same-query update after a wallpaper change must serve the new wallpaper under a new id as generation 2: {Url()} serves [{string.Join(",", Served(bridge, Url()) ?? [])}] at generation {Generation(bridge)}.");
+    }
+
+    // R2-08: a preference, display or smoothing broadcast reaches the UI thread while an edit or a
+    // refresh awaits its pool build. Whatever it expired is rebuilt on the pool, never by Prepare.
+    private static void MidBuildChangesStayOffTheUiThread()
+    {
+        var ui = Environment.CurrentManagedThreadId;
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        void Broadcast() => bridge.OnUserPreferenceChanged(null, new Microsoft.Win32.UserPreferenceChangedEventArgs(Microsoft.Win32.UserPreferenceCategory.Desktop));
+        string Wallpaper() => string.Join(",", Served(bridge, Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!) ?? []);
+        void Leg(string name, string step, int races, Action race, Action run)
+        {
+            (work.RaceStep, work.Races, work.Race) = (step, races, race);
+            var start = work.Threads.Count;
+            run();
+            work.Race = null;
+            var inline = work.Threads.Skip(start).Where(entry => entry.Step != "raster settings read" && entry.Thread == ui).Select(entry => entry.Step).ToArray();
+            Require(inline.Length == 0, $"{name} must keep its native work off the UI thread: on it [{string.Join(", ", inline)}].");
+        }
+        var query = "scene=zmatrix&zmFont=" + Uri.EscapeDataString("{\"height\":-12}");
+        Update(bridge, "scene=zmatrix");
+        Leg("A refresh whose wallpaper changes during its pool capture", "wallpaper capture", 1, () => { work.Fill = 7; Broadcast(); }, () => Refresh(bridge, "scene=zmatrix"));
+        Require(Wallpaper().StartsWith("7,", StringComparison.Ordinal), $"That refresh must serve the wallpaper captured after the change: [{Wallpaper()}].");
+        Leg("A regular-font edit whose wallpaper changes during its pool atlas build", "normal atlas", 1, () => { work.Fill = 8; Broadcast(); }, () => Update(bridge, query));
+        Require(Wallpaper().StartsWith("8,", StringComparison.Ordinal), $"That edit must serve the wallpaper captured after the change: [{Wallpaper()}].");
+        Leg("A refresh whose font smoothing changes during its pool capture", "wallpaper capture", 1, () => work.Raster = "smoothing-b", () => Refresh(bridge, query));
+        var fonts = Served(bridge).Where(pair => pair.Key.Contains("/font-", StringComparison.Ordinal)).Select(pair => pair.Value is null ? "" : Encoding.UTF8.GetString(pair.Value)).ToArray();
+        Require(fonts.Length == 2 && fonts.All(text => text.StartsWith("smoothing-b|", StringComparison.Ordinal)),
+            $"That refresh must serve atlases built under the new smoothing: [{string.Join(", ", fonts)}].");
+        // Inputs that move on every pass: three passes, then the last one applies under its own epoch.
+        var captures = work.Wallpaper;
+        var published = false;
+        Leg("A refresh whose wallpaper changes during every pool capture", "wallpaper capture", 5, () => { work.Fill++; Broadcast(); }, () => published = Refresh(bridge, query));
+        Require(work.Wallpaper - captures == 3 && published && Wallpaper().StartsWith($"{work.Fill - 1},", StringComparison.Ordinal),
+            $"That refresh must stop after three pool captures and publish the last: {work.Wallpaper - captures} captures, published={published}, serves [{Wallpaper()}] with fill {work.Fill} current.");
+        Leg("The same-query update after it", "", 0, () => { }, () => Update(bridge, query));
+        Require(Wallpaper().StartsWith($"{work.Fill},", StringComparison.Ordinal), $"The next update must catch up with the wallpaper that changed after the last pass: [{Wallpaper()}], fill {work.Fill}.");
     }
 }

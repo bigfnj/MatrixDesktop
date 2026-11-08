@@ -112,9 +112,11 @@ internal sealed class NativeMediaBridge : IDisposable
             CaptureDesktop(captureBounds);
     }
 
-    internal void Prepare(string query, Rectangle captureBounds, int atlasDpi = 96)
+    internal void Prepare(string query, Rectangle captureBounds, int atlasDpi = 96) => Prepare(query, captureBounds, atlasDpi, ReadInputs());
+
+    private void Prepare(string query, Rectangle captureBounds, int atlasDpi, Inputs inputs)
     {
-        if (_disposed || Unchanged(query, captureBounds, atlasDpi)) return;
+        if (_disposed || Unchanged(query, captureBounds, atlasDpi, inputs)) return;
         _configuration = query;
         _captureBounds = captureBounds;
         _atlasDpi = atlasDpi;
@@ -129,7 +131,7 @@ internal sealed class NativeMediaBridge : IDisposable
         if (Refreshable)
         {
             _desktop = null;
-            PrepareZMatrix(options, captureBounds, atlasDpi);
+            PrepareZMatrix(options, captureBounds, atlasDpi, inputs);
             return;
         }
         if (!options.TryGetValue("scene", out var scene) || !scene.Equals("uc3d", StringComparison.OrdinalIgnoreCase))
@@ -191,20 +193,20 @@ internal sealed class NativeMediaBridge : IDisposable
         return stream.ToArray();
     }
 
-    private void PrepareZMatrix(Dictionary<string, string> options, Rectangle bounds, int dpi)
+    private void PrepareZMatrix(Dictionary<string, string> options, Rectangle bounds, int dpi, Inputs inputs)
     {
         if (WantsWallpaper(options))
         {
             try
             {
-                _wallpaper = Wallpaper(bounds);
+                _wallpaper = Wallpaper(bounds, inputs.Epoch);
                 _nativeResources.Add($"wallpaper-{_wallpaper.Built}", _wallpaper.Capture.Png);
             }
             catch (Exception error) { _warnings.Add($"Wallpaper background unavailable: {error.Message}"); }
         }
         try
         {
-            var (normal, special) = AtlasInputs(options, dpi);
+            var (normal, special) = AtlasInputs(options, dpi, inputs.Raster);
             var regular = Atlas(ref _normalAtlas, normal.Key, normal.Repertoire, false);
             var specialAtlas = Atlas(ref _specialAtlas, special.Key, special.Repertoire, true);
             foreach (var (id, bytes) in regular.Atlas.Resources.Concat(specialAtlas.Atlas.Resources)) _nativeResources.Add(id, bytes);
@@ -223,49 +225,76 @@ internal sealed class NativeMediaBridge : IDisposable
 
     // Both atlas roles with everything GDI rasterises them from. Each role has its own
     // inputs, so an edit to one font rebuilds only that atlas.
-    private ((AtlasKey Key, string[] Repertoire) Normal, (AtlasKey Key, string[] Repertoire) Special) AtlasInputs(Dictionary<string, string> options, int dpi)
+    private ((AtlasKey Key, string[] Repertoire) Normal, (AtlasKey Key, string[] Repertoire) Special) AtlasInputs(Dictionary<string, string> options, int dpi, string raster)
     {
         var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray(), phrases: false);
         var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"], phrases: true);
         var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal).ToArray();
         var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
-        var raster = RasterEnvironment();
         return ((new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmFont")), string.Concat(characters)), characters),
             (new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special));
     }
 
     // The same request is unchanged only while the wallpaper it applied is still current: the
     // configurator re-sends its query when the preview is shown, after any wallpaper change.
-    private bool Unchanged(string query, Rectangle bounds, int dpi) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi
-        && (_wallpaper is null || _wallpaper.Epoch == Volatile.Read(ref _environment));
+    private bool Unchanged(string query, Rectangle bounds, int dpi, Inputs inputs) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi
+        && (_wallpaper is null || _wallpaper.Epoch == inputs.Epoch);
+
+    // 2026-11-08 (R2-08): the environment native work is built from. A call reads it on the UI
+    // thread before each build pass and hands Prepare the inputs of its last pass, so a broadcast
+    // that arrives during a build never makes Prepare build on the UI thread.
+    private readonly record struct Inputs(int Epoch, string Raster);
+    private Inputs ReadInputs() => new(Volatile.Read(ref _environment), RasterEnvironment());
+    private const int BuildPasses = 3;
 
     // 2026-11-08 (AUD-09): the wallpaper capture with its PNG encode and both GDI atlases take
     // most of a second on a large virtual screen. An edit or a refresh therefore builds what the
     // next Prepare would miss on the thread pool and applies nothing there; Prepare then runs on
     // the caller's (UI) thread and takes these results instead of building them itself. Prepare
     // follows with exactly one generation step, so atlas ids minted here carry its generation.
-    private async Task BuildAheadAsync(string query, Rectangle bounds, int dpi)
+    // A preference, display or smoothing change during the awaits can expire what a pass built
+    // or a cached entry it relied on, so another pass builds just that, up to BuildPasses. If the
+    // inputs still move, Prepare applies the last pass under its own inputs, and the next refresh
+    // or edit catches up (Unchanged sees the expired wallpaper).
+    private async Task<Inputs> BuildAheadAsync(string query, Rectangle bounds, int dpi)
     {
         var options = ParseQuery(query);
-        if (_disposed || Unchanged(query, bounds, dpi) || !IsZMatrix(options)) return;
-        var epoch = Volatile.Read(ref _environment);
-        var wallpaper = WantsWallpaper(options) && CachedWallpaper(bounds, epoch) is null
-            ? Task.Run(() => Built<WallpaperBackground.Capture>.Of(() => WallpaperCapture(bounds))) : null;
-        var roles = new List<(AtlasKey Key, string[] Repertoire, bool Special)>();
-        try
-        {
-            var (normal, special) = AtlasInputs(options, dpi);
-            if (_normalAtlas?.Key != normal.Key) roles.Add((normal.Key, normal.Repertoire, false));
-            if (_specialAtlas?.Key != special.Key) roles.Add((special.Key, special.Repertoire, true));
-        }
-        catch (Exception) { } // Prepare meets the same malformed input and reports it.
+        var inputs = ReadInputs();
+        if (_disposed || Unchanged(query, bounds, dpi, inputs) || !IsZMatrix(options)) return inputs;
         var generation = _generation + 1;
-        // The roles build in order on one thread, as Prepare would build them.
-        var atlases = roles.Count == 0 ? null : Task.Run(() => roles.Select(role => (role.Key, role.Special, Built<GdiGlyphAtlas.Atlas>.Of(() =>
-            AtlasFactory(role.Key.Font, role.Repertoire, role.Special, role.Key.Dpi, role.Key.Asset, AtlasPrefix(generation, role.Special), ResourceUrl)))).ToArray());
-        if (wallpaper is not null) _builtWallpaper = (bounds, epoch, await wallpaper);
-        if (atlases is not null) _builtAtlases = await atlases;
+        for (var pass = 1; ; pass++)
+        {
+            var epoch = inputs.Epoch;
+            var wallpaper = WantsWallpaper(options) && CachedWallpaper(bounds, epoch) is null && BuiltWallpaper(bounds, epoch) is null
+                ? Task.Run(() => Built<WallpaperBackground.Capture>.Of(() => WallpaperCapture(bounds))) : null;
+            var roles = new List<(AtlasKey Key, string[] Repertoire, bool Special)>();
+            try
+            {
+                var (normal, special) = AtlasInputs(options, dpi, inputs.Raster);
+                if (_normalAtlas?.Key != normal.Key && BuiltAtlas(normal.Key, false) < 0) roles.Add((normal.Key, normal.Repertoire, false));
+                if (_specialAtlas?.Key != special.Key && BuiltAtlas(special.Key, true) < 0) roles.Add((special.Key, special.Repertoire, true));
+            }
+            catch (Exception) { } // Prepare meets the same malformed input and reports it.
+            if (wallpaper is null && roles.Count == 0) return inputs;
+            // The roles build in order on one thread, as Prepare would build them.
+            var atlases = roles.Count == 0 ? null : Task.Run(() => roles.Select(role => (role.Key, role.Special, Built<GdiGlyphAtlas.Atlas>.Of(() =>
+                AtlasFactory(role.Key.Font, role.Repertoire, role.Special, role.Key.Dpi, role.Key.Asset, AtlasPrefix(generation, role.Special), ResourceUrl)))).ToArray());
+            if (wallpaper is not null) _builtWallpaper = (bounds, epoch, await wallpaper);
+            if (atlases is not null)
+            {
+                var made = await atlases;
+                _builtAtlases = [.. _builtAtlases, .. made];
+            }
+            var current = ReadInputs();
+            if (_disposed || pass == BuildPasses || current == inputs) return inputs;
+            inputs = current;
+        }
     }
+
+    private Built<WallpaperBackground.Capture>? BuiltWallpaper(Rectangle bounds, int epoch) =>
+        _builtWallpaper is { } built && built.Bounds == bounds && built.Epoch == epoch ? built.Capture : null;
+
+    private int BuiltAtlas(AtlasKey key, bool special) => Array.FindIndex(_builtAtlases, entry => entry.Key == key && entry.Special == special);
 
     private void DropBuilt()
     {
@@ -276,12 +305,11 @@ internal sealed class NativeMediaBridge : IDisposable
     private WallpaperEntry? CachedWallpaper(Rectangle bounds, int epoch) =>
         _wallpaperCache is { } cached && cached.Bounds == bounds && cached.Epoch == epoch ? cached : null;
 
-    private WallpaperEntry Wallpaper(Rectangle bounds)
+    private WallpaperEntry Wallpaper(Rectangle bounds, int epoch)
     {
-        var epoch = Volatile.Read(ref _environment);
         if (CachedWallpaper(bounds, epoch) is { } hit) return hit;
         var cached = _wallpaperCache;
-        var capture = _builtWallpaper is { } built && built.Bounds == bounds && built.Epoch == epoch ? built.Capture.Result : WallpaperCapture(bounds);
+        var capture = BuiltWallpaper(bounds, epoch) is { } built ? built.Result : WallpaperCapture(bounds);
         _wallpaperCache = cached is not null && cached.Bounds == bounds && SameCapture(cached.Capture, capture)
             ? cached with { Epoch = epoch }
             : new WallpaperEntry(bounds, epoch, _generation, capture);
@@ -296,7 +324,7 @@ internal sealed class NativeMediaBridge : IDisposable
     private AtlasEntry Atlas(ref AtlasEntry? cache, AtlasKey key, string[] repertoire, bool special)
     {
         if (cache is not null && cache.Key == key) return cache;
-        var built = Array.FindIndex(_builtAtlases, entry => entry.Key == key && entry.Special == special);
+        var built = BuiltAtlas(key, special);
         cache = new AtlasEntry(key, built >= 0 ? _builtAtlases[built].Atlas.Result
             : AtlasFactory(key.Font, repertoire, special, key.Dpi, key.Asset, AtlasPrefix(_generation, special), ResourceUrl));
         return cache;
@@ -373,8 +401,8 @@ internal sealed class NativeMediaBridge : IDisposable
             if (_disposed) return;
             var generation = _generation;
             var before = BootstrapJson(0);
-            await BuildAheadAsync(query, bounds, 96);
-            Prepare(query, bounds);
+            var inputs = await BuildAheadAsync(query, bounds, 96);
+            Prepare(query, bounds, 96, inputs);
             // As in a refresh, an update that changed nothing keeps its generation and is not
             // republished, because the ZMatrix page discards its raster on every bootstrap it applies.
             if (BootstrapJson(0) == before)
@@ -400,11 +428,11 @@ internal sealed class NativeMediaBridge : IDisposable
             var before = BootstrapJson(0);
             _configuration = "";
             // The published resources stay served while the work builds; only Prepare replaces them.
-            await BuildAheadAsync(query, bounds, atlasDpi);
+            var inputs = await BuildAheadAsync(query, bounds, atlasDpi);
             if (_disposed) return false;
             // Only a Refreshable (ZMatrix) bridge is refreshed, so a UC3D desktop, a still
             // snapshot, is never re-read here.
-            Prepare(query, bounds, atlasDpi);
+            Prepare(query, bounds, atlasDpi, inputs);
             // Unchanged inputs reuse their entries, so the bootstrap names the same ids.
             if (BootstrapJson(0) == before)
             {
