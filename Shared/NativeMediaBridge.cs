@@ -13,6 +13,10 @@ using Microsoft.Web.WebView2.Core;
 
 namespace MatrixDesktop.Shared;
 
+// What kind of window hosts the page. Wallpaper and the screensaver preview sit behind
+// other applications, so their UC3D desktop comes from the wallpaper, never the screen.
+internal enum NativeHostKind { Interactive, Wallpaper, Screensaver, ScreensaverPreview }
+
 // Only generated font/wallpaper resources and explicitly granted UC3D media
 // are exposed. There is no directory mapping or filesystem-path request API.
 internal sealed class NativeMediaBridge : IDisposable
@@ -21,6 +25,7 @@ internal sealed class NativeMediaBridge : IDisposable
     // Keep granted media on an intercepted origin, separate from bundled assets.
     private const string ResourceOrigin = "https://uc3d-media.local";
     private readonly bool _preview;
+    private readonly NativeHostKind _hostKind;
     private readonly SemaphoreSlim _updateLock = new(1, 1);
     private readonly Dictionary<string, MediaEntry> _files = new(StringComparer.Ordinal);
     private readonly List<string> _warnings = [];
@@ -39,7 +44,17 @@ internal sealed class NativeMediaBridge : IDisposable
     private int _atlasDpi = 96;
     private bool _disposed;
 
-    internal NativeMediaBridge(bool preview) => _preview = preview;
+    internal NativeMediaBridge(bool preview, NativeHostKind hostKind = NativeHostKind.Interactive)
+    {
+        _preview = preview;
+        _hostKind = hostKind;
+    }
+
+    // Capture seams for the native harness; production uses the real captures.
+    internal Func<Rectangle, byte[]> ScreenCapture { get; init; } = CopyScreen;
+    internal Func<Rectangle, WallpaperBackground.Capture> WallpaperCapture { get; init; } = WallpaperBackground.Create;
+
+    private bool UsesWallpaperDesktop => _hostKind is NativeHostKind.Wallpaper or NativeHostKind.ScreensaverPreview;
 
     internal void SetAssetRoot(string webRoot)
     {
@@ -98,30 +113,39 @@ internal sealed class NativeMediaBridge : IDisposable
             }
         }
         if (!Enabled(options, "desktopBackground")) _desktop = null;
-        else if (_desktop is null)
+        else if (_desktop is null) CaptureDesktop(captureBounds);
+    }
+
+    // A screen copy would bake other applications' windows into a wallpaper or preview,
+    // so those hosts paint the wallpaper instead, as ZMatrix does.
+    private void CaptureDesktop(Rectangle captureBounds)
+    {
+        try
         {
-            try
-            {
-                if (captureBounds.Width <= 0 || captureBounds.Height <= 0) throw new InvalidOperationException("No display bounds are available.");
-                using var bitmap = new Bitmap(captureBounds.Width, captureBounds.Height);
-                using (var graphics = Graphics.FromImage(bitmap))
-                    graphics.CopyFromScreen(captureBounds.Location, Point.Empty, captureBounds.Size);
-                using var stream = new MemoryStream();
-                bitmap.Save(stream, ImageFormat.Png);
-                _desktop = stream.ToArray();
-            }
-            catch (Exception ex)
-            {
-                _warnings.Add($"Desktop snapshot is unavailable: {ex.Message}");
-            }
+            if (captureBounds.Width <= 0 || captureBounds.Height <= 0) throw new InvalidOperationException("No display bounds are available.");
+            _desktop = UsesWallpaperDesktop ? WallpaperCapture(captureBounds).Png : ScreenCapture(captureBounds);
         }
+        catch (Exception ex)
+        {
+            _warnings.Add($"Desktop snapshot is unavailable: {ex.Message}");
+        }
+    }
+
+    private static byte[] CopyScreen(Rectangle captureBounds)
+    {
+        using var bitmap = new Bitmap(captureBounds.Width, captureBounds.Height);
+        using (var graphics = Graphics.FromImage(bitmap))
+            graphics.CopyFromScreen(captureBounds.Location, Point.Empty, captureBounds.Size);
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Png);
+        return stream.ToArray();
     }
 
     private void PrepareZMatrix(Dictionary<string, string> options, Rectangle bounds, int dpi)
     {
         try
         {
-            var wallpaper = WallpaperBackground.Create(bounds);
+            var wallpaper = WallpaperCapture(bounds);
             var id = $"wallpaper-{_generation}";
             _nativeResources.Add(id, wallpaper.Png);
             _wallpaper = new { generation = _generation, url = ResourceUrl(id), width = wallpaper.Width, height = wallpaper.Height,
@@ -202,6 +226,8 @@ internal sealed class NativeMediaBridge : IDisposable
         {
             if (_disposed) return;
             _configuration = "";
+            // A wallpaper-sourced desktop is re-read so a wallpaper change reaches a later UC3D load.
+            if (UsesWallpaperDesktop) _desktop = null;
             Prepare(query, bounds, atlasDpi);
             await PublishBootstrapAsync();
         }

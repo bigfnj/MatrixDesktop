@@ -43,7 +43,7 @@ public sealed class MainForm : Form
     private bool _cursorHidden;
     private Shared.AppWindowIcon? _windowIcon;
 
-    private readonly Shared.NativeMediaBridge _mediaBridge = new(preview: false);
+    private readonly Shared.NativeMediaBridge _mediaBridge;
 
     private static string? _cachedUserDataFolder;
 
@@ -58,6 +58,7 @@ public sealed class MainForm : Form
 
         var effectiveArgs = ScreensaverWindowPolicy.EffectiveArguments(launchPlan);
         _appOptions = AppCli.Parse(effectiveArgs, out var passthroughArgs);
+        _mediaBridge = new(preview: false, MediaHostKind.For(launchPlan, _appOptions.WindowMode == WindowMode.Wallpaper));
         if (IsWallpaper || launchPlan.IsPreview)
         {
             TopLevel = false;

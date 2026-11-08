@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Text.Json;
+using MatrixDesktop;
 using MatrixDesktop.Shared;
 
 // The real NativeMediaBridge, driven without a WebView: Prepare plus the bootstrap
@@ -10,12 +11,32 @@ internal static class NativeBridgeTests
     [
         ("Native bridge replaces an invalid ZMatrix phrase list with the page's default", InvalidPhrasesUseDefault),
         ("Native bridge replaces an invalid ZMatrix character list with the page's default", InvalidCharactersUseDefault),
+        ("Native bridge takes the UC3D desktop from the wallpaper for wallpaper and preview hosts", DesktopSourceFollowsHostKind),
+        ("Native bridge refresh re-reads a wallpaper-sourced UC3D desktop only", RefreshRereadsWallpaperDesktop),
     ];
 
     private static readonly Rectangle Small = new(0, 0, 32, 32);
+    private static readonly Rectangle Virtual = new(-1920, -120, 3840, 1200);
 
     private static void Require(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }
+
+    private sealed class Captures { internal int Screen, Wallpaper; internal Rectangle Bounds; }
+
+    // Counting stand-ins for the real captures, which would read this desktop's pixels.
+    private static NativeMediaBridge Bridge(NativeHostKind kind, Captures captures) => new(false, kind)
+    {
+        ScreenCapture = bounds => { captures.Screen++; captures.Bounds = bounds; return [1, 2, 3]; },
+        WallpaperCapture = bounds =>
+        {
+            captures.Wallpaper++; captures.Bounds = bounds;
+            return new WallpaperBackground.Capture([4, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]);
+        },
+    };
+
+    // The host kind MainForm passes for each launch.
+    private static NativeHostKind HostKind(HostLaunchKind launch, bool wallpaperWindowMode) =>
+        MediaHostKind.For(new HostLaunchPlan([], launch), wallpaperWindowMode);
 
     private static JsonElement Bootstrap(NativeMediaBridge bridge) => JsonDocument.Parse(bridge.BootstrapJson()).RootElement.Clone();
 
@@ -47,5 +68,46 @@ internal static class NativeBridgeTests
             $"A character entry longer than one character must fall back to the default repertoire; got [{string.Join(",", normal)}].");
         bridge.Prepare("scene=zmatrix&zmCharacters=" + Uri.EscapeDataString("[\"A\",\"B\"]"), Small);
         Require(Glyphs(Bootstrap(bridge), "normal").SetEquals(["A", "B"]), "A valid character list must still define the regular atlas.");
+    }
+
+    private static void DesktopSourceFollowsHostKind()
+    {
+        const string query = "scene=uc3d&desktopBackground=true";
+        foreach (var (name, kind, fromWallpaper) in new[]
+        {
+            ("wallpaper", HostKind(HostLaunchKind.Standard, true), true),
+            ("screensaver preview (/p)", HostKind(HostLaunchKind.ScreensaverPreview, false), true),
+            ("fullscreen", HostKind(HostLaunchKind.Standard, false), false),
+            ("screensaver (/s)", HostKind(HostLaunchKind.Screensaver, false), false),
+        })
+        {
+            var captures = new Captures();
+            using var bridge = Bridge(kind, captures);
+            bridge.Prepare(query, Virtual);
+            Require(captures.Wallpaper == (fromWallpaper ? 1 : 0) && captures.Screen == (fromWallpaper ? 0 : 1),
+                $"The {name} host must take its UC3D desktop from the {(fromWallpaper ? "wallpaper" : "screen")}: wallpaper={captures.Wallpaper}, screen={captures.Screen}.");
+            Require(captures.Bounds == Virtual, $"The {name} host must capture its own bounds, got {captures.Bounds}.");
+            Require(Bootstrap(bridge).GetProperty("desktopUrl").ValueKind == JsonValueKind.String, $"The {name} host must publish its desktop snapshot.");
+        }
+    }
+
+    private static void RefreshRereadsWallpaperDesktop()
+    {
+        const string query = "scene=uc3d&desktopBackground=true";
+        var wallpaper = new Captures();
+        using (var bridge = Bridge(NativeHostKind.Wallpaper, wallpaper))
+        {
+            bridge.Prepare(query, Virtual);
+            bridge.RefreshAsync(query, Virtual, 96).GetAwaiter().GetResult();
+            Require(wallpaper.Wallpaper + wallpaper.Screen == 2, $"A wallpaper host's refresh must re-read its desktop: {wallpaper.Wallpaper + wallpaper.Screen} reads.");
+        }
+        // Control: a screen copy is only clean before this window covers the screen, so it is kept.
+        var screen = new Captures();
+        using (var bridge = Bridge(NativeHostKind.Interactive, screen))
+        {
+            bridge.Prepare(query, Virtual);
+            bridge.RefreshAsync(query, Virtual, 96).GetAwaiter().GetResult();
+            Require(screen.Screen + screen.Wallpaper == 1, $"A refresh must keep a screen snapshot: {screen.Screen + screen.Wallpaper} reads.");
+        }
     }
 }
