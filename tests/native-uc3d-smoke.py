@@ -227,6 +227,10 @@ def default_configurator_case(playwright, exe):
         page = page_at(browser, "https://configurator.local/")
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
+        # sceneSections reports an invalid placement through console.error, not an exception.
+        placement_errors = []
+        page.on("console", lambda message: placement_errors.append(message.text)
+                if message.type == "error" and "Scene placement" in message.text else None)
         page.wait_for_function("document.querySelectorAll('.field').length > 40")
         page.locator("#newPresetButton").click()
 
@@ -237,6 +241,23 @@ def default_configurator_case(playwright, exe):
         # A previous saved UC3D preview can still be displayed during the debounce.
         # Wait for the fresh New + UC3D command rather than that stale scene alone.
         page.wait_for_function("new URL(document.querySelector('#previewFrame').src, location.href).search === '?scene=uc3d'")
+        # The original dialog groups Normal, Highlight and Background colour; the published
+        # configurator must show them together on the shared keys. Asserted before the source
+        # witness below, so a stale publish fails on the missing trio itself.
+        trio = page.evaluate("""() => [...document.querySelectorAll('#section-uc3d .field-grid > .field')]
+            .filter(node => ['codeColor', 'cursorColor', 'backgroundColor'].includes(node.dataset.field))
+            .map(node => ({ id: node.dataset.field, label: node.querySelector('label')?.textContent,
+                swatch: getComputedStyle(node.querySelector('.color-swatch')).backgroundColor }))""")
+        served = bytes(page.evaluate("""async () =>
+            Array.from(new Uint8Array(await (await fetch('js/app.js')).arrayBuffer()))"""))
+        print(f"SOURCE configurator/js/app.js served sha256={hashlib.sha256(served).hexdigest()}", flush=True)
+        assert trio == [
+            {"id": "codeColor", "label": "Normal code color", "swatch": "rgb(128, 0, 255)"},
+            {"id": "cursorColor", "label": "Highlight code color", "swatch": "rgb(255, 128, 255)"},
+            {"id": "backgroundColor", "label": "Background color", "swatch": "rgb(0, 0, 0)"},
+        ], f"published configurator UC3D section lacks the original dialog's colour trio: {trio}"
+        checkout = (ROOT / "MatrixDesktopConfigurator" / "configurator" / "js" / "app.js").read_bytes()
+        assert served == checkout, "published configurator app.js differs from checkout"
 
         def preview():
             target = page.locator("#previewFrame").get_attribute("src")
@@ -257,14 +278,16 @@ def default_configurator_case(playwright, exe):
         assert field("Volumetric / 3D").locator("input").is_checked(), "configurator scene switch kept Matrix's flat default"
         assert field("Control units").locator("select").input_value() == "original", "new UC3D preset did not choose original controls"
         for key, label, value, minimum, maximum in (
-                ("uc3dAmount", "Code amount: Less / More", "500", "100", "1500"),
-                ("uc3dGlyphSize", "Code size: Small / Large", "12", "10", "40"),
+                ("uc3dAmount", "Line density: Low / Very high", "500", "100", "1500"),
+                ("uc3dGlyphSize", "Glyph size: Small / Big", "12", "10", "40"),
                 ("uc3dFallSpeed", "Fall speed: Slow / Fast", "6", "0", "150"),
-                ("uc3dForwardSpeed", "Travel: Backward / Forward", "6", "0", "120"),
-                ("uc3dPictureScale", "Picture size: Large / Small", "100", "100", "300"),
-                ("uc3dPictureDelay", "Picture delay (seconds)", "60", "0", "120"),
+                ("uc3dForwardSpeed", "Forward/back speed: Back / Forward", "6", "0", "120"),
+                ("uc3dPictureScale", "Picture scale: Full size / 1/3 size", "100", "100", "300"),
+                ("uc3dPictureDelay", "Picture delay: Shorter / Longer", "60", "0", "120"),
                 ("uc3dClockSize", "Clock size: Small / Large", "90", "50", "170")):
             native_field = page.locator(f'.field[data-field="{key}"]')
+            shown = native_field.locator("label").text_content()
+            assert shown == label, f"{key} reads {shown!r}; the original dialog calls it {label!r}"
             number, slider = native_field.locator("input[type=number]"), native_field.locator("input[type=range]")
             for control in (number, slider):
                 assert control.input_value() == value and control.evaluate("node => node.checkValidity()"), f"configurator default {label} is absent or invalid"
@@ -272,10 +295,10 @@ def default_configurator_case(playwright, exe):
             assert number.is_disabled() == slider.is_disabled(), f"paired {label} controls disagree about disabled state"
         for label in ("Columns", "Density", "Fall speed", "Forward speed", "Raindrop length"):
             assert field(label).locator("input[type=number]").is_disabled(), f"generic {label} is operable in original mode"
-        amount = field("Code amount: Less / More").locator("input[type=number]")
+        amount = field("Line density: Low / Very high").locator("input[type=number]")
         amount.fill("")
         amount.press("Tab")
-        assert amount.input_value() == "500", "clearing code amount did not restore the current UC3D default"
+        assert amount.input_value() == "500", "clearing line density did not restore the current UC3D default"
         field("Volumetric / 3D").locator("input").uncheck()
         page.wait_for_function("new URL(document.querySelector('#previewFrame').src, location.href).searchParams.get('volumetric') === 'false'")
         override = default_snapshot(preview())
@@ -290,7 +313,8 @@ def default_configurator_case(playwright, exe):
         page.screenshot(path=str(ARTIFACTS / "defaults-configurator.png"))
         (ARTIFACTS / "defaults-configurator.json").write_text(json.dumps({"default": report, "explicitFlatOverride": override, "sceneRoundTrip": round_trip}, indent=2), encoding="utf-8")
         assert_no_runtime_errors(errors, round_trip["runtime"]["errors"], "defaults-configurator")
-        print("PASS published configurator UC3D defaults: real scene switch, valid profile controls, scene reset value, explicit flat override survives preview and scene round trip", flush=True)
+        assert not placement_errors, f"published configurator reported invalid scene placements: {placement_errors}"
+        print("PASS published configurator UC3D defaults: real scene switch, original dialog colour trio and slider names, valid profile controls, scene reset value, explicit flat override survives preview and scene round trip", flush=True)
         close_window(process)
     finally:
         stop_application(process)

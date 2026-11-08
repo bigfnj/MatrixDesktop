@@ -547,6 +547,8 @@ backgroundColor (RGB)
 - Key: backgroundColor
 - Alias: backgroundRGB
 - Value format: R,G,B (floats)
+  UC3D: background color. The configurator shows it in the UC3D section as
+  Background color while UC3D is selected.
 - Example:
   MatrixDesktop.exe --backgroundRGB 0,0,0
 
@@ -560,6 +562,8 @@ cursorColor (RGB)
 - Key: cursorColor
 - Alias: cursorRGB
 - Value format: R,G,B
+  UC3D: highlight color of each stream's leading glyph. The configurator shows it
+  in the UC3D section as Highlight code color; the UC3D profile uses 1,0.501961,1.
 
 cursorHSL (HSL)
 - Key: cursorHSL
@@ -579,6 +583,8 @@ cursorIntensity (number)
 - Default: 2
 - Range: clamped to >= 0
 - Meaning: brightness multiplier for cursor glow.
+  UC3D: brightness of the highlight code color; the configurator calls it
+  Highlight intensity while UC3D is selected.
 - Example:
   MatrixDesktop.exe --cursorIntensity 3
 
@@ -732,7 +738,8 @@ UC3D scene options
 
 - Key: uc3dAmount
 - Default: 500
-  UC3D original: More/Less slider, 100 to 1500 streams, independent of glyph size.
+  UC3D original: Line density slider (Low / Very high), 100 to 1500 streams,
+  independent of glyph size.
   Streams enter gradually over ten seconds; perspective and culling affect coverage.
 
 - Key: uc3dGlyphSize
@@ -752,7 +759,7 @@ UC3D scene options
 
 - Key: uc3dPictureScale
 - Default: 100
-  UC3D original: Large / Small picture slider, 100 to 300. Higher values shrink
+  UC3D original: Picture scale slider (Full size / 1/3 size), 100 to 300. Higher values shrink
   the image grid, as in the original; it is a sampling divisor, not zoom percent.
 
 - Key: uc3dPictureDelay

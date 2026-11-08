@@ -33,6 +33,24 @@ internal static class ArgumentCatalog
                 ["pictureDuration"] = 30.0,
             },
         },
+        // The original screensaver's settings dialog groups Normal, Highlight and Background
+        // colour. UC3D reads the same shared keys as the Matrix scene (cursorColor is the
+        // leading-glyph highlight: web/js/uc3d/runtime.js:44-45, scaled by cursorIntensity at
+        // :103), so while UC3D is selected a placement changes only which section shows the
+        // editor and what it is called. Keys, commands, imports and presets are untouched.
+        // CommandBuilderTests holds every placement to a real field, group and anchor.
+        ScenePlacements = new()
+        {
+            ["uc3d"] =
+            [
+                new("cursorColor", "Highlight code color", Group: "uc3d", After: "codeColor",
+                    Help: "Leading glyph of each stream. The Matrix scene shows this same setting as Cursor (cursorColor)."),
+                new("backgroundColor", "Background color", Group: "uc3d", After: "cursorColor",
+                    Help: "The Matrix scene shows this same setting as Background (backgroundColor)."),
+                new("cursorIntensity", "Highlight intensity",
+                    Help: "Brightness of the highlight code color (cursorIntensity)."),
+            ],
+        },
         Groups =
         [
             new ArgumentGroup
@@ -203,12 +221,14 @@ internal static class ArgumentCatalog
                     Select("uc3dControls", "Control units", "web", "original",
                         "Original controls use the screensaver's slider values. Legacy controls preserve existing MatrixDesktop presets.",
                         ("original", "Original screensaver controls"), ("legacy", "Legacy MatrixDesktop controls")),
-                    Slider("uc3dAmount", "Code amount: Less / More", 500, 100, 1500, "Number of falling code streams. Independent of code size."),
-                    Slider("uc3dGlyphSize", "Code size: Small / Large", 12, 10, 40, "Original code-size slider units."),
+                    // Labels are the original v3.4 settings dialog's own slider names, so the
+                    // owner can match each control to the screensaver they are replacing.
+                    Slider("uc3dAmount", "Line density: Low / Very high", 500, 100, 1500, "Number of falling code streams, 100 to 1500. Independent of glyph size."),
+                    Slider("uc3dGlyphSize", "Glyph size: Small / Big", 12, 10, 40, "Original glyph-size slider units."),
                     Slider("uc3dFallSpeed", "Fall speed: Slow / Fast", 6, 0, 150, "Original fall-speed slider. Zero retains the original minimum falling motion."),
-                    Slider("uc3dForwardSpeed", "Travel: Backward / Forward", 6, 0, 120, "60 is stationary. Used for constant travel when random movement is off."),
-                    Slider("uc3dPictureScale", "Picture size: Large / Small", 100, 100, 300, "Original slider units. Higher values form a smaller picture."),
-                    Slider("uc3dPictureDelay", "Picture delay (seconds)", 60, 0, 120, "Original wait between picture sequences."),
+                    Slider("uc3dForwardSpeed", "Forward/back speed: Back / Forward", 6, 0, 120, "60 is stationary. Used for constant travel when random movement is off."),
+                    Slider("uc3dPictureScale", "Picture scale: Full size / 1/3 size", 100, 100, 300, "Original slider units. Higher values form a smaller picture."),
+                    Slider("uc3dPictureDelay", "Picture delay: Shorter / Longer", 60, 0, 120, "Seconds between picture sequences, in original slider units."),
                     Slider("uc3dClockSize", "Clock size: Small / Large", 90, 50, 170, "Original clock-size slider units; 90 is the installed default."),
                     Color("codeColor", "Normal code color", "web", 0, 0.698, 0),
                     Toggle("donorGlyphs", "Use local donor glyphs", "web", false, "donorGlyphs", help: "Use the original character atlas from your imported donor media folder."),
@@ -373,6 +393,9 @@ internal sealed class ConfiguratorMetadata
 {
     public List<ArgumentGroup> Groups { get; init; } = [];
     public Dictionary<string, Dictionary<string, object?>> SceneDefaults { get; init; } = [];
+    // Presentation only: read by configurator/js/app.js sceneSections, never by CommandBuilder,
+    // the importers or the randomizer, which all walk Groups.
+    public Dictionary<string, List<ScenePlacement>> ScenePlacements { get; init; } = [];
     public List<ArgumentDefinition> FontFields { get; init; } = ZMatrixControlProfile.FontEditorFields();
 }
 
@@ -410,3 +433,9 @@ internal sealed class ArgumentOption
 internal sealed record ColorValue(double R, double G, double B);
 
 internal sealed record ColorStop(double R, double G, double B, double At);
+
+// While a scene is selected, show catalog field Field under Label. With Group set, the editor
+// moves into that group directly after field After, which is then required and must be another
+// field; without Group, the field is renamed in place and After must be null. An invalid
+// placement changes nothing on the page (app.js sceneSections) and fails CommandBuilderTests.
+internal sealed record ScenePlacement(string Field, string Label, string? Group = null, string? After = null, string? Help = null);

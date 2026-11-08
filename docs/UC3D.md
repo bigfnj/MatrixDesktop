@@ -7,7 +7,8 @@ MatrixDesktop.exe --scene uc3d
 ```
 
 The UC3D defaults use the owner's installed screensaver settings captured on
-2026-10-23: purple code (`#8000FF`), pink highlights (`#FF80FF`), black background,
+2026-10-23: purple Normal code color (`codeColor`, `#8000FF`), pink Highlight code
+color (`cursorColor`, `#FF80FF`), black Background color (`backgroundColor`),
 3D rotation, random forward travel and sideways motion. Pictures, clock, sound,
 mouse control and desktop background start off. Explicit arguments override the
 profile, including values that equal the ordinary Matrix defaults.
@@ -35,7 +36,8 @@ MatrixDesktop.exe --windowed --no-exit-on-any-key --scene uc3d --volumetric true
 ## Controls
 
 **Original controls** provides independent sliders and numeric editors in the
-original units. More/Less is 100 to 1500 streams; glyph size is 10 to 40. Their
+original units, under the original v3.4 dialog's slider names. Line density is
+100 to 1500 streams; glyph size is 10 to 40. Their
 values do not depend on the viewport, aspect ratio or 2D/3D choice. Streams enter
 over ten seconds, and each trail grows from one glyph to its chosen length.
 Visible coverage also depends on size, perspective, fading and the current pose.
@@ -46,6 +48,10 @@ customized presets. Explicit generic layout or speed arguments select that mode;
 native-unit arguments select Original controls. An explicit `uc3dControls` wins.
 Inactive controls are disabled in the configurator and omitted from commands.
 Font, color, intensity, resolution, frame-rate and optional bloom remain shared.
+While UC3D is selected, the configurator shows the shared highlight and background
+colors in the UC3D section beside Normal code color, as the original settings dialog
+groups them, and calls Cursor intensity Highlight intensity. Only placement and names
+change; the Matrix scene keeps Cursor, Background and Cursor intensity under Colors.
 Original controls starts with bloom disabled, matching the native rain composition.
 
 - Enable **Mouse-controlled rotation** in 3D: move the pointer to rotate,
@@ -53,7 +59,7 @@ Original controls starts with bloom disabled, matching the native rain compositi
   20 seconds without movement, automatic motion resumes. Original controls defers
   a new picture while manual control is active; an existing formation continues.
 - Enable **Form pictures from code**, choose a personal picture folder, and
-  select a source. Original **Picture size: Large / Small** uses the native
+  select a source. Original **Picture scale: Full size / 1/3 size** uses the native
   sampling divisor, so higher values make the image smaller. Legacy scale fits
   the image while preserving aspect ratio. Monochrome uses the
   code color; disabling it preserves picture colors. Relief depth changes

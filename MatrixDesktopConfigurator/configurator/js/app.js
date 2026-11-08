@@ -133,14 +133,16 @@ const normalizeColor = (color) => ({
 
 // A clickable swatch that opens the shared popover picker. Replaces the native
 // <input type="color"> (OS dialog, 8-bit only, no inline dragging).
-const makeSwatchButton = (color, { disabled = false } = {}) => {
+// label names the setting for assistive technology ("Edit Highlight code color"); without it
+// every swatch on the page announced the same "Edit color".
+const makeSwatchButton = (color, { disabled = false, label = "color" } = {}) => {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "color-swatch";
 	button.style.background = colorToHex(color);
 	button.disabled = disabled;
 	button.title = "Click to edit color";
-	button.setAttribute("aria-label", "Edit color");
+	button.setAttribute("aria-label", `Edit ${label}`);
 	return button;
 };
 
@@ -349,9 +351,48 @@ const updateActiveOnScroll = () => {
 	}
 };
 
+// The catalog's sections with the selected scene's placements applied
+// (ArgumentCatalog.cs ScenePlacements). A placement moves or renames one shared
+// field while that scene is selected; the copy keeps id, kind and scope, so every
+// editor, gate and saved value still addresses the same key. Each placement is
+// all-or-nothing: one naming a missing field, group or anchor (or anchoring a field
+// to itself) is reported and leaves that field exactly as the catalog has it, so the
+// page always offers one editor per key. Catalog arrays are copied, never edited.
+const sceneSections = (scene) => {
+	const sections = state.metadata.groups.map((group) => ({ group, fields: [...group.fields] }));
+	for (const placement of state.metadata.scenePlacements?.[scene] ?? []) {
+		const home = sections.find((section) => section.fields.some((field) => field.id === placement.field));
+		const target = placement.group ? sections.find((section) => section.group.id === placement.group) : home;
+		const anchor = placement.group
+			? target?.fields.find((candidate) => candidate.id === placement.after && candidate.id !== placement.field)
+			: null;
+		if (!home || !target || (placement.group && !anchor)) {
+			console.error(`Scene placement for "${scene}" cannot place "${placement.field}" in "${placement.group}" after "${placement.after}".`);
+			continue;
+		}
+		const index = home.fields.findIndex((field) => field.id === placement.field);
+		const field = home.fields[index];
+		const shown = {
+			...field,
+			label: placement.label,
+			help: placement.help ?? field.help,
+			catalogLabel: field.catalogLabel ?? field.label,
+			catalogGroupTitle: field.catalogGroupTitle ?? home.group.title,
+		};
+		if (!placement.group) {
+			home.fields[index] = shown;
+			continue;
+		}
+		home.fields.splice(index, 1);
+		target.fields.splice(target.fields.indexOf(anchor) + 1, 0, shown);
+	}
+	return sections;
+};
+
 // Render every group as a section (sticky header + field grid) into one
-// scrollable surface. A non-empty filter keeps only fields whose label (or
-// group title) matches, and drops emptied sections. Scroll position is
+// scrollable surface. A non-empty filter keeps only fields whose visible label,
+// catalog label or either section title matches, and drops emptied sections, so a
+// field moved for the scene is still found by its catalog name. Scroll position is
 // preserved so a gating-triggered re-render doesn't jump the view.
 const renderFields = () => {
 	const surface = el.fieldSurface;
@@ -359,11 +400,11 @@ const renderFields = () => {
 	surface.replaceChildren();
 
 	const filter = state.filter.trim().toLowerCase();
-	for (const group of state.metadata.groups) {
+	for (const { group, fields } of sceneSections(state.draft.scene)) {
 		const matching = filter
-			? group.fields.filter((field) =>
-				field.label.toLowerCase().includes(filter) || group.title.toLowerCase().includes(filter))
-			: group.fields;
+			? fields.filter((field) => [field.label, field.catalogLabel, group.title, field.catalogGroupTitle]
+				.some((text) => typeof text === "string" && text.toLowerCase().includes(filter)))
+			: fields;
 		if (matching.length === 0) continue;
 
 		const section = document.createElement("section");
@@ -800,7 +841,7 @@ const renderRgb8Field = (field) => {
 	const initial = state.draft[field.id] ?? field.defaultValue;
 	let color = { r: Number(initial.r), g: Number(initial.g), b: Number(initial.b) };
 	const normalized = () => ({ r: color.r / 255, g: color.g / 255, b: color.b / 255 });
-	const swatch = makeSwatchButton(normalized());
+	const swatch = makeSwatchButton(normalized(), { label: field.label });
 	const numbers = document.createElement("div"); numbers.className = "rgb-grid";
 	const inputs = {};
 	const commit = next => {
@@ -837,7 +878,7 @@ const renderColorField = (field) => {
 	editor.className = "color-editor";
 	let color = normalizeColor(state.draft[field.id]);
 
-	const swatch = makeSwatchButton(color);
+	const swatch = makeSwatchButton(color, { label: field.label });
 	const numbers = document.createElement("div");
 	numbers.className = "rgb-grid";
 	const inputs = {};
@@ -847,6 +888,7 @@ const renderColorField = (field) => {
 		input.min = "0";
 		input.max = "1";
 		input.step = "0.01";
+		input.setAttribute("aria-label", `${field.label} ${channel.toUpperCase()}`);
 		input.value = format01(color[channel]);
 		inputs[channel] = input;
 		numbers.append(input);
@@ -908,18 +950,21 @@ const renderPaletteRow = (field, stops, stop, index) => {
 	row.className = "list-row";
 	let value = { ...normalizeColor(stop), at: clamp01(Number(stop.at)) };
 
-	const swatch = makeSwatchButton(value);
+	const name = `${field.label} stop ${index + 1}`;
+	const swatch = makeSwatchButton(value, { label: name });
 	const hex = document.createElement("input");
 	hex.type = "text";
 	hex.className = "hex-input";
 	hex.spellcheck = false;
 	hex.maxLength = 7;
+	hex.setAttribute("aria-label", `${name} hex`);
 	hex.value = colorToHex(value);
 	const at = document.createElement("input");
 	at.type = "number";
 	at.min = "0";
 	at.max = "1";
 	at.step = "0.01";
+	at.setAttribute("aria-label", `${name} position`);
 	at.value = format01(value.at);
 	const up = miniButton("↑");
 	const down = miniButton("↓");
@@ -996,12 +1041,14 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 	row.className = "list-row stripe-row";
 	let value = normalizeColor(color);
 
-	const swatch = makeSwatchButton(value, { disabled });
+	const name = `${field.label} ${index + 1}`;
+	const swatch = makeSwatchButton(value, { disabled, label: name });
 	const hex = document.createElement("input");
 	hex.type = "text";
 	hex.className = "hex-input";
 	hex.spellcheck = false;
 	hex.maxLength = 7;
+	hex.setAttribute("aria-label", `${name} hex`);
 	hex.value = colorToHex(value);
 	hex.disabled = disabled;
 	const up = miniButton("↑");

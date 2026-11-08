@@ -53,25 +53,32 @@ slow falling glyphs, 3D rotation and random forward/sideways motion, matching th
 owner's installed screensaver settings captured on 2026-10-23. This is a fixed
 profile; later changes to the screensaver's settings are not imported automatically.
 
+While UC3D is selected, the **UC3D** section shows **Normal code color**, **Highlight
+code color** and **Background color** together, as the original settings dialog does.
+Highlight and Background are the same `cursorColor` and `backgroundColor` settings the
+Matrix scene shows under **Colors** as Cursor and Background, and Cursor intensity
+reads **Highlight intensity**.
+
 In the **UC3D** section, **Control units → Original screensaver controls** is the
-default. Each slider has a synchronized numeric input:
+default. Each slider has a synchronized numeric input and carries the name the
+original v3.4 settings dialog gives it:
 
 | Original control | Argument | Range | Default |
 | --- | --- | --- | --- |
-| Code amount: Less / More | `uc3dAmount` | 100 to 1500 streams | 500 |
-| Code size: Small / Large | `uc3dGlyphSize` | 10 to 40 | 12 |
+| Line density: Low / Very high | `uc3dAmount` | 100 to 1500 streams | 500 |
+| Glyph size: Small / Big | `uc3dGlyphSize` | 10 to 40 | 12 |
 | Fall speed: Slow / Fast | `uc3dFallSpeed` | 0 to 150 | 6 |
-| Travel: Backward / Forward | `uc3dForwardSpeed` | 0 to 120 | 6 |
-| Picture size: Large / Small | `uc3dPictureScale` | 100 to 300 | 100 |
-| Picture delay (seconds) | `uc3dPictureDelay` | 0 to 120 | 60 |
+| Forward/back speed: Back / Forward | `uc3dForwardSpeed` | 0 to 120 | 6 |
+| Picture scale: Full size / 1/3 size | `uc3dPictureScale` | 100 to 300 | 100 |
+| Picture delay: Shorter / Longer | `uc3dPictureDelay` | 0 to 120 seconds | 60 |
 | Clock size: Small / Large | `uc3dClockSize` | 50 to 170 | 90 |
 
-More/Less sets stream count independently of glyph size, viewport and 2D/3D mode.
+Line density sets stream count independently of glyph size, viewport and 2D/3D mode.
 At animation speed 1, streams enter over ten seconds and grow toward lengths of
 10 to 39 glyphs; visible coverage also depends on perspective, fading and camera pose. Fall speed zero
-retains minimum falling motion. Travel 60 is stationary, and constant travel is
+retains minimum falling motion. Forward/back speed 60 is stationary, and constant travel is
 editable when 3D forward/back movement is enabled and random travel is off.
-Higher picture-size values make the picture smaller.
+Higher picture-scale values make the picture smaller.
 
 The **Legacy MatrixDesktop controls** mode preserves the earlier columns/density/speed
 mapping for customized older UC3D presets. Explicit native-unit arguments select

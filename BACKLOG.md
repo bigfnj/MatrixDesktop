@@ -30,7 +30,7 @@ gate is decoration.
 | --- | --- | --- |
 | `tests\MatrixDesktop.Tests` (console EXE, exit code is the result) | arguments, storage, media grants, preset migration and guide/catalog/config drift | anything that renders |
 | `tests\run-gate.ps1` tiers 2 and 3 | the real EXEs launching, rendering, animating, closing cleanly | **layout**: an off-screen footer measures perfectly healthy |
-| `tests\web-smoke.py` (17 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies, paired sliders and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
+| `tests\web-smoke.py` (19 checks, headless Chromium, runs in CI) | geometry, theme contrast, scene dependencies, scene placements, paired sliders and whether a flag changes the output | GPU-specific behaviour, real WebView2 |
 | `tests\renderer-lifecycle.mjs`, `tests\uc3d-tests.mjs` | resource ownership, resize, compatibility, UC3D timing and input behavior | actual GPU drivers |
 | `tests\uc3d-browser.py`, `tests\uc3d-calibration.py`, `tests\native-uc3d-smoke.py` | actual backend readiness, original slider/stream semantics, picture/depth behavior and published native media delivery | physical Looking Glass hardware |
 
@@ -61,10 +61,10 @@ two of them used to share the heading "Worth doing", which is how a v1.0.5 summa
 claim the backlog was empty when three items were still open. Anything struck through below
 has shipped.
 
-No active items remain. The Windows PowerShell 5.1 full gate reports
-70 PASS, 0 FAIL, 0 UNCHECKED, with its actual Windows process exit observed as 0.
-The PowerShell 7 Tier 1 gate reports 37 PASS, 0 FAIL, 0 UNCHECKED.
-These include 139 core cases and 22 native cases inside aggregate checks.
+No active items remain. On 2026-11-07 the Windows PowerShell 5.1 full gate reported
+70 PASS, 0 FAIL, 0 UNCHECKED, with its actual Windows process exit observed as 0, and
+the PowerShell 7 Tier 1 gate reported 37 PASS, 0 FAIL, 0 UNCHECKED.
+These include 140 core cases and 22 native cases inside aggregate checks.
 Sixteen subsequent native and regression phases each exit 0, covering both
 renderers and repeating regressions after wallpaper, configurator and UC3D smoke.
 The screensaver preview and fullscreen input-exit probes pass when launched as the
@@ -72,6 +72,28 @@ signed-in owner in the connected RDP session. The agent execution account could 
 deliver input there; that context is correctly reported as UNCHECKED rather than passed.
 Explorer recovery and native configurator refresh pass their application checks.
 Every prior UC3D calibration item is retained with its disposition below.
+
+### Owner report and dialog parity, 2026-11-06
+
+The owner reported the UC3D highlight colour missing from the configurator and supplied a
+screenshot of the original screensaver's settings dialog. A registry-backed parity audit
+(`HKCU\Software\UselessCreations\Matrix3D`, read only) compared every dialog control with the
+UC3D profile: every saved value with a counterpart matches, including the purple, pink and black
+colours. The defects were presentation only.
+
+| Item or finding | Disposition | Implementation and checkable evidence |
+| --- | --- | --- |
+| UC3D highlight and background colours were not shown with Normal code color | FIXED | The pink highlight (`cursorColor`) rendered as "Cursor" under the generic Colors section and background beside it, while the UC3D section held only Normal code color; the original dialog groups all three, and searching "highlight" found nothing. `ArgumentCatalog.ScenePlacements` moves the shared editors into the UC3D section after Normal code color as Highlight code color and Background color, and names Cursor intensity Highlight intensity, while UC3D is selected. Keys, commands, imports, presets and the renderer are unchanged. `ScenePlacementsResolve` (C#), the two scene-placement web checks and the published configurator trio assertion cover it; eleven mutations each fail exactly one named check, and serving the pre-change `app.js` from the publish fails the native assertion. |
+| UC3D original sliders used names the owner's v3.4 dialog does not, while README called them original | FIXED | Four of seven differed (Line Density, Glyph Size, Forward/Back Speed, Picture Scale) and Picture Delay reads Shorter / Longer there. The sliders now carry the dialog's names, which also ends two fields sharing the label "Picture delay (seconds)". The web check and the native slider loop assert the names; reverting one fails the named web check. |
+| Colour editors announced a generic "Edit color" and had unnamed inputs | FIXED | Swatches and channel, hex and position inputs carry the field name, as the byte-RGB editor already did. The UC3D web check asserts the Highlight names; removing the channel name fails it. |
+| OBS/Spout/NDI output, a preset marketplace, per-monitor overrides | ACCEPTED-RECORDED | Deferred by the owner's scope selection on 2026-10-23 (see Future Features); not built in this pass. |
+
+Not changed, recorded for the owner: "Use Filenames As Captions" has no toggle because the
+behaviour is always on, which equals the saved value; Forward/back speed stays greyed while
+random travel is on, the calibrated behaviour, although the original dialog leaves it enabled;
+the saved picture path is the Start Menu Programs folder with My Pictures off, so it is not
+copied; the old host's Primary Only and CPU Priority values are app-wide launch choices; the
+countdown feature is off in the saved settings and absent here.
 
 ### ZMatrix and wallpaper, v1.2.0
 

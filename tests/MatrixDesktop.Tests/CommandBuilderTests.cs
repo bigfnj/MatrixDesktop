@@ -29,6 +29,7 @@ internal static class CommandBuilderTests
         ("UC3D commands omit inactive units while preserving saved values", Uc3dInactiveUnits),
         ("The untouched version 4 UC3D starter migrates without changing custom drafts", Uc3dVersion4Migration),
         ("UC3D randomization edits active controls and retains the alternate unit set", Uc3dRandomization),
+        ("Scene placements name real fields groups and anchors and UC3D shows its colours together", ScenePlacementsResolve),
     ];
 
     private static readonly ConfiguratorMetadata Metadata = ArgumentCatalog.Create();
@@ -261,6 +262,51 @@ internal static class CommandBuilderTests
             .Concat(new[] { "processPriority", "wallpaperInput", "wallpaperPauseFullscreen", "wallpaperPauseBattery" }).ToArray()) draft.Remove(key);
         draft.Remove("uc3dControls");
         foreach (var key in Uc3dControlProfile.NativeKeys) draft.Remove(key);
+    }
+
+    // Replays configurator/js/app.js sceneSections over the real catalog. There, a placement
+    // naming a missing field, group or anchor logs and leaves the editor in its catalog section,
+    // which the owner would only see as the wrong layout. Here it fails by name.
+    private static void ScenePlacementsResolve()
+    {
+        var catalogFields = Metadata.Groups.SelectMany(group => group.Fields).ToList();
+        Check.True(Metadata.ScenePlacements.ContainsKey("uc3d"), "the UC3D colour placements must exist");
+        foreach (var (scene, placements) in Metadata.ScenePlacements)
+        {
+            var layout = Metadata.Groups.ToDictionary(group => group.Id, group => group.Fields.Select(field => field.Id).ToList());
+            var placed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var placement in placements)
+            {
+                var where = $"{scene} placement of {placement.Field}";
+                var matches = catalogFields.Where(field => field.Id == placement.Field).ToList();
+                Check.Equal(1, matches.Count, where + " must name exactly one catalog field");
+                Check.True(placed.Add(placement.Field), where + " must not be placed twice in one scene");
+                Check.True(!string.IsNullOrWhiteSpace(placement.Label) && placement.Label != matches[0].Label,
+                    where + " must give the field a different, non-empty name");
+                if (placement.Group is null)
+                {
+                    Check.True(placement.After is null, where + " names an anchor but no group to move into");
+                    continue;
+                }
+                Check.True(layout.ContainsKey(placement.Group), where + $" must move into an existing group, not '{placement.Group}'");
+                layout.Single(pair => pair.Value.Contains(placement.Field)).Value.Remove(placement.Field);
+                var target = layout[placement.Group];
+                var anchor = target.IndexOf(placement.After ?? string.Empty);
+                Check.True(anchor >= 0, where + $" must follow a field present in {placement.Group} by then, not '{placement.After}'");
+                target.Insert(anchor + 1, placement.Field);
+            }
+
+            if (scene != "uc3d") continue;
+            var uc3d = layout["uc3d"];
+            var at = uc3d.IndexOf("codeColor");
+            Check.True(at >= 0 && uc3d.Skip(at).Take(3).SequenceEqual(["codeColor", "cursorColor", "backgroundColor"]),
+                "UC3D must show Normal, Highlight and Background colour together, as the original settings dialog does: " + string.Join(", ", uc3d));
+            Check.False(layout["colors"].Contains("cursorColor") || layout["colors"].Contains("backgroundColor"),
+                "a colour moved into UC3D must leave Colors, or the page would offer two editors for one key");
+            var labels = placements.ToDictionary(placement => placement.Field, placement => placement.Label);
+            Check.Contains(labels["cursorColor"], "Highlight", "the owner looks for the original dialog's Highlight Colour");
+            Check.Contains(labels["backgroundColor"], "Background", "the owner looks for the original dialog's Background Colour");
+        }
     }
 
     private static void Uc3dSliderRanges()

@@ -426,6 +426,179 @@ def check_configurator(page, origin, state_json):
         ok("UC3D animation validation respects original and legacy motion units")
 
 
+UC3D_SLIDER_NAMES = {
+    "uc3dAmount": "Line density: Low / Very high",
+    "uc3dGlyphSize": "Glyph size: Small / Big",
+    "uc3dFallSpeed": "Fall speed: Slow / Fast",
+    "uc3dForwardSpeed": "Forward/back speed: Back / Forward",
+    "uc3dPictureScale": "Picture scale: Full size / 1/3 size",
+    "uc3dPictureDelay": "Picture delay: Shorter / Longer",
+    "uc3dClockSize": "Clock size: Small / Large",
+}
+
+
+def check_scene_placements(page, state):
+    """The original UC3D dialog groups Normal, Highlight and Background colour.
+
+    The catalog's scenePlacements move the shared cursorColor and backgroundColor editors into the
+    UC3D section while UC3D is selected, under the dialog's names. Each key must keep exactly one
+    editor, the moved editors must write the same keys the Matrix scene edits, search must find
+    them by either name, and the Matrix scene must still render the catalog unchanged.
+    """
+    groups = state["metadata"]["groups"]
+    catalog_ids = {field["id"] for group in groups for field in group["fields"]}
+    errors = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    page.on("pageerror", lambda e: errors.append(str(e)))
+
+    def section_fields(group_id):
+        return page.evaluate(
+            """id => [...document.querySelectorAll(`#section-${id} .field-grid > .field`)]
+                .map(node => ({ id: node.dataset.field, label: node.querySelector('label')?.textContent ?? '' }))""",
+            group_id)
+
+    def saved_drafts():
+        return page.evaluate(
+            "window.__smokeMessages.filter(m => m.type === 'saveDraft').map(m => m.payload.draft)")
+
+    def filter_hits(text):
+        page.locator("#fieldFilter").fill(text)
+        return page.evaluate(
+            """() => [...document.querySelectorAll('.field-section .field')]
+                .map(node => node.closest('.field-section').id + ':' + node.dataset.field)""")
+
+    scene = page.locator('[data-field="scene"] select')
+    problems = []
+    page.locator("#newPresetButton").click()
+    scene.select_option("uc3d")
+    page.wait_for_timeout(350)  # settle the scene change's debounced save
+
+    uc3d = section_fields("uc3d")
+    ids = [field["id"] for field in uc3d]
+    labels = {field["id"]: field["label"] for field in uc3d}
+    at = ids.index("codeColor") if "codeColor" in ids else -1
+    if at < 0 or ids[at:at + 3] != ["codeColor", "cursorColor", "backgroundColor"]:
+        problems.append(f"UC3D section order {ids}")
+    for key, label in {"codeColor": "Normal code color", "cursorColor": "Highlight code color",
+                       "backgroundColor": "Background color", **UC3D_SLIDER_NAMES}.items():
+        if labels.get(key) != label:
+            problems.append(f"{key} reads {labels.get(key)!r}, expected {label!r}")
+    counts = page.evaluate("""() => ({
+        cursor: document.querySelectorAll('[data-field="cursorColor"]').length,
+        background: document.querySelectorAll('[data-field="backgroundColor"]').length,
+        leftInColors: document.querySelectorAll(
+            '#section-colors [data-field="cursorColor"], #section-colors [data-field="backgroundColor"]').length })""")
+    if counts != {"cursor": 1, "background": 1, "leftInColors": 0}:
+        problems.append(f"editor counts {counts}, expected exactly one per key and none left in Colors")
+    swatches = page.evaluate("""() => ['codeColor', 'cursorColor', 'backgroundColor'].map(id => {
+        const swatch = document.querySelector(`#section-uc3d [data-field="${id}"] .color-swatch`);
+        return swatch ? getComputedStyle(swatch).backgroundColor : null; })""")
+    if swatches != ["rgb(128, 0, 255)", "rgb(255, 128, 255)", "rgb(0, 0, 0)"]:
+        problems.append(f"UC3D swatches {swatches}, expected the owner's purple, pink and black")
+    if not page.evaluate("""() => ['cursorColor', 'backgroundColor'].every(id =>
+            [...document.querySelectorAll(`#section-uc3d [data-field="${id}"] :is(input, button)`)].every(node => !node.disabled))"""):
+        problems.append("a moved colour editor is disabled under UC3D")
+    names = page.evaluate("""() => {
+        const field = document.querySelector('#section-uc3d [data-field="cursorColor"]');
+        return field ? [field.querySelector('.color-swatch')?.getAttribute('aria-label'),
+            ...[...field.querySelectorAll('input[type="number"]')].map(node => node.getAttribute('aria-label'))] : null; }""")
+    if names != ["Edit Highlight code color", "Highlight code color R", "Highlight code color G", "Highlight code color B"]:
+        problems.append(f"Highlight accessible names {names}")
+    intensity = page.evaluate("""() => document.querySelector('#section-colors [data-field="cursorIntensity"] label')?.textContent""")
+    if intensity != "Highlight intensity":
+        problems.append(f"cursorIntensity reads {intensity!r} under UC3D")
+    # Renamed-in-place fields keep their catalog position; only the moved two leave Colors.
+    colors_catalog = next(group for group in groups if group["id"] == "colors")
+    expected_colors = [field["id"] for field in colors_catalog["fields"]
+                       if field["id"] not in ("cursorColor", "backgroundColor")]
+    shown_colors = [field["id"] for field in section_fields("colors")]
+    if shown_colors != expected_colors:
+        problems.append(f"UC3D Colors section {shown_colors}, expected catalog order {expected_colors}")
+
+    # Guarded: a missing editor is this check's FAIL, never a harness error (exit 3), which the
+    # gate reports as "the harness broke" rather than "the change broke it".
+    highlight = page.locator('#section-uc3d [data-field="cursorColor"] input[type="number"]')
+    before = saved_drafts()
+    if highlight.count() == 0:
+        problems.append("no Highlight code color editor in the UC3D section to edit")
+    else:
+        highlight.first.fill("0.5")
+        page.wait_for_timeout(350)
+    after = saved_drafts()
+    if highlight.count() == 0:
+        pass
+    elif len(after) <= len(before):
+        problems.append("editing Highlight code color saved no draft")
+    else:
+        draft = after[-1]
+        if abs(float(draft.get("cursorColor", {}).get("r", -1)) - 0.5) > 1e-9:
+            problems.append(f"Highlight edit saved cursorColor {draft.get('cursorColor')}")
+        added = set(draft) - set(before[-1] if before else draft)
+        unknown = set(draft) - catalog_ids
+        if added or unknown:
+            problems.append(f"Highlight edit added keys {sorted(added)}; non-catalog keys {sorted(unknown)}")
+    # Search covers every name a moved or renamed field answers to: its visible label, its
+    # catalog label, its new section and its catalog section.
+    for term, hit in (("highlight", "section-uc3d:cursorColor"), ("cursor", "section-uc3d:cursorColor"),
+                      ("colors", "section-uc3d:cursorColor"), ("colors", "section-uc3d:backgroundColor"),
+                      ("uc3d", "section-uc3d:backgroundColor"), ("cursor intensity", "section-colors:cursorIntensity")):
+        if hit not in filter_hits(term):
+            problems.append(f"filter {term!r} does not find {hit}")
+    filter_hits("")
+    if errors:
+        problems.append("console errors: " + "; ".join(errors[:3]))
+    if problems:
+        fail("UC3D shows Normal, Highlight and Background colors together on the shared keys", "; ".join(problems))
+    else:
+        ok("UC3D shows Normal, Highlight and Background colors together on the shared keys")
+
+    problems = []
+
+    def catalog_layout(scene_name):
+        for group in groups:
+            shown = [field["id"] for field in section_fields(group["id"])]
+            expected = [field["id"] for field in group["fields"]]
+            if shown != expected:
+                problems.append(f"{scene_name} #{group['id']} shows {shown}, catalog order {expected}")
+        labels = {field["id"]: field["label"] for field in section_fields("colors")}
+        for key, label in {"cursorColor": "Cursor", "backgroundColor": "Background",
+                           "cursorIntensity": "Cursor intensity"}.items():
+            if labels.get(key) != label:
+                problems.append(f"{scene_name} {key} reads {labels.get(key)!r}, expected {label!r}")
+
+    scene.select_option("matrix")
+    page.wait_for_timeout(350)
+    catalog_layout("Matrix")
+    # The Matrix Cursor editor shows the draft's cursorColor, the key the UC3D check saw the
+    # Highlight editor write: one key, two names. Compared against the saved draft rather than a
+    # literal, so this check stays independent of whether the UC3D edit succeeded.
+    shown, expected = page.evaluate("""() => {
+        const swatch = document.querySelector('#section-colors [data-field="cursorColor"] .color-swatch');
+        const drafts = window.__smokeMessages.filter(m => m.type === 'saveDraft');
+        const color = drafts.length ? drafts[drafts.length - 1].payload.draft.cursorColor : null;
+        const channel = v => Math.round(Math.max(0, Math.min(1, Number(v))) * 255);
+        return [swatch ? getComputedStyle(swatch).backgroundColor : null,
+                color ? `rgb(${channel(color.r)}, ${channel(color.g)}, ${channel(color.b)})` : null]; }""")
+    if shown is None or shown != expected:
+        problems.append(f"Matrix Cursor swatch {shown}, saved cursorColor {expected}")
+    scene.select_option("zmatrix")
+    page.wait_for_timeout(350)
+    catalog_layout("ZMatrix")
+    # Placements are re-derived from the catalog on every render and never written back, so a
+    # trip through UC3D must leave the Matrix layout exactly as the catalog has it.
+    scene.select_option("uc3d")
+    page.wait_for_timeout(350)
+    scene.select_option("matrix")
+    page.wait_for_timeout(350)
+    catalog_layout("Matrix after a UC3D round trip")
+    if errors:
+        problems.append("console errors: " + "; ".join(errors[:3]))
+    if problems:
+        fail("Matrix and ZMatrix keep the catalog layout across scene round trips", "; ".join(problems))
+    else:
+        ok("Matrix and ZMatrix keep the catalog layout across scene round trips")
+
+
 def mean_luma(png_bytes):
     from PIL import Image  # imported lazily; main() reports CANNOT VERIFY if it is absent
     im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
@@ -542,6 +715,7 @@ def main():
             print("=== web smoke: configurator ===")
             page = browser.new_page(viewport=VIEWPORT)
             check_configurator(page, cfg_origin, state_json)
+            check_scene_placements(page, state)
             page.close()
 
             print("=== web smoke: matrix bundle ===")
