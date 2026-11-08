@@ -219,7 +219,7 @@ The portable packaging keeps runtime assets local and omits development files.
 
 ### AppData WebView2 user data
 
-WebView2 keeps a browser profile/cache (“user data folder”). By default, that lives under the user’s profile in `%LOCALAPPDATA%`.
+WebView2 keeps a browser profile/cache ("user data folder"). An app that chooses no folder gets WebView2's default, a folder named after the executable and created beside it: `MatrixDesktop.exe.WebView2\` next to `MatrixDesktop.exe`.
 
 This wrapper stores WebView2 user data under AppData instead of beside the EXE:
 
