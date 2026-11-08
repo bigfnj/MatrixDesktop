@@ -61,7 +61,92 @@ two of them used to share the heading "Worth doing", which is how a v1.0.5 summa
 claim the backlog was empty when three items were still open. Anything struck through below
 has shipped.
 
-No active items remain. On 2026-11-07 the Windows PowerShell 5.1 full gate reported
+77 items are open from the post-push audit of `06809a4` on 2026-11-07. Each has its planned
+disposition and file and line evidence in "Post-push audit, 2026-11-07" below. A row leaves this
+table only when its disposition there is FIXED, CLOSED-VERIFIED, DECLINED-MEASURED or
+ACCEPTED-RECORDED with checkable evidence.
+
+| ID | Severity | Finding |
+| --- | --- | --- |
+| AUD-01 | high | A second configurator instance silently overwrites presets saved by the first (whole-state last-writer-wins, no instance guard) |
+| AUD-02 | high | Rename overwrites the preset's saved values with the unsaved working draft |
+| AUD-03 | high | A greyed-out Camera toggle still opens the webcam: camera=true is emitted for every effect and both renderers honour it |
+| AUD-04 | medium | Non-wallpaper surface failure calls ExitThread() inside the constructor, so Application.Run never returns and the process hangs invisibly |
+| AUD-05 | medium | Wallpaper mode retries a WebView2 startup failure every 500 ms forever, re-showing the modal error dialog each time it is dismissed |
+| AUD-06 | medium | Pausing the wallpaper (tray Pause, battery, fullscreen on another monitor) hides the WebView, so the desktop shows black or the static wallpaper instead of the frozen frame |
+| AUD-07 | medium | No CoreWebView2.ProcessFailed handler: a renderer or browser process failure leaves a long-running wallpaper blank until Explorer restarts or the display changes |
+| AUD-08 | medium | UC3D desktop snapshot in wallpaper (and preview) mode copies the live screen, baking other applications' windows into the wallpaper; Refresh desktop cannot replace it |
+| AUD-09 | medium | Every WM_SETTINGCHANGE and WM_THEMECHANGED regenerates all native resources on the UI thread, unfiltered and uncoalesced, and wipes the persistent ZMatrix raster; for Matrix and UC3D the refresh does nothing |
+| AUD-10 | medium | Positional picture IDs are re-keyed by every host refresh while UC3D keeps its startup caption list, so pictures show their neighbour's caption (or 404) |
+| AUD-11 | medium | Every settled ZMatrix configurator edit, even colour-only keys, blocks the configurator UI thread 0.6-1 s re-capturing the whole-desktop wallpaper and rebuilding both glyph atlases |
+| AUD-12 | medium | Copied-command quoting claims values become literal in cmd and PowerShell, but %, !, $ and backtick still expand in text values |
+| AUD-13 | medium | Catalog defaults for cursorColor and stripeColors are not what the renderer draws when they are omitted, so the editors show colours that never render and those exact colours cannot be set; the screensaver profile then renders differently again |
+| AUD-14 | medium | Colour popover outlives renderFields and writes through stale closures: palette stops come back after removal or overwrite a neighbour, and the colour saved differs from the editor |
+| AUD-15 | medium | Every gating change and list edit drops keyboard focus to body; the next Tab restarts at the first field |
+| AUD-16 | medium | 54 field controls have no accessible name and their visible label does not operate them |
+| AUD-17 | medium | 'Last draft' cannot bring back the working draft once any preset was selected; unsaved edits are discarded on preset switch |
+| AUD-18 | medium | 'Plug me in' unhides the canvas only after the renderer finished loading (REGL sizes to 1x1) and has no re-entry guard (a second click starts a second renderer and a bogus error) |
+| AUD-19 | medium | After a GPU context or device loss no scene recovers: the default Matrix scene renders black while diagnostics report healthy, and UC3D/ZMatrix tear themselves down permanently with no visible message |
+| AUD-20 | medium | WebGPU-to-REGL fallback cannot work once webgpu/main.js has taken the canvas's webgpu context, and it reports a misleading regl null dereference |
+| AUD-21 | medium | effect=image with the configurator's blank Image URL fetches a remote Wikimedia photo and fails the whole renderer when offline |
+| AUD-22 | medium | The software-rendering notice can never be dismissed in wallpaper, screensaver or preview mode, so on SwiftShader those modes show a static box instead of rain |
+| AUD-23 | medium | UC3D sizes its WebGPU canvas and render target with no device-limit clamp, so a wide virtual screen fails on the first frame and the desktop goes black silently |
+| AUD-24 | medium | Legacy UC3D with isometric and mouse rotation snaps 45 degrees yaw and 22.5 degrees pitch on the first drag, because runtime.update mutates the scene's lastState |
+| AUD-25 | medium | Python exit 2 is overloaded: argparse usage errors become UNCHECKED 'unavailable environment', which CI then tolerates as green |
+| AUD-26 | medium | native-uc3d-smoke creates a fresh WebView2 profile per launch and nothing prunes them: 132 folders, 1.84 GB and growing |
+| AUD-27 | medium | Tier-2 'wrote no crash dump' compares a folder-wide count that cannot rise once the 10-dump retention cap is reached, and is not attributed to the smoke pid |
+| AUD-28 | medium | release.yml stamps the version from the tag and runs no gate, so the version drift BACKLOG describes can still ship and a red commit can be released |
+| AUD-29 | medium | Under Windows PowerShell 5.1 (the documented full-gate shell) redirected native stderr is a terminating error, so several gate probes crash the run instead of reporting FAIL or UNCHECKED |
+| AUD-30 | medium | Guide promises a tray/log report when process priority is rejected; the tray cannot report it and Realtime is downgraded to High with no message |
+| AUD-31 | low | MainForm's own SessionSwitch/PowerModeChanged suspend path is unreachable: the public constructor that enables it has no caller |
+| AUD-32 | low | DesktopPointerBridge runs the desktop-foreground probe for every system-wide mouse event before its 30 ms move throttle |
+| AUD-33 | low | Constructor-time ZMatrix preparation is always thrown away, doubling the wallpaper capture and atlas builds per surface |
+| AUD-34 | low | Documented --restore-screensaver refusal is reported as a crash with a minidump |
+| AUD-35 | low | Log rotation never runs in short-lived processes, so screensaver-only use grows the shared log past the documented 2 MB cap |
+| AUD-36 | low | Failed dump attempts are unbounded, and each one prunes a retained dump and leaves an empty .dmp behind |
+| AUD-37 | low | The close flush cancels WM_QUERYENDSESSION, so an open configurator is listed as blocking shutdown, restart and sign-out, and exits even when the shutdown is cancelled |
+| AUD-38 | low | A debounced draft save that comes due during a confirm/prompt lands after Delete or Save As and persists a stale or deleted selectedPresetId |
+| AUD-39 | low | Host replies carry data the page throws away while its text says otherwise: 'Retained ... for review' for command imports, the PowerShell script on clipboard failure, and the test command description |
+| AUD-40 | low | Phrase editor shows and counts duplicate rows that the saved draft silently drops |
+| AUD-41 | low | app.js re-implements the colour helpers colorPicker.js exports, the copies disagree, and the palette row persists null channels |
+| AUD-42 | low | Keyboard focus is not managed for the colour popover, the help modal or the section jump list |
+| AUD-43 | low | Stop Test stays enabled after the test window exits on its own, and the comment calling it the single source of truth is wrong |
+| AUD-44 | low | Every renderFields rebuilds two datalists holding every installed font |
+| AUD-45 | low | Dead code and stale markup in the configurator page, and the preview-unavailable reason is never shown |
+| AUD-46 | low | Filtering removes the screensaver buttons from the page, and searching 'screensaver' cannot find them |
+| AUD-47 | low | fps=0 gives a black screen in the default Matrix scene, while the guide says 'tends to look frozen' and UC3D/ZMatrix draw one frame |
+| AUD-48 | low | canvasSize.js's DPR media-query listener is inert: it only re-arms itself, and DPR changes already work through get() |
+| AUD-49 | low | Page-side handlers with no host sender (matrix-host-state web message, chrome.webview resource listener, pointer 'leave'), and the native-bootstrap tests drive production assertions through the dead route |
+| AUD-50 | low | Docs promise 'Enable sound' when autoplay is blocked, but the synthesized-audio path awaits a resume() that stays pending, so the button never appears |
+| AUD-51 | low | UC3D's picture-failure warning is pushed again on every slideshow cycle with no dedupe or cap, so the warnings array grows without bound |
+| AUD-52 | low | Both raw WebGL passes call gl.getError() every frame, a synchronous GPU-process round trip in Chromium |
+| AUD-53 | low | Dead and duplicated code in the UC3D/ZMatrix modules, including a ZMatrix invalid-setting warning that config.js makes unreachable while the host builds atlases from the raw argv |
+| AUD-54 | low | The gate's private WEBVIEW2_USER_DATA_FOLDER blinds the tier-2 'leaves no userdata beside the exe' check, and no tier checks where the product's profile actually lands |
+| AUD-55 | low | Page-error collectors are asserted before teardown and before most interactions, so later errors are collected and never checked |
+| AUD-56 | low | web-smoke.py request-log suppression is inert: it sets log_message on a functools.partial, not on the handler class |
+| AUD-57 | low | Screensaver registration tests leave an empty TestFixtures key under HKCU Software/MatrixDesktop on every run |
+| AUD-58 | low | Argument guide's boolean section is stale: the wrapper rewrites unknown values to false and the web parser accepts six spellings, not exactly 'true' |
+| AUD-59 | low | README says a missing WebGPU adapter reports unverified coverage, but the calibration command it documents exits 1 instead |
+| AUD-60 | low | BACKLOG 'Picking this up cold' points to trap details that do not exist and its coverage map omits every v1.2.0 test layer |
+| AUD-61 | low | Docs name a 'Restore previous screensaver' control; the configurator button is labelled 'Restore screensaver' |
+| AUD-62 | low | BACKLOG still lists two measured non-defects as 'Upstream, reportable to Rezmason/matrix', plus a fixed per-frame layout read under 'Watching, not acting' |
+| AUD-63 | info | InvariantGlobalization, presented as part of the portable optimization, reaches only the local pubxml publish, not the release zip or the gate-verified payload |
+| AUD-64 | medium | The renderer clock never rebases, so float32 time degrades a long-running wallpaper: rain motion drops to 32 Hz after about 3 days of active time and 16 Hz after about 6, high speeds lose trail levels within hours, and the WebGPU palette/stripe dither turns into screen-wide blocks within hours |
+| AUD-65 | low | The regl symbol pass compares a float32 frame counter, so after 2^24 active frames (78 h at 60 Hz, 32 h at 144 Hz) Operator and Palimpsest glyphs cycle 3x too fast, then 5x and 8x |
+| AUD-66 | low | UC3D legacy controls upload the unbounded active time as a float32 stream position, so after a few days of active time the streams step in jumps of up to 2% of screen height at 16 Hz |
+| AUD-67 | medium | Unchecking Skip intro with a zero or negative Fall speed or Animation speed renders nothing forever (or a white-out), while diagnostics report a healthy renderer |
+| AUD-68 | medium | UC3D with Original controls and Animation speed 0 (the configurator's minimum for it) renders nothing, animated or single-frame, while Matrix and legacy UC3D show a frozen frame |
+| AUD-69 | high | The Matrix scene on the WebGPU renderer goes solid black (or freezes on its last frame) once the canvas passes 8192 px, while diagnostics report ready, no errors and advancing frames |
+| AUD-70 | medium | UC3D on REGL (the default renderer) allocates its offscreen target at the unclamped canvas size and tears itself down silently above MAX_TEXTURE_SIZE, while the Matrix scene survives the browser's drawing-buffer clamp |
+| AUD-71 | medium | UC3D on WebGPU uploads the desktop snapshot at full capture size, so desktopBackground=true on a virtual screen wider than 8192 px fails at any resolution; a canvas-only clamp for AUD-23 would not fix it |
+| AUD-72 | medium | No single-instance guard for wallpaper mode: a second --wallpaper launch stacks another full renderer and tray icon on the same WorkerW, attached underneath the first, so its new settings never show and each tray's Pause, Exit and Start-with-Windows act on one process only |
+| AUD-73 | low | Concurrent startups collide on the fixed-name .write_test probe and silently move that instance's WebView2 profile and web root to Roaming AppData (54-58% probe failure measured while two processes overlap) |
+| AUD-74 | low | Every MatrixDesktop instance joins the first instance's WebView2 browser process, whose priority class is set by whichever host started first, and Stop Test kills the Test host's whole process tree, which can take that shared browser down with it |
+| AUD-75 | medium | Text values containing '=' are parsed as new keys: an active UC3D musicFile, pictureDirectory or donorDirectory such as C:/Music/a=b.mp3, or an image URL with a query, is lost on Test, Export and copied-command import |
+| AUD-76 | medium | Crash handlers can enter single-threaded DbgHelp concurrently: the UI ThreadException and UnobservedTaskException paths each reach MiniDumpWriteDump, and the reservation counter is a cap, not a lock |
+| AUD-77 | low | An inherited Object property name in the query (constructor, toString, __proto__) passes config.js's parameter filter, has no parser, and throws before main.js's visible error boundary, so the renderer never starts and no notice explains why |
+
+Before that audit, at `06809a4` on 2026-11-07, the Windows PowerShell 5.1 full gate reported
 70 PASS, 0 FAIL, 0 UNCHECKED, with its actual Windows process exit observed as 0, and
 the PowerShell 7 Tier 1 gate reported 37 PASS, 0 FAIL, 0 UNCHECKED.
 These include 140 core cases and 22 native cases inside aggregate checks.
@@ -72,6 +157,116 @@ signed-in owner in the connected RDP session. The agent execution account could 
 deliver input there; that context is correctly reported as UNCHECKED rather than passed.
 Explorer recovery and native configurator refresh pass their application checks.
 Every prior UC3D calibration item is retained with its disposition below.
+
+### Post-push audit, 2026-11-07
+
+The full audit ran after `06809a4` reached main. Eleven area finders (host app, shared native
+code, configurator C#, configurator page, web core, UC3D and ZMatrix, tests and gate, docs
+claims, cross-boundary contracts, BACKLOG regressions, and a dynamic leak soak of the published
+app) reported 76 findings. Adversarial verifiers confirmed 74 and refuted 2, and synthesis
+merged the 74 into 63 items. A completeness critic named four areas nobody had covered:
+renderer clock precision over long uptime, settings combinations the configurator can reach,
+WebGPU device limits, and concurrent host instances. The gap round confirmed 12 of 13 findings
+there. Codex audited the same commit independently and reported 7 findings, of which 4 were
+already present and 3 are new. Static leads came from ESLint, Ruff, Vulture and the .NET
+analyzers at AnalysisMode=All; they were leads for the finders, not findings. 77 items in all.
+
+| ID | Finding | Disposition | Implementation and checkable evidence |
+| --- | --- | --- | --- |
+| AUD-01 | A second configurator instance silently overwrites presets saved by the first (whole-state last-writer-wins, no instance guard) | OPEN, planned FIXED | Found at Program.cs:10-29, ConfiguratorForm.cs:64, MatrixApplicationContext.cs:64-68, ScreensaverProtocol.cs:12-27, StorageService.cs:200-203. |
+| AUD-02 | Rename overwrites the preset's saved values with the unsaved working draft | OPEN, planned FIXED | Found at app.js:1143-1152, app.js:1154-1157, ConfiguratorForm.cs:312-322, app.js:188-206, app.js:1405-1407, StorageService.cs:102-142. |
+| AUD-03 | A greyed-out Camera toggle still opens the webcam: camera=true is emitted for every effect and both renderers honour it | OPEN, planned FIXED | Found at app.js:527-529, app.js:558, app.js:229, ConfiguratorForm.cs:606, ScreensaverProtocol.cs:39-48, config.js:553. |
+| AUD-04 | Non-wallpaper surface failure calls ExitThread() inside the constructor, so Application.Run never returns and the process hangs invisibly | OPEN, planned FIXED | Found at Program.cs:53-58, MatrixApplicationContext.cs:51, ScreensaverProtocol.cs:45-48. |
+| AUD-05 | Wallpaper mode retries a WebView2 startup failure every 500 ms forever, re-showing the modal error dialog each time it is dismissed | OPEN, planned FIXED | Found at MainForm.cs:749-756, MatrixApplicationContext.cs:120-126, MainForm.cs:99, AutostartService.cs:9. |
+| AUD-06 | Pausing the wallpaper (tray Pause, battery, fullscreen on another monitor) hides the WebView, so the desktop shows black or the static wallpaper instead of the frozen frame | OPEN, planned FIXED | Found at MainForm.cs:114-125, hostPlayback.js:8-13, MatrixApplicationContext.cs:184, wallpaper-smoke.py:69. |
+| AUD-07 | No CoreWebView2.ProcessFailed handler: a renderer or browser process failure leaves a long-running wallpaper blank until Explorer restarts or the display changes | OPEN, planned FIXED | Found at MainForm.cs:823, MatrixApplicationContext.cs:157-161. |
+| AUD-08 | UC3D desktop snapshot in wallpaper (and preview) mode copies the live screen, baking other applications' windows into the wallpaper; Refresh desktop cannot replace it | OPEN, planned FIXED | Found at NativeMediaBridge.cs:100-111, MainForm.cs:25-26, MatrixApplicationContext.cs:129-141, WallpaperBackground.cs:7, README.md:33, BACKLOG.md:107. |
+| AUD-09 | Every WM_SETTINGCHANGE and WM_THEMECHANGED regenerates all native resources on the UI thread, unfiltered and uncoalesced, and wipes the persistent ZMatrix raster; for Matrix and UC3D the refresh does nothing | OPEN, planned FIXED | Found at MatrixApplicationContext.cs:222, NativeMediaBridge.cs:195, WallpaperBackground.cs:17-30, NativeMediaBridge.cs:138-141, zmatrix/runtime.js:77, surface.js:46-61. |
+| AUD-10 | Positional picture IDs are re-keyed by every host refresh while UC3D keeps its startup caption list, so pictures show their neighbour's caption (or 404) | OPEN, planned FIXED | Found at MediaCatalog.cs:115, NativeMediaBridge.cs:57, uc3d/runtime.js:30-31, zmatrix/runtime.js:138, media.js:13-39, media.js:31. |
+| AUD-11 | Every settled ZMatrix configurator edit, even colour-only keys, blocks the configurator UI thread 0.6-1 s re-capturing the whole-desktop wallpaper and rebuilding both glyph atlases | OPEN, planned FIXED | Found at app.js:252-258, ConfiguratorForm.cs:239-244, NativeMediaBridge.cs:177-187, CommandBuilder.cs:462-479, runtime.js:36, BACKLOG.md:123. |
+| AUD-12 | Copied-command quoting claims values become literal in cmd and PowerShell, but %, !, $ and backtick still expand in text values | OPEN, planned FIXED | Found at CommandBuilder.cs:420-423, BACKLOG.md:112, README.md:362-363, regl/utils.js:52-57. |
+| AUD-13 | Catalog defaults for cursorColor and stripeColors are not what the renderer draws when they are omitted, so the editors show colours that never render and those exact colours cannot be set; the screensaver profile then renders differently again | OPEN, planned FIXED | Found at ArgumentCatalog.cs:167, config.js:652-655, regl/stripePass.js:39, webgpu/stripePass.js:45, PresetSeeder.cs:32, ConfiguratorForm.cs:546. |
+| AUD-14 | Colour popover outlives renderFields and writes through stale closures: palette stops come back after removal or overwrite a neighbour, and the colour saved differs from the editor | OPEN, planned FIXED | Found at app.js:1, colorPicker.js:235-245, app.js:397-400, app.js:974-977, app.js:899-908, app.js:229. |
+| AUD-15 | Every gating change and list edit drops keyboard focus to body; the next Tab restarts at the first field | OPEN, planned FIXED | Found at app.js:400, app.js:165. |
+| AUD-16 | 54 field controls have no accessible name and their visible label does not operate them | OPEN, planned FIXED | Found at app.js:541-543, app.js:554-568, index.html:54, app.js:969-971, BACKLOG.md:88. |
+| AUD-17 | 'Last draft' cannot bring back the working draft once any preset was selected; unsaved edits are discarded on preset switch | OPEN, planned FIXED | Found at app.js:1255-1264, app.js:197, ConfiguratorForm.cs:429-434, app.js:302, app.js:1175, StorageService.cs:123-130. |
+| AUD-18 | 'Plug me in' unhides the canvas only after the renderer finished loading (REGL sizes to 1x1) and has no re-entry guard (a second click starts a second renderer and a bogus error) | OPEN, planned FIXED | Found at main.js:98, main.js:105, regl/main.js:100, index.html:16-29, run-gate.ps1:1054-1059, web-smoke.py:653. |
+| AUD-19 | After a GPU context or device loss no scene recovers: the default Matrix scene renders black while diagnostics report healthy, and UC3D/ZMatrix tear themselves down permanently with no visible message | OPEN, planned FIXED | Found at regl/main.js:130, utils.js:65, palettePass.js:62, rainPass.js:159, regl/main.js:189-191, regl/uc3dPass.js:45. |
+| AUD-20 | WebGPU-to-REGL fallback cannot work once webgpu/main.js has taken the canvas's webgpu context, and it reports a misleading regl null dereference | OPEN, planned FIXED | Found at main.js:5, main.js:42, webgpu/main.js:123, palettePass.js:92, rainPass.js:141-157, endPass.js:29. |
+| AUD-21 | effect=image with the configurator's blank Image URL fetches a remote Wikimedia photo and fails the whole renderer when offline | OPEN, planned FIXED | Found at regl/imagePass.js:6, webgpu/imagePass.js:7, ArgumentCatalog.cs:139, MainForm.cs:826-842, README.md:8. |
+| AUD-22 | The software-rendering notice can never be dismissed in wallpaper, screensaver or preview mode, so on SwiftShader those modes show a static box instead of rain | OPEN, planned FIXED | Found at main.js:90-111, DesktopWindowHost.cs:75, hostPointer.js:23-24, MatrixApplicationContext.cs:146-149, ScreensaverWindowPolicy.cs:6, MainForm.cs:93. |
+| AUD-23 | UC3D sizes its WebGPU canvas and render target with no device-limit clamp, so a wide virtual screen fails on the first frame and the desktop goes black silently | OPEN, planned FIXED | Found at uc3d/runtime.js:144-146, webgpu/uc3dPass.js:85-86, AppCli.cs:27, MainForm.cs:576-580, DesktopWindowHost.cs:82-83, ScreensaverWindowPolicy.cs:6. |
+| AUD-24 | Legacy UC3D with isometric and mouse rotation snaps 45 degrees yaw and 22.5 degrees pitch on the first drag, because runtime.update mutates the scene's lastState | OPEN, planned FIXED | Found at scene.js:97-106, runtime.js:86, scene.js:108-111, config.js:645-650, app.js:496, uc3d-tests.mjs:260. |
+| AUD-25 | Python exit 2 is overloaded: argparse usage errors become UNCHECKED 'unavailable environment', which CI then tolerates as green | OPEN, planned FIXED | Found at run-gate.ps1:715-718, ci.yml:95-108. |
+| AUD-26 | native-uc3d-smoke creates a fresh WebView2 profile per launch and nothing prunes them: 132 folders, 1.84 GB and growing | OPEN, planned FIXED | Found at native-uc3d-smoke.py:76, MainForm.cs:1044-1077. |
+| AUD-27 | Tier-2 'wrote no crash dump' compares a folder-wide count that cannot rise once the 10-dump retention cap is reached, and is not attributed to the smoke pid | OPEN, planned FIXED | Found at run-gate.ps1:397-400. |
+| AUD-28 | release.yml stamps the version from the tag and runs no gate, so the version drift BACKLOG describes can still ship and a red commit can be released | OPEN, planned FIXED | Found at release.yml:43-52, run-gate.ps1:882-921, README.md:10. |
+| AUD-29 | Under Windows PowerShell 5.1 (the documented full-gate shell) redirected native stderr is a terminating error, so several gate probes crash the run instead of reporting FAIL or UNCHECKED | OPEN, planned FIXED | Found at run-gate.ps1:67, SMOKE_TEST_PLAN.md:31-35. |
+| AUD-30 | Guide promises a tray/log report when process priority is rejected; the tray cannot report it and Realtime is downgraded to High with no message | OPEN, planned FIXED | Found at MatrixApplicationContext.cs:37, ArgumentCatalog.cs:77-80, AppCli.cs:126, ZMatrixCfgImporter.cs:94. |
+| AUD-31 | MainForm's own SessionSwitch/PowerModeChanged suspend path is unreachable: the public constructor that enables it has no caller | OPEN, planned FIXED | Found at MainForm.cs:50, MatrixApplicationContext.cs:92, Program.cs:53-58, MatrixApplicationContext.cs:38-39, BACKLOG.md:250. |
+| AUD-32 | DesktopPointerBridge runs the desktop-foreground probe for every system-wide mouse event before its 30 ms move throttle | OPEN, planned FIXED | Found at DesktopPointerBridge.cs:32, DesktopWindowHost.cs:48-49, MainForm.cs:130-140. |
+| AUD-33 | Constructor-time ZMatrix preparation is always thrown away, doubling the wallpaper capture and atlas builds per surface | OPEN, planned FIXED | Found at MainForm.cs:95, NativeMediaBridge.cs:204, MainForm.cs:1098-1105. |
+| AUD-34 | Documented --restore-screensaver refusal is reported as a crash with a minidump | OPEN, planned FIXED | Found at ScreensaverRegistration.cs:84-85, MatrixDesktop_Argument_Guide.txt:1014-1016, ScreensaverProtocol.cs:34-37, Program.cs:53-57, CrashDumpWriter.cs:125-170, ConfiguratorForm.cs:304-307. |
+| AUD-35 | Log rotation never runs in short-lived processes, so screensaver-only use grows the shared log past the documented 2 MB cap | OPEN, planned FIXED | Found at Logger.cs:18, CrashDumpWriter.cs:117, MatrixApplicationContext.cs:107, CrashDumpWriter.cs:192, MainForm.cs:1053. |
+| AUD-36 | Failed dump attempts are unbounded, and each one prunes a retained dump and leaves an empty .dmp behind | OPEN, planned FIXED | Found at CrashDumpWriter.cs:195-202. |
+| AUD-37 | The close flush cancels WM_QUERYENDSESSION, so an open configurator is listed as blocking shutdown, restart and sign-out, and exits even when the shutdown is cancelled | OPEN, planned FIXED | Found at OnFormClosing sets e.Cancel = true at :124 for every CloseReason before its first await (:129) and closes again from the continuation (:134). WinForms raises FormClosing for WM_QUERYENDSESSION with CloseReason.WindowsShutDown and returns !e.Cancel (Form.WmClose), so the configurator answers FALSE an. |
+| AUD-38 | A debounced draft save that comes due during a confirm/prompt lands after Delete or Save As and persists a stale or deleted selectedPresetId | OPEN, planned FIXED | Found at app.js:188-206, ConfiguratorForm.cs:429-434, app.js:821-831. |
+| AUD-39 | Host replies carry data the page throws away while its text says otherwise: 'Retained ... for review' for command imports, the PowerShell script on clipboard failure, and the test command description | OPEN, planned FIXED | Found at app.js:1212-1215, ArgumentImporter.cs:53-112, ConfiguratorForm.cs:514-516, app.js:429-451, ConfiguratorForm.cs:357-360, app.js:1342-1347. |
+| AUD-40 | Phrase editor shows and counts duplicate rows that the saved draft silently drops | OPEN, planned FIXED | Found at app.js:758, zmatrix/settings.js:78, ZMatrixControlProfile.cs:115. |
+| AUD-41 | app.js re-implements the colour helpers colorPicker.js exports, the copies disagree, and the palette row persists null channels | OPEN, planned FIXED | Found at app.js:97-126, colorPicker.js:9-62, app.js:1, app.js:112, app.js:990-994, StorageService.cs:165-170. |
+| AUD-42 | Keyboard focus is not managed for the colour popover, the help modal or the section jump list | OPEN, planned FIXED | Found at colorPicker.js:226-246, index.html:84, app.js:1377-1395, app.js:320-325, BACKLOG.md:88. |
+| AUD-43 | Stop Test stays enabled after the test window exits on its own, and the comment calling it the single source of truth is wrong | OPEN, planned FIXED | Found at app.js:1320, ConfiguratorForm.cs:610-631, app.js:77-86, CommandBuilder.cs:82-85, MainForm.cs:503-508, AppCli.cs:31. |
+| AUD-44 | Every renderFields rebuilds two datalists holding every installed font | OPEN, planned FIXED | Found at app.js:810-812. |
+| AUD-45 | Dead code and stale markup in the configurator page, and the preview-unavailable reason is never shown | OPEN, planned FIXED | Found at app.js:149, colorPicker.js:229, app.js:1368-1371, index.html:27, ConfiguratorForm.cs:271, BACKLOG.md:250. |
+| AUD-46 | Filtering removes the screensaver buttons from the page, and searching 'screensaver' cannot find them | OPEN, planned FIXED | Found at app.js:425-428, ArgumentCatalog.cs:58-84. |
+| AUD-47 | fps=0 gives a black screen in the default Matrix scene, while the guide says 'tends to look frozen' and UC3D/ZMatrix draw one frame | OPEN, planned FIXED | Found at config.js:619, ArgumentCatalog.cs:209, CommandBuilder.cs:172, regl/main.js:148, webgpu/main.js:178, utils.js:1-11. |
+| AUD-48 | canvasSize.js's DPR media-query listener is inert: it only re-arms itself, and DPR changes already work through get() | OPEN, planned FIXED | Found at canvasSize.js:12-17, webgpu/main.js:206, VENDORING.md:53, renderer-lifecycle.mjs:75. |
+| AUD-49 | Page-side handlers with no host sender (matrix-host-state web message, chrome.webview resource listener, pointer 'leave'), and the native-bootstrap tests drive production assertions through the dead route | OPEN, planned FIXED | Found at MainForm.cs:135, hostPlayback.js:15, MainForm.cs:121, hostPlayback.js:24-26, NativeMediaBridge.cs:233, hostPointer.js:13. |
+| AUD-50 | Docs promise 'Enable sound' when autoplay is blocked, but the synthesized-audio path awaits a resume() that stays pending, so the button never appears | OPEN, planned FIXED | Found at audio.js:55-57, docs/UC3D.md:74-75, uc3d-audio-tests.mjs:35-41, BACKLOG.md:128. |
+| AUD-51 | UC3D's picture-failure warning is pushed again on every slideshow cycle with no dedupe or cap, so the warnings array grows without bound | OPEN, planned FIXED | Found at runtime.js:55-59, media.js:12, overlays.js:23, runtime.js:32, MediaCatalog.cs:17-21, NativeMediaBridge.cs:262-277. |
+| AUD-52 | Both raw WebGL passes call gl.getError() every frame, a synchronous GPU-process round trip in Chromium | OPEN, planned FIXED | Found at regl/uc3dPass.js:135, regl/zmatrixPass.js:44, native.js:108, runtime.js:95. |
+| AUD-53 | Dead and duplicated code in the UC3D/ZMatrix modules, including a ZMatrix invalid-setting warning that config.js makes unreachable while the host builds atlases from the raw argv | OPEN, planned FIXED | Found at runtime.js:110, media.js:43-44, native.js:118, audio.js:4, zmatrix/scene.js:19, zmatrix/gpu.js:1-21. |
+| AUD-54 | The gate's private WEBVIEW2_USER_DATA_FOLDER blinds the tier-2 'leaves no userdata beside the exe' check, and no tier checks where the product's profile actually lands | OPEN, planned FIXED | Found at run-gate.ps1:113, MainForm.cs:97, MainForm.cs:1242-1249. |
+| AUD-55 | Page-error collectors are asserted before teardown and before most interactions, so later errors are collected and never checked | OPEN, planned FIXED | Found at app.js:229. |
+| AUD-56 | web-smoke.py request-log suppression is inert: it sets log_message on a functools.partial, not on the handler class | OPEN, planned FIXED | Found at web-smoke.py:60-61, run-gate.ps1:656. |
+| AUD-57 | Screensaver registration tests leave an empty TestFixtures key under HKCU Software/MatrixDesktop on every run | OPEN, planned FIXED | Found at ScreensaverRegistrationTests.cs:18, Program.cs:87, run-gate.ps1:440-476, ScreensaverRegistration.cs:14, SMOKE_TEST_PLAN.md:111. |
+| AUD-58 | Argument guide's boolean section is stale: the wrapper rewrites unknown values to false and the web parser accepts six spellings, not exactly 'true' | OPEN, planned FIXED | Found at MatrixArgs.cs:174-177, FlagNormalization.cs:22-27, config.js:446, BACKLOG.md:206, ParityTests.cs:162-166, renderer-lifecycle.mjs:85-88. |
+| AUD-59 | README says a missing WebGPU adapter reports unverified coverage, but the calibration command it documents exits 1 instead | OPEN, planned FIXED | Found at README.md:605-617, main.js:81, uc3d-browser.py:82-88. |
+| AUD-60 | BACKLOG 'Picking this up cold' points to trap details that do not exist and its coverage map omits every v1.2.0 test layer | OPEN, planned FIXED | Found at BACKLOG.md:44-48, bloomPass.js:61-85, run-gate.ps1:481-494, SMOKE_TEST_PLAN.md:71-125. |
+| AUD-61 | Docs name a 'Restore previous screensaver' control; the configurator button is labelled 'Restore screensaver' | OPEN, planned FIXED | Found at README.md:41, MatrixDesktop_Argument_Guide.txt:1014, docs/ZMATRIX.md:116, index.html:68, app.js:51, BACKLOG.md:87. |
+| AUD-62 | BACKLOG still lists two measured non-defects as 'Upstream, reportable to Rezmason/matrix', plus a fixed per-frame layout read under 'Watching, not acting' | OPEN, planned FIXED | Found at BACKLOG.md:210, bloomPass.js:20-21, renderer-lifecycle.mjs:57-77. |
+| AUD-63 | InvariantGlobalization, presented as part of the portable optimization, reaches only the local pubxml publish, not the release zip or the gate-verified payload | OPEN, planned FIXED | Found at run-gate.ps1:934-947, README.md:237-243, FlagNormalization.cs:34, ZMatrixCfgImporter.cs:49. |
+| AUD-64 | The renderer clock never rebases, so float32 time degrades a long-running wallpaper: rain motion drops to 32 Hz after about 3 days of active time and 16 Hz after about 6, high speeds lose trail levels within hours, and the WebGPU palette/stripe dither turns into screen-wide blocks within hours | OPEN, planned FIXED | Found at hostPlayback.js:45-55, regl/main.js:139, webgpu/main.js:136,220, rainPass.raindrop.frag.glsl:21,53-58, rainPass.wgsl:55,165-176, palettePass.wgsl:62,67. |
+| AUD-65 | The regl symbol pass compares a float32 frame counter, so after 2^24 active frames (78 h at 60 Hz, 32 h at 144 Hz) Operator and Palimpsest glyphs cycle 3x too fast, then 5x and 8x | OPEN, planned FIXED | Found at rainPass.symbol.frag.glsl:14,44, regl/main.js:138-139,154,183-189, regl/utils.js:121-125, rainPass.js:111-120,324, config.js:207,373. |
+| AUD-66 | UC3D legacy controls upload the unbounded active time as a float32 stream position, so after a few days of active time the streams step in jumps of up to 2% of screen height at 16 Hz | OPEN, planned FIXED | Found at runtime.js:142,152,100, scene.js:70,98, uc3d.vert.glsl:61-63,88, uc3d.wgsl:61-64,88, hostPlayback.js:45-55, uc3d-tests.mjs:354. |
+| AUD-67 | Unchecking Skip intro with a zero or negative Fall speed or Animation speed renders nothing forever (or a white-out), while diagnostics report a healthy renderer | OPEN, planned FIXED | Found at rainPass.intro.frag.glsl:46-54,61, rainPass.raindrop.frag.glsl:67,70, rainPass.frag.glsl:68,101, rainPass.wgsl:311,322,326,522,555, config.js:176,557-566, ArgumentCatalog.cs:190-191,271. |
+| AUD-68 | UC3D with Original controls and Animation speed 0 (the configurator's minimum for it) renders nothing, animated or single-frame, while Matrix and legacy UC3D show a frozen frame | OPEN, planned FIXED | Found at native.js:119,121,187,203,207,209,222,283, runtime.js:151, config.js:645-649,692, app.js:589-590. |
+| AUD-69 | The Matrix scene on the WebGPU renderer goes solid black (or freezes on its last frame) once the canvas passes 8192 px, while diagnostics report ready, no errors and advancing frames | OPEN, planned FIXED | Found at webgpu/main.js:122, canvasSize.js:23-25, rainPass.js:222,226, palettePass.js:118, endPass.js:57. |
+| AUD-70 | UC3D on REGL (the default renderer) allocates its offscreen target at the unclamped canvas size and tears itself down silently above MAX_TEXTURE_SIZE, while the Matrix scene survives the browser's drawing-buffer clamp | OPEN, planned FIXED | Found at uc3d/runtime.js:144-146,154-155, regl/uc3dPass.js:56,72,90-93,135, config.js:556, ArgumentCatalog.cs:208. |
+| AUD-71 | UC3D on WebGPU uploads the desktop snapshot at full capture size, so desktopBackground=true on a virtual screen wider than 8192 px fails at any resolution; a canvas-only clamp for AUD-23 would not fix it | OPEN, planned FIXED | Found at MainForm.cs:26, NativeMediaBridge.cs:104-110, uc3d/runtime.js:75, webgpu/uc3dPass.js:6,20-24,73,76-79. |
+| AUD-72 | No single-instance guard for wallpaper mode: a second --wallpaper launch stacks another full renderer and tray icon on the same WorkerW, attached underneath the first, so its new settings never show and each tray's Pause, Exit and Start-with-Windows act on one process only | OPEN, planned FIXED | Found at Program.cs:53-58, MatrixApplicationContext.cs:40-46,58-62,70,73,78,205,217-220, DesktopWindowHost.cs:16-42,83, MainForm.cs:63,735,740, tests/run-gate.ps1:252. |
+| AUD-73 | Concurrent startups collide on the fixed-name .write_test probe and silently move that instance's WebView2 profile and web root to Roaming AppData (54-58% probe failure measured while two processes overlap) | OPEN, planned FIXED | Found at MainForm.cs:97,1031-1042,1098,1108-1125,1127-1135,1247,1252-1255, Logger.cs:67-72, README.md:200,208,643,647. |
+| AUD-74 | Every MatrixDesktop instance joins the first instance's WebView2 browser process, whose priority class is set by whichever host started first, and Stop Test kills the Test host's whole process tree, which can take that shared browser down with it | OPEN, planned FIXED | Found at MainForm.cs:97,710-722,810,1031-1042, MatrixApplicationContext.cs:37,231-245, PlaybackPolicy.cs:22-23, CommandBuilder.cs:82-85,146, ConfiguratorForm.cs:140,608,659,663-703. |
+| AUD-75 | Text values containing '=' are parsed as new keys: an active UC3D musicFile, pictureDirectory or donorDirectory such as C:/Music/a=b.mp3, or an image URL with a query, is lost on Test, Export and copied-command import | OPEN, planned FIXED | Found at CommandBuilder.cs:185, MatrixArgs.cs:287, ArgumentImporter.cs:512, ArgumentImporter.cs:305, AppCli.cs:269. |
+| AUD-76 | Crash handlers can enter single-threaded DbgHelp concurrently: the UI ThreadException and UnobservedTaskException paths each reach MiniDumpWriteDump, and the reservation counter is a cap, not a lock | OPEN, planned FIXED | Found at CrashDumpWriter.cs:113,115, BACKLOG.md:152. |
+| AUD-77 | An inherited Object property name in the query (constructor, toString, __proto__) passes config.js's parameter filter, has no parser, and throws before main.js's visible error boundary, so the renderer never starts and no notice explains why | OPEN, planned FIXED | Found at config.js:641, main.js:76. |
+
+Dismissed by verification, recorded so nobody re-opens them:
+
+- Configurator still disposes WebView2 in place, the pattern the renderer's FIXED dead-controller row replaced. REFUTED by adversarial verification (configurator-cs)
+- Renderer lifecycle 'releases owned resources' asserts zero survivors without a positive witness; the WebGPU end pass owns no tracked resource. REFUTED by adversarial verification (tests-gate-ci)
+- The staged web root is one fixed folder that every build's launch rewrites and prunes, so builds prune each other and a locked staged TTF fails startup. REFUTED: the colliding copy only runs when the bundled TTF differs, and every copy on this box is identical (20692 bytes, same mtime); pruning is one-directional. Residual: the gate writes the owner's staged folder (MainForm.cs:1098-1105, run-gate.ps1:111-113 isolates only the WebView2 profile).
+
+Leads without an established failure, each checked by the lane that owns the code during the
+burn-down and given an outcome here:
+
+- Editor defaults for version-dependent fields may differ from the renderer's per-version defaults beyond colours (cfg-args, AUD-13 class).
+- UC3D attachMouse may keep a stale 'previous' point when the desktop loses foreground mid-gesture (web-uc3d-zmatrix; AUD-49 adds no host 'leave').
+- README.md:195 places WebView2's default profile under LOCALAPPDATA, while MS Learn says the non-UWP default sits beside the exe (final docs pass).
+- BACKLOG.md:404-406 says the SwiftShader notice is likely on RDP and VMs; current runtimes may fail WebGL instead (final docs pass, with AUD-22).
+- PlaybackPolicy's fullscreen test uses GetWindowRect, whose invisible borders may make a maximized window on a monitor without a taskbar count as fullscreen (host-lifecycle, with AUD-06).
+- ScreensaverRegistration Restore() leaves an empty Software/MatrixDesktop key, arguably intended for a product key (shared-diagnostics, with AUD-57).
+- Optional culture hardening at FlagNormalization.cs:34 and ZMatrixCfgImporter.cs:49 (gate-ci, with AUD-63).
 
 ### Owner report and dialog parity, 2026-11-06
 
