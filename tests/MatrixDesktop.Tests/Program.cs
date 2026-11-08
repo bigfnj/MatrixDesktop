@@ -18,6 +18,32 @@ if (args.Length >= 2 && args[0] == "--verify-published-symbols")
     return PublishedSymbols.Verify(args[1..]);
 }
 
+// ConfiguratorHostTests: a second process asking for a configurator store's guard.
+if (args.Length == 2 && args[0] == "--try-configurator-guard")
+{
+    using var guard = SingleInstanceGuard.TryAcquire(args[1]);
+    return guard is null ? 3 : 0;
+}
+
+// ConfiguratorHostTests: a stand-in Test host that starts a child of its own, as the real one
+// may start the shared WebView2 browser. Both give up after a minute if nobody ends them.
+if (args.Length == 2 && args[0] == "--stand-in-test-host")
+{
+    var info = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+    info.ArgumentList.Add("--stand-in-test-host-child");
+    using var child = System.Diagnostics.Process.Start(info)!;
+    File.WriteAllText(args[1] + ".tmp", child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    File.Move(args[1] + ".tmp", args[1], overwrite: true);
+    Thread.Sleep(60_000);
+    return 0;
+}
+
+if (args.Length == 1 && args[0] == "--stand-in-test-host-child")
+{
+    Thread.Sleep(60_000);
+    return 0;
+}
+
 // Secondary mode: write the loadState payload the configurator's WebView2 host would send,
 // so tests\web-smoke.py can drive configurator\index.html in headless Chromium without a
 // WebView2 host at all.
@@ -79,6 +105,7 @@ tests.AddRange(ImporterTests.All);
 tests.AddRange(CommandBuilderTests.All);
 tests.AddRange(PowerShellExportTests.All);
 tests.AddRange(DraftCloseFlushTests.All);
+tests.AddRange(ConfiguratorHostTests.All);
 tests.AddRange(ParityTests.All);
 tests.AddRange(GuideTests.All);
 tests.AddRange(StorageTests.All);

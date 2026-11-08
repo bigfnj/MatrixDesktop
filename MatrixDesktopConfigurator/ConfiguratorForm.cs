@@ -26,7 +26,8 @@ public sealed class ConfiguratorForm : Form
     private const int CatastrophicFailureHResult = unchecked((int)0x8000FFFF);
 
     private readonly ConfiguratorMetadata _metadata = ArgumentCatalog.Create();
-    private readonly StorageService _storage = new();
+    private readonly StorageService _storage;
+    private readonly string _windowTag;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false,
@@ -41,6 +42,7 @@ public sealed class ConfiguratorForm : Form
     private bool _isShuttingDown;
     private readonly DraftCloseFlush _closeFlush = new();
     private bool _closeFlushStarted;
+    private bool _sessionEndQuery;
     private MatrixDesktop.Shared.AppWindowIcon? _windowIcon;
 
     // Cached embedded argument-guide text for the "?" help modal.
@@ -50,8 +52,12 @@ public sealed class ConfiguratorForm : Form
     private string? _previewWebRoot;
     private readonly MatrixDesktop.Shared.NativeMediaBridge _mediaBridge = new(preview: true);
 
-    public ConfiguratorForm()
+    // The storage is resolved once in Program, so the single-instance guard and this form
+    // agree on the store path.
+    internal ConfiguratorForm(StorageService storage)
     {
+        _storage = storage;
+        _windowTag = SingleInstanceGuard.ObjectName(storage.StoragePath);
         Text = "MatrixDesktop Configurator";
         MinimumSize = new System.Drawing.Size(980, 720);
         ClientSize = new System.Drawing.Size(1240, 820);
@@ -115,11 +121,49 @@ public sealed class ConfiguratorForm : Form
     {
         base.OnHandleCreated(e);
         TryApplyNativeWindowIcons();
+        // Lets a refused second launch find this exact window (Program.ActivateOwningWindow).
+        SetProp(Handle, _windowTag, (IntPtr)1);
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        // A string property holds a global atom reference until it is removed.
+        if (IsHandleCreated) RemoveProp(Handle, _windowTag);
+        base.OnHandleDestroyed(e);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetProp(IntPtr hwnd, string name, IntPtr data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr RemoveProp(IntPtr hwnd, string name);
+
+    // WinForms raises FormClosing for WM_QUERYENDSESSION. The flag marks only that dispatch:
+    // e.CloseReason cannot, because it stays WindowsShutDown after a cancelled shutdown and a
+    // later ordinary close still reports it.
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg != 0x0011) // WM_QUERYENDSESSION
+        {
+            base.WndProc(ref m);
+            return;
+        }
+
+        _sessionEndQuery = true;
+        try
+        {
+            base.WndProc(ref m);
+        }
+        finally
+        {
+            _sessionEndQuery = false;
+        }
     }
 
     protected override async void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!_closeFlush.Completed)
+        if (DraftCloseFlush.DefersClose(_sessionEndQuery, _closeFlush.Completed))
         {
             e.Cancel = true;
             base.OnFormClosing(e);
@@ -135,18 +179,34 @@ public sealed class ConfiguratorForm : Form
             return;
         }
 
+        if (_sessionEndQuery)
+        {
+            // Answer yes at once (e.Cancel stays false) and keep running: the shutdown can
+            // still be cancelled. WM_ENDSESSION(TRUE) raises FormClosed, which tears down.
+            TrySaveState();
+            base.OnFormClosing(e);
+            return;
+        }
+
+        ShutDown();
+        base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        // Already done for an ordinary close; this is the WM_ENDSESSION(TRUE) path.
+        ShutDown();
+        DisposeWindowIcons();
+        base.OnFormClosed(e);
+    }
+
+    private void ShutDown()
+    {
+        if (_isShuttingDown) return;
         _isShuttingDown = true;
         _mediaBridge.Dispose();
         StopTestProcess();
-
-        try
-        {
-            _storage.Save(_state);
-        }
-        catch
-        {
-            // Ignore last-moment save failures; normal save paths report errors to the UI.
-        }
+        TrySaveState();
 
         try
         {
@@ -156,14 +216,18 @@ public sealed class ConfiguratorForm : Form
         {
             // Ignore.
         }
-
-        base.OnFormClosing(e);
     }
 
-    protected override void OnFormClosed(FormClosedEventArgs e)
+    private void TrySaveState()
     {
-        DisposeWindowIcons();
-        base.OnFormClosed(e);
+        try
+        {
+            _storage.Save(_state);
+        }
+        catch
+        {
+            // Ignore last-moment save failures; normal save paths report errors to the UI.
+        }
     }
 
     private void DisposeWindowIcons()
@@ -314,6 +378,7 @@ public sealed class ConfiguratorForm : Form
             "loadState"        => LoadStatePayload(),
             "saveDraft"        => SaveDraft(payload),
             "savePreset"       => SavePreset(payload),
+            "renamePreset"     => RenamePreset(payload),
             "deletePreset"     => DeletePreset(payload),
             "buildCommand"     => BuildCommand(payload),
             "buildWebQuery"    => await BuildWebQueryAsync(payload),
@@ -428,8 +493,7 @@ public sealed class ConfiguratorForm : Form
 
     private object SaveDraft(JsonElement payload)
     {
-        _state.LastDraft = ReadObject(payload, "draft");
-        _state.SelectedPresetId = ReadOptionalString(payload, "selectedPresetId");
+        PresetOperations.SaveDraft(_state, payload);
         _storage.Save(_state);
         return new { saved = true };
     }
@@ -470,6 +534,14 @@ public sealed class ConfiguratorForm : Form
         _storage.Save(_state);
 
         return new { preset = existing, state = _state };
+    }
+
+    // Name only: the saved values, the working draft and the selection stay as they are.
+    private object RenamePreset(JsonElement payload)
+    {
+        var preset = PresetOperations.Rename(_state, payload, DateTimeOffset.UtcNow);
+        _storage.Save(_state);
+        return new { preset, state = _state };
     }
 
     private object DeletePreset(JsonElement payload)
@@ -624,6 +696,18 @@ public sealed class ConfiguratorForm : Form
             throw new InvalidOperationException("MatrixDesktop.exe did not start.");
         }
 
+        TestProcessStop.WatchExit(_testProcess, (exited, pid) =>
+        {
+            try
+            {
+                if (!IsDisposed) BeginInvoke(new Action(() => OnTestExited(exited, pid)));
+            }
+            catch (InvalidOperationException)
+            {
+                // The window is already gone.
+            }
+        });
+
         return new
         {
             processId = _testProcess.Id,
@@ -660,6 +744,27 @@ public sealed class ConfiguratorForm : Form
         return new { stopped = true };
     }
 
+    // The Test host ended by itself (usually its window was closed): tell the page, which
+    // ignores a pid other than the one it launched last.
+    private void OnTestExited(Process process, int pid)
+    {
+        if (_isShuttingDown || !TestProcessStop.ClaimExited(ref _testProcess, process))
+        {
+            return;
+        }
+
+        process.Dispose();
+        try
+        {
+            _ = _webView.CoreWebView2?.ExecuteScriptAsync(
+                $"window.configHost?.testExited?.({pid.ToString(System.Globalization.CultureInfo.InvariantCulture)});");
+        }
+        catch (Exception ex)
+        {
+            MatrixDesktop.Shared.Logger.Warn($"Could not tell the page that test process {pid} exited: {ex.Message}");
+        }
+    }
+
     private void StopTestProcess()
     {
         var process = _testProcess;
@@ -672,25 +777,7 @@ public sealed class ConfiguratorForm : Form
 
         try
         {
-            if (process.HasExited)
-            {
-                return;
-            }
-
-            try
-            {
-                process.CloseMainWindow();
-            }
-            catch
-            {
-                // Ignore.
-            }
-
-            if (!process.WaitForExit(1500))
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(1500);
-            }
+            TestProcessStop.Run(process);
         }
         catch
         {
@@ -730,24 +817,10 @@ public sealed class ConfiguratorForm : Form
     }
 
     private static JsonObject ReadObject(JsonElement payload, string propertyName)
-    {
-        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(propertyName, out var element))
-        {
-            return JsonNode.Parse(element.GetRawText())?.AsObject() ?? [];
-        }
-
-        return [];
-    }
+        => PresetOperations.ReadObject(payload, propertyName);
 
     private static string? ReadOptionalString(JsonElement payload, string propertyName)
-    {
-        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(propertyName, out var element))
-        {
-            return element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString();
-        }
-
-        return null;
-    }
+        => PresetOperations.ReadOptionalString(payload, propertyName);
 
     private static bool ReadBool(JsonElement payload, string propertyName)
     {

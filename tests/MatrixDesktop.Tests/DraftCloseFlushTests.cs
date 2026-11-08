@@ -9,7 +9,18 @@ internal static class DraftCloseFlushTests
     [
         ("Configurator close captures the latest draft once across repeated close requests", () => LatestDraft().GetAwaiter().GetResult()),
         ("Configurator close bounds unavailable snapshots and ignores late completions", () => Unavailable().GetAwaiter().GetResult()),
+        ("Configurator close never cancels a session-end query for the snapshot", SessionEndQuery),
     ];
+
+    // WinForms answers WM_QUERYENDSESSION with !e.Cancel: deferring it lists the configurator
+    // as blocking shutdown, and the deferred Close() then exits even if the shutdown is cancelled.
+    private static void SessionEndQuery()
+    {
+        Check.False(DraftCloseFlush.DefersClose(sessionEndQuery: true, completed: false), "a session-end query must be answered at once, not cancelled while the snapshot is taken");
+        Check.True(DraftCloseFlush.DefersClose(sessionEndQuery: false, completed: false), "an ordinary close still waits for the closing snapshot");
+        Check.False(DraftCloseFlush.DefersClose(sessionEndQuery: false, completed: true), "the close after the snapshot proceeds");
+        Check.False(DraftCloseFlush.DefersClose(sessionEndQuery: true, completed: true), "a session-end query after the snapshot is answered at once too");
+    }
 
     private static async Task LatestDraft()
     {

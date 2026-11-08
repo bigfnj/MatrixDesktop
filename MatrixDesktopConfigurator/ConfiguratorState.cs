@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace MatrixDesktopConfigurator;
 
@@ -14,6 +15,13 @@ internal sealed record ConfiguratorState
     public int PresetSeedVersion { get; set; } = 0;
     public string? SelectedPresetId { get; set; }
     public JsonObject LastDraft { get; set; } = [];
+
+    // AUD-17: the editor draft as it was while no preset was selected, so 'Last draft' can
+    // bring it back after a preset was chosen. Older stores have none; the key stays out of
+    // the file and of loadState until there is one, and the page then uses LastDraft.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonObject? ScratchDraft { get; set; }
+
     public List<UserPreset> UserPresets { get; set; } = [];
 
     // v1.0: UI theme preference, persisted across launches.

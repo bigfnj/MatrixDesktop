@@ -30,6 +30,16 @@ native.USER32.IsWindowVisible.argtypes = [wintypes.HWND]
 native.USER32.GetDlgCtrlID.argtypes = [wintypes.HWND]
 native.USER32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 native.USER32.SendMessageW.restype = wintypes.LPARAM
+native.USER32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+    wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+native.USER32.SendMessageTimeoutW.restype = wintypes.LPARAM
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+KERNEL32.OpenProcess.restype = wintypes.HANDLE
+KERNEL32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
+KERNEL32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 
 def choose_cfg_file(page, process, path):
@@ -425,6 +435,233 @@ Strings=First|Second
         assert registry_snapshot() == before_registry, "native configurator teardown changed registration state"
 
 
+def second_instance_case(playwright, publish):
+    """AUD-01: a second configurator on the same store exits 0; the owner and its store are untouched.
+
+    Runs on a private copy of the published folder with a synthetic portable store, so the
+    gate's own store is never involved. Removing the early exit in Program.Main makes the
+    second process start a full configurator, which fails the 5 s exit requirement.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="second-instance-", dir=ARTIFACTS))
+    app = root / "app"
+    shutil.copytree(publish, app)
+    exe = app / "MatrixDesktopConfigurator.exe"
+    store = app / "MatrixDesktopConfigurator.presets.json"
+    backup = store.with_name(store.name + ".bak")
+    store.write_text(json.dumps({"schemaVersion": 1, "presetSeedVersion": 0, "selectedPresetId": None, "lastDraft": {},
+        "userPresets": [{"id": "second-instance-owner", "name": "Owner preset", "values": {"scene": "matrix", "numColumns": 61}}],
+        "uiTheme": "dark"}), encoding="utf-8")
+    process, browser = native.open_application(playwright, exe, [], "second-instance-owner")
+    second = None
+    try:
+        page = native.page_at(browser, "https://configurator.local/")
+        page.wait_for_function("document.querySelectorAll('.field').length>40")
+        # Startup seeding may already have saved; compare from the settled owner onward.
+        page.wait_for_timeout(500)
+        before = {path: path.read_bytes() if path.exists() else None for path in (store, backup)}
+        assert before[store] and b"second-instance-owner" in before[store], "the owner did not load the synthetic store"
+        env = os.environ.copy()
+        env["WEBVIEW2_USER_DATA_FOLDER"] = str(root / "second-profile")
+        second = subprocess.Popen([str(exe)], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            second.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("a second configurator on the same store kept running instead of exiting")
+        assert second.returncode == 0, f"the refused second configurator exited {second.returncode}"
+        assert process.poll() is None, "the owning configurator exited when a second one was launched"
+        assert page.evaluate("document.querySelectorAll('.field').length") > 40, "the owning configurator lost its window"
+        after = {path: path.read_bytes() if path.exists() else None for path in (store, backup)}
+        assert after == before, "a refused second configurator changed the store or its backup"
+        native.close_window(process)
+        print("PASS second configurator on one store exits 0; owner window, store and backup unchanged", flush=True)
+        return {"ownerPid": process.pid, "secondPid": second.pid, "secondExit": second.returncode}
+    finally:
+        if second is not None and second.poll() is None:
+            native.stop_application(second)
+        native.stop_application(process)
+        browser.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def configurator_window(process):
+    """The one visible top-level configurator window of exactly this process."""
+    found = []
+    def visit(hwnd, _):
+        pid = wintypes.DWORD()
+        native.USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == process.pid and native.USER32.IsWindowVisible(hwnd):
+            title = ctypes.create_unicode_buffer(256)
+            native.USER32.GetWindowTextW(hwnd, title, len(title))
+            if title.value == "MatrixDesktop Configurator":
+                found.append(hwnd)
+        return True
+    native.USER32.EnumWindows(native.CALLBACK(visit), 0)
+    assert len(found) == 1, f"expected one configurator window for pid {process.pid}, found {len(found)}"
+    return found[0]
+
+
+def session_message(hwnd, message, wparam, timeout_ms, require_answer=True):
+    """Send like Windows does at shutdown and return the window's answer."""
+    answer = ctypes.c_size_t()
+    delivered = native.USER32.SendMessageTimeoutW(hwnd, message, wparam, 0, 0x0002, timeout_ms, ctypes.byref(answer))  # SMTO_ABORTIFHUNG
+    assert delivered or not require_answer, f"message 0x{message:04X} was not answered within {timeout_ms} ms"
+    return answer.value
+
+
+def session_end_case(playwright, publish):
+    """AUD-37: answer WM_QUERYENDSESSION at once, survive a cancelled shutdown, tear down on a real end.
+
+    Private copy of the published folder with a synthetic portable store. The old close flush
+    cancelled the query (answer 0, so Windows lists the configurator as blocking shutdown) and
+    then closed itself after WM_ENDSESSION(FALSE). A fix that tears down during the query fails
+    the snapshotDraft leg; one whose FormClosed skips teardown leaves the Test host running.
+    """
+    import shutil
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="session-end-", dir=ARTIFACTS))
+    app = root / "app"
+    shutil.copytree(publish, app)
+    exe = app / "MatrixDesktopConfigurator.exe"
+    store = app / "MatrixDesktopConfigurator.presets.json"
+    store.write_text(json.dumps({"schemaVersion": 1, "presetSeedVersion": 0, "selectedPresetId": None, "lastDraft": {},
+        "userPresets": [{"id": "session-end-owner", "name": "Session preset", "values": {"scene": "matrix", "numColumns": 62}}],
+        "uiTheme": "dark"}), encoding="utf-8")
+    process, browser = native.open_application(playwright, exe, [], "session-end")
+    test_host = None
+    try:
+        page = native.page_at(browser, "https://configurator.local/")
+        page.wait_for_function("document.querySelectorAll('.field').length>40")
+        page.evaluate("""() => {
+            window.__nativeReplies=[];
+            const receive=configHost.receive.bind(configHost);
+            configHost.receive=message=>{window.__nativeReplies.push(structuredClone(message));receive(message);};
+        }""")
+        hwnd = configurator_window(process)
+        assert session_message(hwnd, 0x0011, 0, 5000) != 0, "the configurator refused WM_QUERYENDSESSION, so Windows lists it as blocking shutdown"
+        session_message(hwnd, 0x0016, 0, 5000)  # WM_ENDSESSION(FALSE): the shutdown was cancelled
+        page.wait_for_timeout(3000)
+        assert process.poll() is None, "the configurator exited although the shutdown was cancelled"
+        try:
+            snapshot = page.evaluate("window.configHost.snapshotDraft()")
+        except Exception as error:
+            raise AssertionError("the page stopped answering snapshotDraft after a cancelled shutdown: " + str(error))
+        assert isinstance(snapshot, dict) and isinstance(snapshot.get("draft"), dict), "the page stopped answering snapshotDraft after a cancelled shutdown"
+        page.locator("#testButton").click()
+        page.wait_for_function("window.__nativeReplies.some(m=>m.ok&&m.payload?.processId)")
+        test_pid = page.evaluate("window.__nativeReplies.findLast(m=>m.ok&&m.payload?.processId).payload.processId")
+        test_host = KERNEL32.OpenProcess(0x00100001, False, test_pid)  # SYNCHRONIZE | PROCESS_TERMINATE
+        assert test_host, f"could not open Test host {test_pid}"
+        assert KERNEL32.WaitForSingleObject(test_host, 0) == 0x102, "the Test host ended before the session did"  # WAIT_TIMEOUT
+        assert session_message(hwnd, 0x0011, 0, 5000) != 0, "the second WM_QUERYENDSESSION was refused"
+        # WM_ENDSESSION(TRUE): the session ends. WinForms destroys the form while handling it,
+        # so only the process exit and the Test host below say whether teardown ran.
+        session_message(hwnd, 0x0016, 1, 10000, require_answer=False)
+        process.wait(timeout=15)
+        assert process.returncode == 0, f"the configurator exited {process.returncode} after WM_ENDSESSION(TRUE)"
+        assert KERNEL32.WaitForSingleObject(test_host, 5000) == 0, "WM_ENDSESSION(TRUE) did not tear down: the Test host is still running"
+        assert b"session-end-owner" in store.read_bytes(), "the session end lost the saved preset"
+        print("PASS session-end query answered at once; cancelled shutdown keeps the configurator; WM_ENDSESSION(TRUE) tears down", flush=True)
+        return {"pid": process.pid, "testPid": test_pid}
+    finally:
+        if test_host:
+            if KERNEL32.WaitForSingleObject(test_host, 0) != 0:
+                KERNEL32.TerminateProcess(test_host, 1)
+            KERNEL32.CloseHandle(test_host)
+        native.stop_application(process)
+        browser.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def process_windows(pid, visible_only):
+    """Top-level windows of one process id."""
+    found = []
+    def visit(hwnd, _):
+        owner = wintypes.DWORD()
+        native.USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and (not visible_only or native.USER32.IsWindowVisible(hwnd)):
+            found.append(hwnd)
+        return True
+    native.USER32.EnumWindows(native.CALLBACK(visit), 0)
+    return found
+
+
+def test_exit_case(playwright, publish):
+    """AUD-43 host half: a Test host that ends by itself is reported to the page with its pid.
+
+    A page spy stands in for configHost.testExited, so this checks the host's Exited,
+    BeginInvoke and ExecuteScriptAsync wiring whatever the page half does with the notice.
+    Without EnableRaisingEvents or the Exited subscription the spy is never called. A replaced
+    Test host's exit notice must not clear its replacement: without the identity guard in
+    OnTestExited, Stop no longer ends the current Test host.
+    """
+    import shutil
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="test-exit-", dir=ARTIFACTS))
+    app = root / "app"
+    shutil.copytree(publish, app)
+    exe = app / "MatrixDesktopConfigurator.exe"
+    (app / "MatrixDesktopConfigurator.presets.json").write_text(json.dumps({"schemaVersion": 1, "presetSeedVersion": 0,
+        "selectedPresetId": None, "lastDraft": {}, "userPresets": [], "uiTheme": "dark"}), encoding="utf-8")
+    process, browser = native.open_application(playwright, exe, [], "test-exit")
+    handles = []
+    try:
+        page = native.page_at(browser, "https://configurator.local/")
+        page.wait_for_function("document.querySelectorAll('.field').length>40")
+        page.evaluate("""() => {
+            window.__nativeReplies=[];window.__testExited=[];
+            const receive=configHost.receive.bind(configHost);
+            configHost.receive=message=>{window.__nativeReplies.push(structuredClone(message));receive(message);};
+            const pageHalf=configHost.testExited?.bind(configHost);
+            configHost.testExited=pid=>{window.__testExited.push(pid);pageHalf?.(pid);};
+        }""")
+
+        def launch():
+            count = page.evaluate("window.__nativeReplies.filter(m=>m.ok&&m.payload?.processId).length")
+            page.locator("#testButton").click()
+            page.wait_for_function("count=>window.__nativeReplies.filter(m=>m.ok&&m.payload?.processId).length>count", arg=count)
+            pid = page.evaluate("window.__nativeReplies.findLast(m=>m.ok&&m.payload?.processId).payload.processId")
+            handle = KERNEL32.OpenProcess(0x00100001, False, pid)  # SYNCHRONIZE | PROCESS_TERMINATE
+            assert handle, f"could not open Test host {pid}"
+            handles.append(handle)
+            return pid, handle
+
+        first, first_handle = launch()
+        deadline = time.monotonic() + 15
+        while not process_windows(first, visible_only=True) and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        assert process_windows(first, visible_only=True), f"Test host {first} showed no window"
+        for hwnd in process_windows(first, visible_only=False):
+            native.USER32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE, as native.close_window ends a windowed host
+        assert KERNEL32.WaitForSingleObject(first_handle, 10000) == 0, "the Test host did not close on WM_CLOSE"
+        try:
+            page.wait_for_function("pid=>window.__testExited.includes(pid)", arg=first, timeout=5000)
+        except Exception:
+            raise AssertionError(f"the host never called configHost.testExited({first}) after the Test window closed")
+        second, second_handle = launch()
+        third, third_handle = launch()
+        assert KERNEL32.WaitForSingleObject(second_handle, 5000) == 0, "a replaced Test host kept running"
+        page.wait_for_timeout(1000)  # the replaced host's exit notice is queued behind the launch
+        page.locator("#stopButton").click()
+        assert KERNEL32.WaitForSingleObject(third_handle, 5000) == 0, \
+            "Stop Test left the current Test host running: a replaced host's exit notice cleared it"
+        assert page.evaluate("window.__testExited") == [first], "only the Test host that ended by itself may be reported"
+        native.close_window(process)
+        print("PASS a Test host that ends by itself is reported once; a replaced host's exit leaves Stop working", flush=True)
+        return {"pid": process.pid, "testPids": [first, second, third]}
+    finally:
+        for handle in handles:
+            if KERNEL32.WaitForSingleObject(handle, 0) != 0:
+                KERNEL32.TerminateProcess(handle, 1)
+            KERNEL32.CloseHandle(handle)
+        native.stop_application(process)
+        browser.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish", type=Path, default=ROOT / "artifacts" / "gate" / "win-x64-fd")
@@ -432,6 +669,9 @@ def main():
     args = parser.parse_args()
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
+        second_instance_case(playwright, args.publish)
+        session_end_case(playwright, args.publish)
+        test_exit_case(playwright, args.publish)
         for renderer in (["regl", "webgpu"] if args.renderer == "both" else [args.renderer]):
             configurator_case(playwright, args.publish / "MatrixDesktopConfigurator.exe", renderer)
     print("PASS portable preset and backup bytes restored by the native preservation helper.", flush=True)
