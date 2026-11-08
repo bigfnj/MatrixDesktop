@@ -60,12 +60,31 @@ internal static class CrashDumpWriter
     private static void ReleaseDumpSlot()
         => System.Threading.Interlocked.Decrement(ref _dumpsWritten);
 
-    private static void PruneOldDumps(string dumpDir)
+    // A failed attempt leaves the empty or partial file it created. Left in place it is newer
+    // than every retained dump, so the next prune would evict a real one in its favour.
+    private static void DeleteFailedDump(string path)
     {
         try
         {
+            File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Could not delete the failed crash dump '{path}': {ex.Message}");
+        }
+    }
+
+    // Runs only after a dump is on disk, so a failed attempt can never evict a retained one,
+    // and never ranks the new dump itself: one written after the clock was set back would
+    // otherwise sort below dumps with later timestamps and be deleted at once.
+    private static void PruneOldDumps(string dumpDir, string newDumpPath)
+    {
+        try
+        {
+            var newDumpName = Path.GetFileName(newDumpPath);
             var existing = new DirectoryInfo(dumpDir)
                 .GetFiles("*.dmp")
+                .Where(file => !string.Equals(file.Name, newDumpName, StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(static file => file.LastWriteTimeUtc)
                 .Skip(MaxDumpsRetained - 1)
                 .ToArray();
@@ -184,6 +203,8 @@ internal static class CrashDumpWriter
     internal static string? WriteDumpWithBackend(string reason, Func<string> resolveDirectory, Func<string, bool> writeDump)
     {
         var reserved = false;
+        var written = false;
+        string? path = null;
         try
         {
             var dumpDir = resolveDirectory();
@@ -199,31 +220,36 @@ internal static class CrashDumpWriter
             }
             reserved = true;
 
-            PruneOldDumps(dumpDir);
-
             // Milliseconds, not just seconds. Two faults inside the same second produced an
             // identical filename and the second dump silently overwrote the first, which
             // was observed while verifying the retention cap.
             var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss.fff", CultureInfo.InvariantCulture);
-            var path = Path.Combine(dumpDir, $"{_processLabel}-{stamp}-pid{Environment.ProcessId}.dmp");
+            path = Path.Combine(dumpDir, $"{_processLabel}-{stamp}-pid{Environment.ProcessId}.dmp");
 
             var ok = writeDump(path);
 
             if (!ok)
             {
                 var err = Marshal.GetLastWin32Error();
+                DeleteFailedDump(path);
                 ReleaseDumpSlot();
                 reserved = false;
                 Logger.Warn($"MiniDumpWriteDump returned false. Win32 error={err}. Reason='{reason}'.");
                 return null;
             }
+            written = true;
 
             Logger.Info($"Crash dump written. Path='{path}' Reason='{reason}'.");
+            PruneOldDumps(dumpDir, path);
             return path;
         }
         catch (Exception ex)
         {
-            if (reserved) ReleaseDumpSlot();
+            if (reserved && !written)
+            {
+                ReleaseDumpSlot();
+                if (path is not null) DeleteFailedDump(path);
+            }
             try { Logger.Error($"WriteDump exception. Reason='{reason}'.", ex); }
             catch { /* ignore */ }
             return null;

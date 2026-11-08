@@ -7,6 +7,7 @@ internal static class CrashDumpTests
     [
         ("Native crash diagnostics never release an unreserved slot", BeforeReservation),
         ("Native crash diagnostics release only failed reserved writes", FailedWrites),
+        ("Native crash diagnostics never evict retained dumps on failed writes", FailedWritesKeepRetainedDumps),
         ("Native diagnostics log rotates on the first write of a short-lived process", FirstWriteRotation),
         ("Native diagnostics log checks rotation again 10 writes after a check", PeriodicRotation),
     ];
@@ -79,6 +80,61 @@ internal static class CrashDumpTests
         }
         Require(writes == 2, "Both the false-result and throwing backend must actually execute.");
         VerifyCap(root);
+    });
+
+    // Names sort oldest first, and each file is dated one minute after the previous one.
+    private static string[] PlantDumps(string dir, DateTime oldestUtc)
+    {
+        Directory.CreateDirectory(dir);
+        var names = Enumerable.Range(0, 10).Select(index => $"Synthetic-retained-{index:00}-pid1.dmp").ToArray();
+        for (var index = 0; index < names.Length; index++)
+        {
+            var file = Path.Combine(dir, names[index]);
+            File.WriteAllBytes(file, [7]);
+            File.SetLastWriteTimeUtc(file, oldestUtc.AddMinutes(index));
+        }
+        return names;
+    }
+
+    private static string[] DumpNames(string dir) => Directory.GetFiles(dir, "*.dmp").Select(file => Path.GetFileName(file)).ToArray();
+
+    // Like the native writer, each failing backend creates its file before the write fails.
+    private static void FailedWritesKeepRetainedDumps() => WithFixture(root =>
+    {
+        var dir = Path.Combine(root, "dumps");
+        var planted = PlantDumps(dir, DateTime.UtcNow.AddDays(-30));
+        foreach (var throws in new[] { false, false, false, false, false, true })
+        {
+            var outcome = throws ? "a writer that threw" : "a writer that returned false";
+            var created = 0;
+            var result = CrashDumpWriter.WriteDumpWithBackend("synthetic failed write", () => dir, path =>
+            {
+                Require(Path.GetDirectoryName(path) == dir, "The injected writer must receive only the owned synthetic directory.");
+                File.WriteAllBytes(path, [1, 2, 3]);
+                created++;
+                if (throws) throw new IOException("Synthetic failure after the dump file was created.");
+                return false;
+            });
+            Require(result is null && created == 1 && Count == 0, $"The failed attempt with {outcome} must run once and return its slot.");
+            var names = DumpNames(dir);
+            var leftover = names.Except(planted).ToArray();
+            Require(leftover.Length == 0, $"A failed attempt with {outcome} must delete the file it created, found {string.Join(", ", leftover)}.");
+            var lost = planted.Except(names).ToArray();
+            Require(lost.Length == 0, $"A failed attempt with {outcome} must not evict a retained dump, lost {string.Join(", ", lost)}.");
+        }
+
+        var written = CrashDumpWriter.WriteDumpWithBackend("synthetic success", () => dir, path => { File.WriteAllBytes(path, [1]); return true; });
+        Require(written is not null && File.Exists(written), "A successful write must keep its new dump.");
+        var after = DumpNames(dir);
+        Require(after.Length == 10, $"A successful write must leave exactly 10 dumps, found {after.Length}.");
+        Require(!after.Contains(planted[0]) && planted.Skip(1).All(after.Contains), "A successful write must evict only the oldest retained dump.");
+
+        // Dumps written under a clock that was ahead must not make pruning delete the new dump.
+        var future = Path.Combine(root, "future");
+        PlantDumps(future, DateTime.UtcNow.AddDays(1));
+        var newest = CrashDumpWriter.WriteDumpWithBackend("synthetic success", () => future, path => { File.WriteAllBytes(path, [1]); return true; });
+        Require(newest is not null && File.Exists(newest), "Pruning must never delete the dump it was run for, even when older dumps carry later timestamps.");
+        Require(DumpNames(future).Length == 10, $"Pruning must still keep exactly 10 dumps, found {DumpNames(future).Length}.");
     });
 
     // A screensaver run writes two or three lines and exits, so the log must check its size on
