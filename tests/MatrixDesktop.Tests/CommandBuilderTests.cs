@@ -33,6 +33,7 @@ internal static class CommandBuilderTests
         ("UC3D randomization edits active controls and retains the alternate unit set", Uc3dRandomization),
         ("Scene placements name real fields groups and anchors and UC3D shows its colours together", ScenePlacementsResolve),
         ("Untouched editors show what the renderer draws for each version and effect", UntouchedEditorsShowTheRender),
+        ("A command that names the palette effect keeps its effect cursor through import and Copy", NamedPaletteKeepsItsCursor),
         ("Use for screensaver saves exactly what the preview renders", ScreensaverMatchesPreview),
         ("Stored drafts keep their render when version and effect defaults arrive", StoredDraftsKeepTheirRender),
         ("A base value chosen after the migration survives save and reload", FreshBaseValueSurvivesReload),
@@ -61,15 +62,16 @@ internal static class CommandBuilderTests
 
     // config.js:652-685 and stripePass.js:39: an imported command that names only a version and an
     // effect must leave every editor on what that command renders, and the regenerated command
-    // must leave those fields out so the renderer draws exactly that.
+    // must leave those fields out so the renderer draws exactly that. A command that names the
+    // palette effect is NamedPaletteKeepsItsCursor's, since CommandBuilder never names palette.
     private static void UntouchedEditorsShowTheRender()
     {
         var failures = new List<string>();
         foreach (var (version, rendered) in RenderedByVersion)
-        foreach (var effect in new[] { "palette", "plain", "stripes", "customStripes", "pride", "trans", "transPride" })
+        foreach (var effect in new[] { null, "plain", "stripes", "customStripes", "pride", "trans", "transPride" })
         {
-            var draft = Importer.Import($"--version {version} --effect {effect}", Draft()).Draft;
-            var named = effect != "palette";
+            var draft = Importer.Import($"--version {version}" + (effect is null ? "" : $" --effect {effect}"), Draft()).Draft;
+            var named = effect is not null;
             var expected = new Dictionary<string, string>
             {
                 ["cursorColor"] = named ? "{\"r\":1,\"g\":1,\"b\":1}" : rendered.Cursor,
@@ -80,10 +82,45 @@ internal static class CommandBuilderTests
             var query = Builder.BuildWebQueryString(draft);
             foreach (var (field, value) in expected)
             {
-                if (Json(draft[field]) != value) failures.Add($"{version}/{effect} {field} editor shows {Json(draft[field])}, renderer draws {value}");
-                if (query.Contains(field + "=", StringComparison.Ordinal)) failures.Add($"{version}/{effect} sends {field} although it is untouched: {query}");
+                if (Json(draft[field]) != value) failures.Add($"{version}/{effect ?? "no effect"} {field} editor shows {Json(draft[field])}, renderer draws {value}");
+                if (query.Contains(field + "=", StringComparison.Ordinal)) failures.Add($"{version}/{effect ?? "no effect"} sends {field} although it is untouched: {query}");
             }
         }
+        Check.True(failures.Count == 0, string.Join("; ", failures));
+    }
+
+    // R2-11. config.js:654-670 applies an effect's implied values whenever a command names one,
+    // palette included: a white cursor (UC3D keeps its own), cursor intensity 2, a white glint
+    // and glyph intensity 1. CommandBuilder never names the default palette effect, so an
+    // imported --effect palette keeps those values in its editors and sends each one the version
+    // draws differently, or Copy, Test, the preview and the screensaver would change the render.
+    // Applied still lists only what the command named. Killing mutations: drop the importer's
+    // named-palette branch, or let AdoptRenderedDefaults see only the applied keys.
+    private static void NamedPaletteKeepsItsCursor()
+    {
+        const string white = "{\"r\":1,\"g\":1,\"b\":1}";
+        var uc3dCursor = Json(JsonSerializer.SerializeToNode(Metadata.SceneDefaults["uc3d"]["cursorColor"], new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var failures = new List<string>();
+        foreach (var (command, cursor, applied, sent) in new[]
+        {
+            ("--effect palette", white, "effect", "cursorColor=1,1,1"),
+            ("--version operator --effect palette", white, "effect version", "cursorColor=1,1,1 cursorIntensity=2 version=operator"),
+            ("--version trinity --effect palette", white, "effect version", "cursorColor=1,1,1 glintColor=1,1,1 version=trinity"),
+            ("--scene uc3d --version operator --effect palette", uc3dCursor, "effect scene version", "cursorIntensity=2 scene=uc3d version=operator"),
+            ("--effect palette --cursorColor 1,0,0 --version operator", "{\"r\":1,\"g\":0,\"b\":0}", "cursorColor effect version", "cursorColor=1,0,0 cursorIntensity=2 version=operator"),
+        })
+        {
+            var imported = Importer.Import(command, Draft());
+            foreach (var (field, value) in new[] { ("cursorColor", cursor), ("cursorIntensity", "2"), ("glintColor", white), ("glyphIntensity", "1") })
+                if (Json(imported.Draft[field]) != value) failures.Add($"'{command}' {field} editor shows {Json(imported.Draft[field])}, renderer draws {value}");
+            var query = string.Join(" ", QueryPairs(Builder.BuildWebQueryString(imported.Draft)).OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + pair.Value));
+            if (query != sent) failures.Add($"'{command}' previews '{query}', not '{sent}'");
+            if (string.Join(" ", imported.Applied) != applied) failures.Add($"'{command}' reports applying '{string.Join(" ", imported.Applied)}', not '{applied}'");
+        }
+        // The guide's own example (MatrixDesktop_Argument_Guide.txt, the palette effect).
+        var guide = Importer.Import("MatrixDesktop.exe --windowed --effect palette --clickRipples", Draft()).Draft;
+        var copied = Cmd(guide);
+        if (copied != "MatrixDesktop.exe --windowed --clickRipples true --cursorColor 1,1,1") failures.Add($"the guide's palette example copies as '{copied}'");
         Check.True(failures.Count == 0, string.Join("; ", failures));
     }
 
