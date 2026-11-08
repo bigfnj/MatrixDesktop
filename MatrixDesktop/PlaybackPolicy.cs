@@ -154,3 +154,13 @@ internal sealed class RendererFailurePolicy
         return wallpaper ? RendererFailureAction.Recreate : RendererFailureAction.Exit;
     }
 }
+
+// R2-01. WinForms raises FormClosing for WM_QUERYENDSESSION as well as WM_CLOSE, and the
+// shutdown that query asks about can still be cancelled. A top-level surface that tore down its
+// WebView there stayed black after WM_ENDSESSION(FALSE), because nothing rebuilds it. MainForm
+// marks the query's dispatch itself: e.CloseReason stays WindowsShutDown after a cancel.
+// WM_ENDSESSION(TRUE) raises FormClosed and reaches Dispose, which tear down.
+internal static class HostClosePolicy
+{
+    internal static bool TearsDownOnClosing(bool sessionEndQuery) => !sessionEndQuery;
+}

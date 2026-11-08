@@ -576,6 +576,42 @@ def session_end_case(playwright, publish):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def host_session_end_case(playwright, publish):
+    """R2-01: a top-level host answers WM_QUERYENDSESSION and keeps rendering after a cancelled shutdown.
+
+    WinForms raises FormClosing for WM_QUERYENDSESSION, and MainForm tore down its WebView on
+    every FormClosing; after WM_ENDSESSION(FALSE) nothing rebuilt it, so a fullscreen, windowed
+    or screensaver host stayed black. An isolated windowed launch stands in for all three. A fix
+    without the early return in OnFormClosing, or without the WndProc flag, fails the frame leg.
+    """
+    process, browser = native.open_application(playwright, publish / "MatrixDesktop.exe",
+        ["--windowed", "--no-exit-on-any-key"], "host-session-end")
+    try:
+        page = native.page_at(browser, "https://appassets.local/")
+        frames = "(window.matrixRuntimeDiagnostics ?? window.__matrixRuntime)?.frames ?? -1"
+        page.wait_for_function(f"({frames}) > 0", timeout=25000)
+        windows = process_windows(process.pid, visible_only=True)
+        assert len(windows) == 1, f"expected one visible host window for pid {process.pid}, found {len(windows)}"
+        hwnd = windows[0]
+        assert session_message(hwnd, 0x0011, 0, 5000) != 0, "the host refused WM_QUERYENDSESSION, so Windows lists it as blocking shutdown"
+        session_message(hwnd, 0x0016, 0, 5000)  # WM_ENDSESSION(FALSE): the shutdown was cancelled
+        page.wait_for_timeout(3000)
+        assert process.poll() is None, "the host exited although the shutdown was cancelled"
+        try:
+            before = page.evaluate(frames)
+            page.wait_for_function(f"before => ({frames}) > before + 2", arg=before, timeout=5000)
+        except Exception as error:
+            raise AssertionError("the host is not still rendering after a cancelled shutdown: " + str(error))
+        native.USER32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: an ordinary close still tears down
+        process.wait(timeout=15)
+        assert process.returncode == 0, f"the host exited {process.returncode} after WM_CLOSE"
+        print("PASS host answers WM_QUERYENDSESSION, keeps rendering after WM_ENDSESSION(FALSE), exits 0 on WM_CLOSE", flush=True)
+        return {"pid": process.pid}
+    finally:
+        native.stop_application(process)
+        browser.close()
+
+
 def process_windows(pid, visible_only):
     """Top-level windows of one process id."""
     found = []
@@ -671,6 +707,7 @@ def main():
     with sync_playwright() as playwright:
         second_instance_case(playwright, args.publish)
         session_end_case(playwright, args.publish)
+        host_session_end_case(playwright, args.publish)
         test_exit_case(playwright, args.publish)
         for renderer in (["regl", "webgpu"] if args.renderer == "both" else [args.renderer]):
             configurator_case(playwright, args.publish / "MatrixDesktopConfigurator.exe", renderer)

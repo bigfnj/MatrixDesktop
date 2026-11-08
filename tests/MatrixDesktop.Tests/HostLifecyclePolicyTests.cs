@@ -18,7 +18,17 @@ internal static class HostLifecyclePolicyTests
         ("Host wallpaper guard scope keeps isolated test launches away from the owner's wallpaper", WallpaperScope),
         ("Host wallpaper guard that cannot open its objects lets the launch run and says why", WallpaperGuardUnavailable),
         ("Host renderer process failure reloads, rebuilds or exits as WebView2 requires", RendererFailure),
+        ("Host answers a session-end query without tearing down its renderer", SessionEndQuery),
     ];
+
+    // R2-01. A fullscreen, windowed or screensaver surface disposed its WebView on
+    // WM_QUERYENDSESSION and stayed black after WM_ENDSESSION(FALSE). MainForm's use of this
+    // policy is checked on the published dll by HostWiring.
+    private static void SessionEndQuery()
+    {
+        Check.False(HostClosePolicy.TearsDownOnClosing(sessionEndQuery: true), "a session-end query can still be cancelled, so it must not tear down the renderer");
+        Check.True(HostClosePolicy.TearsDownOnClosing(sessionEndQuery: false), "an ordinary close (WM_CLOSE, Close) must still tear down before the handles go");
+    }
 
     // AUD-07. Nothing handled CoreWebView2.ProcessFailed, so a lost renderer left a wallpaper
     // blank until an unrelated shell event. The host side (MainForm subscribes and forwards, the

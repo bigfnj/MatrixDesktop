@@ -10,7 +10,11 @@ namespace MatrixDesktop.Tests;
 // which neither harness can link (MainForm needs WebView2).
 internal static class HostWiring
 {
-    private sealed record Call(string Caller, int Offset, string Callee, int PreviousOpcode);
+    private sealed record Call(string Caller, int Offset, string Callee, int PreviousOpcode)
+    {
+        // The opcode right after the call, so a check can see what the result feeds.
+        internal int NextOpcode { get; init; } = -1;
+    }
 
     private const string MessageBoxShow = "System.Windows.Forms.MessageBox::Show";
     private const string FormClose = "System.Windows.Forms.Form::Close";
@@ -126,6 +130,23 @@ internal static class HostWiring
             Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::OnTick" && call.Callee == "MatrixDesktop.RendererFailurePolicy::StayedHealthy"),
                 "the wallpaper tick must reset the rebuild backoff only once a renderer stayed ready");
         });
+        // R2-01. HostClosePolicy has its own test; this proves OnFormClosing branches on it, with
+        // the flag WndProc sets, before any teardown. The cancelled-shutdown leg itself is native.
+        failures += Run($"a session-end query reaches HostClosePolicy before MainForm tears down: {path}", () =>
+        {
+            var body = calls.Where(call => call.Caller == "MatrixDesktop.MainForm::OnFormClosing").ToList();
+            var decide = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.HostClosePolicy::TearsDownOnClosing");
+            var teardown = body.Where(call => call.Callee is "MatrixDesktop.MainForm::TryCleanupWebView" or "MatrixDesktop.Shared.NativeMediaBridge::Dispose"
+                or "MatrixDesktop.MainForm::StopForegroundEnforcer").ToList();
+            Check.True(teardown.Any(call => call.Callee == "MatrixDesktop.MainForm::TryCleanupWebView"), "witness: the scan must see OnFormClosing clean up the WebView at all");
+            Check.True(decide is not null, "OnFormClosing must ask HostClosePolicy whether this close tears down");
+            Check.True(teardown.All(call => call.Offset > decide!.Offset), "OnFormClosing must ask HostClosePolicy before it stops anything: "
+                + string.Join("; ", teardown.Where(call => call.Offset < decide!.Offset).Select(call => call.Callee)));
+            Check.True(decide!.PreviousOpcode == OpCodes.Ldfld.Value, "HostClosePolicy must be given the field WndProc sets, not a constant");
+            Check.True(decide.NextOpcode is 0x2C or 0x2D or 0x39 or 0x3A, $"OnFormClosing must branch on HostClosePolicy's answer (next opcode 0x{decide.NextOpcode:X2})");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::WndProc" && call.Callee == "System.Windows.Forms.Form::WndProc"),
+                "MainForm must mark the WM_QUERYENDSESSION dispatch in its own WndProc");
+        });
         return failures;
     }
 
@@ -178,11 +199,13 @@ internal static class HostWiring
                 var caller = typeName + "::" + reader.GetString(method.Name);
                 var il = pe.GetMethodBody(method.RelativeVirtualAddress).GetILReader();
                 var previous = -1;
+                var awaitingNext = -1;
                 while (il.RemainingBytes > 0)
                 {
                     var offset = il.Offset;
                     int value = il.ReadByte();
                     if (value == 0xFE) value = 0xFE00 | il.ReadByte();
+                    if (awaitingNext >= 0) { calls[awaitingNext] = calls[awaitingNext] with { NextOpcode = unchecked((short)value) }; awaitingNext = -1; }
                     var code = OpCodesByValue[unchecked((short)value)];
                     switch (code.OperandType)
                     {
@@ -194,7 +217,10 @@ internal static class HostWiring
                         case OperandType.InlineMethod:
                             var token = il.ReadInt32();
                             if (code == OpCodes.Call || code == OpCodes.Callvirt || code == OpCodes.Newobj)
+                            {
                                 calls.Add(new Call(caller, offset, MethodName(reader, MetadataTokens.EntityHandle(token)), previous));
+                                awaitingNext = calls.Count - 1;
+                            }
                             else if (code == OpCodes.Ldftn || code == OpCodes.Ldvirtftn)
                                 functionLoads.Add(new Call(caller, offset, MethodName(reader, MetadataTokens.EntityHandle(token)), previous));
                             break;
