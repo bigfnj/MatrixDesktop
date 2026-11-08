@@ -85,7 +85,7 @@ fn rotateScene(point: vec3<f32>) -> vec3<f32> {
   let photoColor = select(photo.rgb,scene.codeColor.rgb*luminance*1.3,scene.scene4.y>0.5);
   let rainColor = scene.codeColor.rgb*light*scene.scene4.z+scene.cursorColor.rgb*head*scene.scene4.w*0.55;
   let color = mix(rainColor,photoColor*scene.scene4.z,weight);
-  let cycle = floor(scene.scene1.x*scene.scene3.y*30.0);
+  let cycle = scene.scene3.y;
   let rawSymbol = floor(cell.z*scene.scene3.z)+cell.y*7.0+cycle*(1.0+floor(cell.z*13.0));
   let symbol = rawSymbol-floor(rawSymbol/scene.scene3.z)*scene.scene3.z;
   var local = corner-0.5;

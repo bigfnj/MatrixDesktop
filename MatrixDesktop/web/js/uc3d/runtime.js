@@ -100,11 +100,15 @@ export async function createRuntime(canvas, options, backend) {
       const changed = dirty || Boolean(scene.grid);
       if (changed) { grid = scene.grid ? scene.grid(aspect, photo) : createGrid(config, aspect, photo); dirty = false; }
       const uniforms = new Float32Array(56);
+      // Days of active time do not fit a float32 uniform, so reduce exactly here. Legacy stream
+      // speeds are multiples of 0.1: 500 s moves every head whole 50-unit wraps. The glyph term
+      // needs only its cycle count modulo the sequence length, and travel only its fraction.
+      const sequence = config.glyphSequenceLength ?? 57, cycle = Math.floor(state.time * (config.cycleSpeed ?? 0.03) * 30);
       uniforms.set(viewProjection(aspect, config, state, backend === "webgpu"), 0);
       uniforms.set([aspect, grid.rows, grid.columns, grid.baseColumns], 16);
-      uniforms.set([state.time, state.forwardPhase, state.yaw, state.pitch], 20);
+      uniforms.set([state.time - 500 * Math.floor(state.time / 500), state.forwardPhase - Math.floor(state.forwardPhase), state.yaw, state.pitch], 20);
       uniforms.set([state.roll, state.sidewaysOffset, state.pictureWeight, config.volumetric ? 1 : 0], 24);
-      uniforms.set([config.fallSpeed ?? 0.3, config.cycleSpeed ?? 0.03, config.glyphSequenceLength ?? 57, config.shadedLines ? 1 : 0], 28);
+      uniforms.set([config.fallSpeed ?? 0.3, sequence > 0 ? cycle - sequence * Math.floor(cycle / sequence) : cycle, sequence, config.shadedLines ? 1 : 0], 28);
       uniforms.set([config.pictureDepth, config.pictureMonochrome ? 1 : 0, config.glyphIntensity ?? 1, config.cursorIntensity ?? 2], 32);
       uniforms.set([...(config.glyphTextureGridSize ?? [8, 8]), config.glyphFlip ? 1 : 0, (config.glyphRotation ?? 0) * Math.PI / 180], 36);
       uniforms.set([config.raindropLength ?? 0.75, config.glyphHeightToWidth ?? 1, config.glyphVerticalSpacing ?? 1, config.glyphEdgeCrop ?? 0], 40);

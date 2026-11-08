@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import resolveConfig from "../MatrixDesktop/web/js/config.js";
 import { createScene as createConfiguredScene, createGrid, projection, viewProjection, attachMouse } from "../MatrixDesktop/web/js/uc3d/scene.js";
 import { createNativeRandom, nativeSettings, nativeFallSpeed, nativePictureGrid, wrapNative } from "../MatrixDesktop/web/js/uc3d/native.js";
@@ -806,6 +807,76 @@ await asyncTest("WebGPU UC3D hands a lost device to the page and shows a validat
       } finally { stop(); }
     }
   });
+});
+// Float32 emulation of the legacy vertex shader's time terms (uc3d.vert.glsl, uc3d.wgsl):
+// every operation rounds to float32, and mod(x, y) is x - y*floor(x/y) as in GLSL.
+const f32 = Math.fround, mod32 = (x, y) => f32(x - f32(y * Math.floor(f32(x / y))));
+// A head or depth one ulp across the 50-unit wrap is not an error, so compare along the track.
+const onTrack = (a, b) => { const d = Math.abs(a - b) % 50; return Math.min(d, 50 - d); };
+// 1.2 s past whole days gives an odd glyph cycle at cycleSpeed 0.03, which float32 cannot
+// multiply exactly once the product passes 2^24 (30 days).
+const legacyTimes = [3, 7, 30].map(days => [days, days * 86400 + 1.2]);
+async function legacyFrame(seconds) {
+  const dom = runtimeDom();
+  try {
+    // Constant forward travel: the random travel integral drifts too slowly to stress float32.
+    const config = resolveConfig({ scene: "uc3d", uc3dControls: "legacy", volumetric: "true", fallSpeed: "0.3",
+      forwardSpeed: "-0.675", randomForwardMovement: "false", sidewaysMovement: "false" });
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      const frame = runtime.update(seconds, 200, 100);
+      assert.equal(runtime.diagnostics.simulationTime, seconds, "witness: the scene must run the whole active time");
+      assert.ok(frame.grid.count / 6 > 1000, `witness: only ${frame.grid.count / 6} cells`);
+      return { config, ...frame };
+    } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
+}
+await asyncTest("legacy stream heads stay where exact math puts them after days of active time", async () => {
+  for (const [days, seconds] of legacyTimes) {
+    const { uniforms, grid, state } = await legacyFrame(seconds);
+    const fall = uniforms[28], nativeFall = f32(f32(Math.abs(fall) * 40) / f32(0.3));
+    let worst = 0;
+    for (let i = 0; i < grid.data.length; i += 60) {
+      const seed = grid.data[i + 2], wave = f32(seed * f32(19.31));
+      const step = Math.floor(f32(f32(wave - Math.floor(wave)) * f32(nativeFall + 30)));
+      const speed = f32(f32(2 + f32(step * f32(0.1))) * Math.sign(fall));
+      const head = f32(25 - mod32(f32(f32(uniforms[20] * speed) + f32(seed * 50)), 50));
+      const exact = state.time * (20 + step) / 10 * Math.sign(fall) + seed * 50;
+      worst = Math.max(worst, onTrack(head, 25 - (exact - 50 * Math.floor(exact / 50))));
+    }
+    assert.ok(worst <= 0.05, `${days} days: a stream head is ${worst.toFixed(3)} world units from exact math (limit 0.05, 1e-3 of the screen)`);
+  }
+});
+await asyncTest("legacy glyph cycling stays exact after days of active time", async () => {
+  for (const [path, reduced] of [["glsl/uc3d.vert.glsl", /float cycle = scene3\.y;/], ["wgsl/uc3d.wgsl", /let cycle = scene\.scene3\.y;/]])
+    assert.match(readFileSync(new URL(`../MatrixDesktop/web/shaders/${path}`, import.meta.url), "utf8"), reduced, `${path} must read the reduced glyph cycle`);
+  for (const [days, seconds] of legacyTimes) {
+    const { config, uniforms, grid, state } = await legacyFrame(seconds);
+    const length = uniforms[30], cycle = Math.floor(state.time * config.cycleSpeed * 30);
+    assert.equal(cycle % 2, 1, `witness: cycle ${cycle} must be odd`);
+    let wrong = 0, cells = 0;
+    for (let i = 0; i < grid.data.length; i += 60, cells++) {
+      const seed = grid.data[i + 2], row = grid.data[i + 1];
+      const first = Math.floor(f32(seed * length)), rate = f32(1 + Math.floor(f32(seed * 13)));
+      const symbol = mod32(f32(f32(first + f32(row * 7)) + f32(uniforms[29] * rate)), length);
+      if (symbol !== (first + row * 7 + cycle * rate) % length) wrong++;
+    }
+    assert.equal(wrong, 0, `${days} days: ${wrong} of ${cells} glyphs differ from exact math`);
+  }
+});
+await asyncTest("legacy forward travel depth stays exact after days of active time", async () => {
+  for (const [days, seconds] of legacyTimes) {
+    const { uniforms, grid, state } = await legacyFrame(seconds);
+    assert.ok(Math.abs(state.forwardPhase) > 20000, `witness: forward phase ${state.forwardPhase} is too small to stress float32`);
+    let worst = 0;
+    for (let i = 0; i < grid.data.length; i += 60) {
+      const seed = grid.data[i + 2], travel = f32(f32(seed * f32(13.71)) + uniforms[21]);
+      const depth = f32(-25 + f32(f32(travel - Math.floor(travel)) * 50));
+      const exact = seed * 13.71 + state.forwardPhase;
+      worst = Math.max(worst, onTrack(depth, -25 + (exact - Math.floor(exact)) * 50));
+    }
+    assert.ok(worst <= 0.05, `${days} days: a forward depth is ${worst.toFixed(3)} world units from exact math (limit 0.05)`);
+  }
 });
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;
