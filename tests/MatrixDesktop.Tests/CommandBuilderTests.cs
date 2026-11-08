@@ -37,7 +37,33 @@ internal static class CommandBuilderTests
         ("Use for screensaver saves exactly what the preview renders", ScreensaverMatchesPreview),
         ("Stored drafts keep their render when version and effect defaults arrive", StoredDraftsKeepTheirRender),
         ("A base value chosen after the migration survives save and reload", FreshBaseValueSurvivesReload),
+        ("A draft whose saved colours come back with reordered keys builds the same command", ReorderedKeysChangeNothing),
     ];
+
+    // R2-44. After a close and reopen every stored colour read b, g, r (palette stops at, b, g, r),
+    // and IsDefault compared serialized text, so each default colour became a flag. Key order is
+    // no difference: such a draft copies and previews as before, and a changed component is still
+    // sent. Killing mutation: compare serialized text again in IsDefault (CanonicalJson).
+    private static void ReorderedKeysChangeNothing()
+    {
+        static JsonNode? Reordered(JsonNode? node) => node switch
+        {
+            JsonObject obj => new JsonObject(obj.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => KeyValuePair.Create(pair.Key, Reordered(pair.Value)))),
+            JsonArray array => new JsonArray(array.Select(Reordered).ToArray()),
+            _ => node?.DeepClone(),
+        };
+        foreach (var command in new[] { "", "--version operator --effect plain", "--scene uc3d", "--effect pride", "--version trinity" })
+        {
+            var draft = command.Length == 0 ? Draft() : Importer.Import(command, Draft()).Draft;
+            var reordered = Reordered(draft)!.AsObject();
+            Check.True(Json(reordered["cursorColor"]).StartsWith("{\"b\"", StringComparison.Ordinal), "witness: the saved colours must really be reordered");
+            Check.Equal(Cmd(draft), Cmd(reordered), $"'{command}' with reordered keys must copy the same command");
+            Check.Equal(Builder.BuildWebQueryString(draft), Builder.BuildWebQueryString(reordered), $"'{command}' with reordered keys must preview the same");
+        }
+        var changed = Reordered(Draft())!.AsObject();
+        changed["cursorColor"]!["g"] = 0.5;
+        Check.Equal("MatrixDesktop.exe --cursorColor 0.756,0.5,0.46", Cmd(changed), "a changed component of a reordered colour is still sent");
+    }
 
     // Values read from web/js/config.js and regl/stripePass.js, not from the catalog, so a wrong
     // C# table cannot agree with itself here. White is hsl(0, 0, 1); operator's cursor is

@@ -266,7 +266,7 @@ internal sealed partial class CommandBuilder
         if (!_defaultJsonByFieldId.TryGetValue(cacheKey, out var defaultJson))
         {
             var defaultNode = JsonSerializer.SerializeToNode(_metadata.EffectiveDefault(field, scene, uc3dMode, version, effect), _jsonOptions);
-            defaultJson = defaultNode is null ? null : NormalizeJson(defaultNode);
+            defaultJson = defaultNode is null ? null : CanonicalJson(defaultNode);
             _defaultJsonByFieldId[cacheKey] = defaultJson;
         }
 
@@ -275,8 +275,21 @@ internal sealed partial class CommandBuilder
             return IsEmpty(value);
         }
 
-        return NormalizeJson(value) == defaultJson;
+        return CanonicalJson(value) == defaultJson;
     }
+
+    // R2-44: key order is no difference. A draft saved by the close snapshot holds its colours
+    // as b, g, r and its palette stops as at, b, g, r, so comparing serialized text turned every
+    // default colour into a flag after a close and reopen. Objects compare with sorted keys.
+    private static string CanonicalJson(JsonNode node) => node is JsonObject or JsonArray ? NormalizeJson(Canonical(node)!) : NormalizeJson(node);
+
+    private static JsonNode? Canonical(JsonNode? node) => node switch
+    {
+        JsonObject obj => new JsonObject(obj.OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => KeyValuePair.Create(pair.Key, Canonical(pair.Value)))),
+        JsonArray array => new JsonArray(array.Select(Canonical).ToArray()),
+        _ => node?.DeepClone(),
+    };
 
     private bool IsEmpty(JsonNode value)
     {
