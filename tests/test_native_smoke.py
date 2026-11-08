@@ -355,7 +355,7 @@ class ProfileDeletionTests(unittest.TestCase):
                  patch.object(native.time, "sleep"), patch("sys.stdout", output):
                 native.stop_application(process)
                 native.report_leaked_profiles()
-            self.assertIn(f"WARN could not remove WebView2 profile {profile}", output.getvalue())
+            # The WARN line is test_removal_that_keeps_failing_warns_instead_of_raising's.
             self.assertIn(f"LEAKED 1 WebView2 profile(s): {profile}", output.getvalue())
 
     def test_the_leaked_line_prints_when_an_importing_script_exits(self):
