@@ -29,6 +29,7 @@ const state = {
 };
 
 const el = {
+	appShell: document.querySelector(".app-shell"),
 	storageStatus: document.querySelector("#storageStatus"),
 	presetSelect: document.querySelector("#presetSelect"),
 	newPresetButton: document.querySelector("#newPresetButton"),
@@ -294,7 +295,11 @@ const renderNav = () => {
 		button.addEventListener("click", () => {
 			state.activeGroupId = group.id;
 			const section = document.getElementById(`section-${group.id}`);
-			if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+			if (section) {
+				section.scrollIntoView({ behavior: "smooth", block: "start" });
+				// Focus moves with the view, so the next Tab continues inside the section.
+				section.querySelector(".section-title")?.focus({ preventScroll: true });
+			}
 			highlightNav();
 		});
 		el.sectionJump.append(button);
@@ -439,6 +444,7 @@ const renderFields = () => {
 
 		const header = document.createElement("h2");
 		header.className = "section-title";
+		header.tabIndex = -1; // the jump list focuses it
 		header.textContent = group.title;
 		section.append(header);
 
@@ -1463,12 +1469,25 @@ const bindEvents = () => {
 	}
 
 	if (el.helpButton && el.helpModal && el.helpBody && el.helpCloseButton) {
-		const closeHelp = () => { el.helpModal.hidden = true; };
+		// The dialog declares aria-modal, so it behaves as one: the page behind is inert, focus
+		// starts in the guide, Tab cycles inside the dialog and closing returns focus to the opener.
+		let opener = null;
+		const closeHelp = () => {
+			if (el.helpModal.hidden) return;
+			el.helpModal.hidden = true;
+			if (el.appShell) el.appShell.inert = false;
+			if (opener?.isConnected) opener.focus();
+			opener = null;
+		};
 		el.helpButton.addEventListener("click", async () => {
+			const from = document.activeElement;
 			try {
 				const result = await requestHost("loadHelp");
 				el.helpBody.textContent = result?.text ?? "Argument guide unavailable.";
+				opener = from;
+				if (el.appShell) el.appShell.inert = true;
 				el.helpModal.hidden = false;
+				el.helpBody.focus();
 			} catch (error) {
 				setStatus(`Help failed: ${error.message}`, "error");
 			}
@@ -1476,6 +1495,12 @@ const bindEvents = () => {
 		el.helpCloseButton.addEventListener("click", closeHelp);
 		el.helpModal.addEventListener("click", (event) => {
 			if (event.target === el.helpModal) closeHelp();
+		});
+		el.helpModal.addEventListener("keydown", (event) => {
+			if (event.key !== "Tab") return;
+			event.preventDefault();
+			const stops = [el.helpBody, el.helpCloseButton];
+			stops[(stops.indexOf(document.activeElement) + (event.shiftKey ? stops.length - 1 : 1)) % stops.length].focus();
 		});
 		document.addEventListener("keydown", (event) => {
 			if (event.key === "Escape" && !el.helpModal.hidden) closeHelp();

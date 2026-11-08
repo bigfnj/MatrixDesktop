@@ -38,6 +38,7 @@ STUB = """
         if (!response.ok) throw new Error(await response.text());
         payload = await response.json();
       } else if (msg.type === 'saveDraft') payload = {saved:true};
+      else if (msg.type === 'loadHelp') payload = {text:window.__helpText??null};
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
       else if (msg.type === 'restoreScreensaver') payload = {restored:true,message:'Synthetic restore action recorded.'};
@@ -426,6 +427,93 @@ def check_phrase_rows(page, _fixture):
     assert marked() == [False, False] and saved(page)["zmPhrases"] == [shown[1], "Third phrase"], "editing the repeat away did not clear its mark or save it: " + str(marked())
 
 
+def where(page):
+    return page.evaluate("""() => { const node = document.activeElement;
+        return {tag: node?.tagName, id: node?.id ?? '', cls: String(node?.className ?? ''),
+                field: node?.closest('[data-field]')?.dataset.field ?? null, popover: Boolean(node?.closest('.color-popover')),
+                modal: Boolean(node?.closest('#helpModal')), section: node?.closest('.field-section')?.id ?? null}; }""")
+
+
+def popover_box(page):
+    return page.evaluate("document.querySelector('.color-popover').getBoundingClientRect().top")
+
+
+def check_keyboard_focus(page, _fixture):
+    swatch = field(page, "cursorColor").locator(".color-swatch")
+    hex_box = page.locator(".color-popover .cp-hex")
+    swatch.evaluate("node => node.scrollIntoView({block: 'center'})")
+    swatch.focus()
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)  # the popover focuses its hex box on the next frame
+    assert "cp-hex" in where(page)["cls"], "opening the popover did not move focus into its hex box: " + str(where(page))
+    # cursorColor is saturated, so a hue step changes its hex (black would not).
+    for selector, key in ((".cp-hue", "ArrowRight"), (".cp-square", "ArrowDown")):
+        before = hex_box.input_value()
+        page.locator(".color-popover " + selector).focus()
+        page.keyboard.press(key)
+        assert hex_box.input_value() != before, key + " on " + selector + " did not change the colour from " + before
+    # The popover is fixed to the viewport and follows its swatch when the field surface scrolls.
+    anchor_before, box_before = swatch.bounding_box()["y"], popover_box(page)
+    page.locator("#fieldSurface").evaluate("node => node.scrollBy(0, 60)")
+    page.wait_for_timeout(150)
+    moved = (swatch.bounding_box()["y"] - anchor_before, popover_box(page) - box_before)
+    assert abs(moved[0] + 60) < 1 and abs(moved[1] - moved[0]) < 1, "scrolling left the popover behind its swatch (swatch, popover moved): " + str(moved)
+    page.keyboard.press("Escape")
+    now = where(page)
+    assert popover_hidden(page) and now["field"] == "cursorColor" and now["tag"] == "BUTTON", "Escape did not close the popover and return focus to its swatch: " + str(now)
+    # Tab order treats the popover as if it sat right after its swatch, which it closes behind it.
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)
+    for _ in range(3):  # from the hex box to the hue bar, the square, then out of the popover
+        page.keyboard.press("Shift+Tab")
+    now = where(page)
+    assert popover_hidden(page) and now["field"] == "cursorColor" and now["tag"] == "BUTTON", "Shift+Tab out of the popover did not close it and return to its swatch: " + str(now)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)
+    for _ in range(4):  # from the hex box to R, G, B, then out of the popover
+        page.keyboard.press("Tab")
+    now = where(page)
+    assert popover_hidden(page) and now["field"] == "cursorColor" and now["tag"] == "INPUT", "Tab out of the popover did not close it and move on from its swatch: " + str(now)
+    # Focus moved out of it by anything else (assistive technology, a script) closes it too.
+    page.keyboard.press("Shift+Tab")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)
+    assert not popover_hidden(page), "Enter on the swatch did not reopen the popover: " + str(where(page))
+    page.locator("#fieldFilter").focus()
+    assert popover_hidden(page), "focus moved outside the popover left it open: " + str(where(page))
+    # Help honours its aria-modal: focus starts inside, stays inside, and returns to the opener.
+    page.locator("#helpButton").focus()
+    page.keyboard.press("Enter")
+    page.wait_for_function("!document.querySelector('#helpModal').hidden")
+    assert where(page)["id"] == "helpBody", "opening help did not move focus to the guide: " + str(where(page))
+    # Tab cycles between Close and the guide, so the guide stays reachable for arrow-key scrolling.
+    trail = []
+    for _ in range(3):
+        page.keyboard.press("Tab")
+        trail.append(where(page)["id"] or where(page)["tag"])
+    assert trail == ["helpCloseButton", "helpBody", "helpCloseButton"], "Tab did not cycle between Close and the guide inside the open help dialog: " + str(trail)
+    page.locator("#fieldFilter").focus()
+    assert where(page)["modal"], "the page behind the open help dialog still takes focus: " + str(where(page))
+    page.keyboard.press("Escape")
+    now = where(page)
+    assert page.locator("#helpModal").is_hidden() and now["id"] == "helpButton", "closing help did not return focus to the help button: " + str(now)
+    # Focus starts in the guide, so a guide longer than the dialog scrolls with the arrow keys at once.
+    page.evaluate("window.__helpText = Array.from({length: 400}, (_, i) => 'Line ' + i).join(String.fromCharCode(10))")
+    page.keyboard.press("Enter")
+    page.wait_for_function("!document.querySelector('#helpModal').hidden")
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(400)
+    assert page.evaluate("document.querySelector('#helpBody').scrollTop") > 0, "ArrowDown in the open help dialog did not scroll the guide: " + str(where(page))
+    page.keyboard.press("Escape")
+    # A section jump moves focus with the view.
+    page.locator("#sectionJump button[data-group='advanced']").focus()
+    page.keyboard.press("Enter")
+    assert where(page)["section"] == "section-advanced", "the advanced jump left focus outside its section: " + str(where(page))
+    page.keyboard.press("Tab")
+    now = where(page)
+    assert now["section"] == "section-advanced" and now["field"], "Tab after the advanced jump did not reach its first field: " + str(now)
+
+
 CONTROL_ROLES = {"checkbox", "combobox", "textbox", "searchbox", "spinbutton", "slider", "button", "listbox"}
 COMPOUND_KINDS = {"color", "rgb8", "font", "phrases", "palette", "stripes"}
 
@@ -645,6 +733,7 @@ CHECKS = [
     ("Hex boxes refuse invalid colours and read text as the popover does", check_invalid_hex),
     ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
     ("Phrase editor shows and counts each saved phrase once", check_phrase_rows),
+    ("Keyboard focus moves into and back out of the popover, help and section jumps", check_keyboard_focus),
     ("Field controls have accessible names and their labels operate them", check_accessible_names),
     ("Font-name boxes share one installed-font list across re-renders", check_font_list),
     ("Filter finds the screensaver actions by their own text", check_filter_actions),
@@ -674,6 +763,8 @@ def main():
     print("SOURCE", source, "sha256=" + hashlib.sha256(source.read_bytes()).hexdigest(), flush=True)
     picker_source = CONFIGURATOR / "js" / "colorPicker.js"
     print("PICKER", picker_source, "sha256=" + hashlib.sha256(picker_source.read_bytes()).hexdigest(), flush=True)
+    page_source = CONFIGURATOR / "index.html"
+    print("PAGE", page_source, "sha256=" + hashlib.sha256(page_source.read_bytes()).hexdigest(), flush=True)
     print("HARNESS", HARNESS, "sha256=" + hashlib.sha256(HARNESS.with_suffix(".dll").read_bytes()).hexdigest(), flush=True)
     try:
         from playwright.sync_api import sync_playwright
@@ -704,6 +795,7 @@ def main():
                     page.wait_for_function("document.querySelectorAll('.field').length>40")
                     assert page.request.get(origin + "/js/app.js").body() == source.read_bytes(), "served source witness mismatch"
                     assert page.request.get(origin + "/js/colorPicker.js").body() == picker_source.read_bytes(), "served colorPicker witness mismatch"
+                    assert page.request.get(origin + "/index.html").body() == page_source.read_bytes(), "served index.html witness mismatch"
                     function(page, fixture)
                     assert not errors, "; ".join(errors)
                     print("PASS", name, flush=True)

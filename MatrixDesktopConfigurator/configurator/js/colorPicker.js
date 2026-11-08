@@ -74,14 +74,16 @@ let refs = null;   // cached element references (built once)
 let ctx = null;    // { hsv, color, onChange, anchor }
 let outsideHandler = null;
 let keyHandler = null;
+let focusHandler = null;
+let scrollHandler = null;
 
 const build = () => {
 	const root = document.createElement("div");
 	root.className = "color-popover";
 	root.hidden = true;
 	root.innerHTML = `
-		<div class="cp-square" tabindex="-1"><div class="cp-square-thumb"></div></div>
-		<div class="cp-hue"><div class="cp-hue-thumb"></div></div>
+		<div class="cp-square" tabindex="0" role="slider" aria-label="Saturation and brightness" aria-valuemin="0" aria-valuemax="100"><div class="cp-square-thumb"></div></div>
+		<div class="cp-hue" tabindex="0" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360"><div class="cp-hue-thumb"></div></div>
 		<div class="cp-inputs">
 			<label class="cp-hex-field">HEX<input type="text" class="cp-hex" spellcheck="false" maxlength="7" /></label>
 			<div class="cp-rgb">
@@ -130,6 +132,10 @@ const render = (skip) => {
 	refs.squareThumb.style.top = `${(1 - v) * 100}%`;
 	refs.squareThumb.style.background = hex;
 	refs.hueThumb.style.left = `${(h / 360) * 100}%`;
+	refs.square.setAttribute("aria-valuenow", String(Math.round(s * 100)));
+	refs.square.setAttribute("aria-valuetext", `Saturation ${Math.round(s * 100)}%, brightness ${Math.round(v * 100)}%`);
+	refs.hue.setAttribute("aria-valuenow", String(Math.round(h)));
+	refs.hue.setAttribute("aria-valuetext", `Hue ${Math.round(h)} degrees`);
 	if (skip !== refs.hex) {
 		refs.hex.value = hex;
 		refs.hex.classList.remove("invalid-input");
@@ -201,6 +207,36 @@ const wire = () => {
 	refs.square.addEventListener("pointerdown", startDrag(dragSquare));
 	refs.hue.addEventListener("pointerdown", startDrag((x) => dragHue(x)));
 
+	// Arrow keys step the square (saturation across, brightness up and down) by 0.01 and the hue
+	// bar by 1 degree, ten times that with Shift, so neither needs a pointer.
+	refs.square.addEventListener("keydown", (event) => {
+		const step = event.shiftKey ? 0.1 : 0.01;
+		const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowDown: [0, -step], ArrowUp: [0, step] }[event.key];
+		if (!delta || !liveContext()) return;
+		event.preventDefault();
+		ctx.hsv.s = clamp01(ctx.hsv.s + delta[0]);
+		ctx.hsv.v = clamp01(ctx.hsv.v + delta[1]);
+		emit();
+	});
+	refs.hue.addEventListener("keydown", (event) => {
+		const step = event.shiftKey ? 10 : 1;
+		const delta = { ArrowLeft: -step, ArrowDown: -step, ArrowRight: step, ArrowUp: step }[event.key];
+		if (!delta || !liveContext()) return;
+		event.preventDefault();
+		ctx.hsv.h = Math.max(0, Math.min(360, ctx.hsv.h + delta));
+		emit();
+	});
+	// The popover is the last element of the page but belongs to its swatch: Shift+Tab before its
+	// first control returns to the swatch, and Tab past its last moves on from the swatch.
+	refs.root.addEventListener("keydown", (event) => {
+		if (event.key !== "Tab" || event.target !== (event.shiftKey ? refs.square : refs.b) || !ctx) return;
+		const { anchor } = ctx;
+		closeColorPicker();
+		if (!anchor.isConnected) return;
+		if (event.shiftKey) event.preventDefault();
+		anchor.focus(); // without preventDefault the browser's own Tab then leaves the swatch
+	});
+
 	refs.hex.addEventListener("input", () => {
 		if (!liveContext()) return;
 		const color = parseHex(refs.hex.value);
@@ -237,8 +273,12 @@ const position = (anchor) => {
 const detachGlobal = () => {
 	if (outsideHandler) document.removeEventListener("pointerdown", outsideHandler, true);
 	if (keyHandler) document.removeEventListener("keydown", keyHandler);
+	if (focusHandler) document.removeEventListener("focusin", focusHandler, true);
+	if (scrollHandler) document.removeEventListener("scroll", scrollHandler, true);
 	outsideHandler = null;
 	keyHandler = null;
+	focusHandler = null;
+	scrollHandler = null;
 };
 
 export const closeColorPicker = () => {
@@ -260,11 +300,27 @@ export const openColorPicker = (anchor, color, onChange) => {
 		if (refs.root.contains(event.target) || anchor === event.target || anchor.contains(event.target)) return;
 		closeColorPicker();
 	};
-	keyHandler = (event) => { if (event.key === "Escape") closeColorPicker(); };
+	// Escape hands focus back to the swatch that opened the popover, and focus moved anywhere
+	// outside the popover and its swatch by other means (assistive technology, a script) closes it.
+	keyHandler = (event) => {
+		if (event.key !== "Escape") return;
+		closeColorPicker();
+		if (anchor.isConnected) anchor.focus();
+	};
+	focusHandler = (event) => {
+		if (refs.root.contains(event.target) || anchor.contains(event.target)) return;
+		closeColorPicker();
+	};
+	// The popover is fixed to the viewport, so it follows its swatch when the page scrolls.
+	scrollHandler = () => { if (ctx) position(ctx.anchor); };
 	// Defer so the click that opened the popover doesn't immediately close it.
 	setTimeout(() => {
 		if (!ctx) return;
 		document.addEventListener("pointerdown", outsideHandler, true);
 		document.addEventListener("keydown", keyHandler);
+		document.addEventListener("focusin", focusHandler, true);
+		document.addEventListener("scroll", scrollHandler, true);
 	}, 0);
+	// Keyboard users land in the popover, which is the last element of the page.
+	requestAnimationFrame(() => { if (ctx?.anchor === anchor) refs.hex.focus(); });
 };
