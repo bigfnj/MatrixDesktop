@@ -105,6 +105,11 @@ function Stop-Harness {
     exit 3
 }
 
+# Decision logic shared with the gate's self-tests (tests\gate-lib.tests.ps1).
+$GateLib = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'gate-lib.ps1'
+if (-not (Test-Path -LiteralPath $GateLib -PathType Leaf)) { Stop-Harness "gate library missing: $GateLib" }
+. $GateLib
+
 $GatePublishDir = Join-Path $RepoRoot 'artifacts\gate\win-x64-fd'
 $ShotDir = Join-Path $RepoRoot 'artifacts\gate\shots'
 # 2026-10-23: a live installed MatrixDesktop can share WebView2's browser process
@@ -712,15 +717,49 @@ try {
                 Test-Fail $case.Name "missing: $path"
                 continue
             }
-            $run = Start-Process -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Wait -PassThru -NoNewWindow `
-                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-            if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
-            elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
+            # Exit 2 is UNCHECKED only with a printed cannot-verify witness: argparse usage
+            # errors and a missing script also exit 2, and those are harness failures.
+            $verdict = Invoke-GateChildCase -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Log $log
+            if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
+            elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
             else {
-                Test-Fail $case.Name "exit $($run.ExitCode); see $log"
+                Test-Fail $case.Name $verdict.Detail
                 foreach ($line in @(Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40)) {
                     Write-Host ("    " + $line)
                 }
+            }
+        }
+    }
+
+    # The gate's own decision logic, run under both shells the gate supports. Windows
+    # PowerShell 5.1 is the documented full-gate shell and pwsh is what CI runs, and the two
+    # differ in ways that only show up at runtime (native stderr, -AsHashtable and so on).
+    Test-Hdr 'tier 1: gate self-tests'
+    $gateShells = @(
+        @{ Label = 'Windows PowerShell 5.1'; Path = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') },
+        @{ Label = 'PowerShell 7'; Path = $(if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source } else { $null }) }
+    )
+    foreach ($selfTest in @(
+        @{ Name = 'gate decision library'; Script = 'tests\gate-lib.tests.ps1'; Witness = '(?m)^GATE-LIB SELF-TEST PASSED \(\d+ cases' }
+    )) {
+        $selfTestPath = Join-Path $RepoRoot $selfTest.Script
+        foreach ($gateShell in $gateShells) {
+            $selfTestName = "$($selfTest.Name) under $($gateShell.Label)"
+            if (-not $gateShell.Path -or -not (Test-Path -LiteralPath $gateShell.Path -PathType Leaf)) {
+                Test-Unchecked $selfTestName "$($gateShell.Label) is not installed"
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $selfTestPath -PathType Leaf)) { Test-Fail $selfTestName "missing: $selfTestPath"; continue }
+            $selfTestArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $selfTestPath + '"'
+            if ($py) { $selfTestArgs += ' -Python "' + $py + '"' }
+            $selfTestLog = Join-Path $env:TEMP ('md-gate-' + ($selfTestName -replace '[^A-Za-z0-9]+', '-') + '.log')
+            $verdict = Invoke-GateChildCase -FilePath $gateShell.Path -ArgumentList $selfTestArgs -Log $selfTestLog -Witness $selfTest.Witness
+            if ($verdict.Outcome -eq 'ok') { Test-Ok $selfTestName }
+            elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $selfTestName $verdict.Detail }
+            else {
+                Test-Fail $selfTestName $verdict.Detail
+                Get-Content -LiteralPath $selfTestLog, "$selfTestLog.err" -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match '^(FAIL|CANNOT VERIFY)' } | ForEach-Object { Write-Host "               $_" -ForegroundColor Red }
             }
         }
     }
@@ -1297,14 +1336,17 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 continue
             }
             $path = Join-Path $RepoRoot $case.Script
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Test-Fail $case.Name "missing: $path"
+                continue
+            }
             $log = Join-Path $ShotDir (($case.Name -replace ' ', '-') + '.log')
-            $run = Start-Process -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Wait -PassThru -NoNewWindow `
-                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-            if ($run.ExitCode -eq 0) { Test-Ok $case.Name }
-            elseif ($run.ExitCode -eq 2) { Test-Unchecked $case.Name "unavailable environment; see $log" }
+            $verdict = Invoke-GateChildCase -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Log $log
+            if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
+            elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
             else {
-                Test-Fail $case.Name "exit $($run.ExitCode); see $log"
-                Get-Content -LiteralPath $log, "$log.err" | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
+                Test-Fail $case.Name $verdict.Detail
+                Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
             }
         }
     }
