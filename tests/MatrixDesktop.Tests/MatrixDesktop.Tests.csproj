@@ -87,5 +87,6 @@
     <Compile Include="..\..\MatrixDesktopConfigurator\DraftRandomizer.cs" Link="Production\DraftRandomizer.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\DraftCloseFlush.cs" Link="Production\DraftCloseFlush.cs" />
     <Compile Include="..\..\MatrixDesktopConfigurator\SingleInstanceGuard.cs" Link="Production\SingleInstanceGuard.cs" />
+    <Compile Include="..\..\MatrixDesktopConfigurator\PresetOperations.cs" Link="Production\PresetOperations.cs" />
   </ItemGroup>
 </Project>

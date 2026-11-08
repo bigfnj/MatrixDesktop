@@ -1,4 +1,5 @@
 using MatrixDesktopConfigurator;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace MatrixDesktop.Tests;
@@ -18,6 +19,7 @@ internal static class StorageTests
         ("An unreadable live file is moved aside rather than overwritten", UnreadableFileIsQuarantined),
         ("An empty live file yields fresh state rather than an error", EmptyFileIsNotCorruption),
         ("Null preset records and values recover without changing valid data or backups", NullPresetContainersRecover),
+        ("Renaming a preset changes only its name", RenameChangesOnlyName),
     ];
 
     private static void Cleanup(StorageService storage)
@@ -230,5 +232,40 @@ internal static class StorageTests
                 Directory.Delete(fixtureDirectory);
             }
         }
+    }
+
+    private static void RenameChangesOnlyName()
+    {
+        // AUD-02. Killing mutation: assign Values from LastDraft inside Rename; the saved
+        // values assertion fails.
+        var created = DateTimeOffset.Parse("2026-01-02T03:04:05Z");
+        var now = DateTimeOffset.Parse("2026-11-08T12:00:00Z");
+        var state = new ConfiguratorState { SelectedPresetId = "night", LastDraft = new JsonObject { ["effect"] = "stripes" } };
+        state.UserPresets.Add(new UserPreset { Id = "night", Name = "Night", CreatedUtc = created, UpdatedUtc = created, Values = new JsonObject { ["effect"] = "palette" } });
+        state.UserPresets.Add(new UserPreset { Id = "dawn", Name = "Dawn", CreatedUtc = created, UpdatedUtc = created, Values = new JsonObject { ["effect"] = "plain" } });
+        UserPreset Rename(string json)
+        {
+            using var request = JsonDocument.Parse(json);
+            return PresetOperations.Rename(state, request.RootElement, now);
+        }
+
+        var renamed = Rename("""{"id":"night","name":"  Midnight  "}""");
+        Check.True(ReferenceEquals(state.UserPresets[0], renamed), "the reply carries the renamed preset itself");
+        Check.Equal("Midnight", renamed.Name, "the new name is applied, trimmed");
+        Check.Equal("palette", renamed.Values["effect"]!.GetValue<string>(), "a rename must keep the preset's saved values, not commit the working draft");
+        Check.Equal("stripes", state.LastDraft["effect"]!.GetValue<string>(), "the unsaved working draft stays the working draft");
+        Check.Equal("night", state.SelectedPresetId!, "the selection does not change");
+        Check.Equal(now, renamed.UpdatedUtc, "the modification time records the rename");
+        Check.Equal(created, renamed.CreatedUtc, "the creation time does not change");
+
+        Check.Equal("Midnight", Rename("""{"id":"night","name":"   "}""").Name, "a blank name keeps the old one");
+        var other = Rename("""{"id":"DAWN","name":"Sunrise"}""");
+        Check.True(other.Name == "Sunrise" && other.Values["effect"]!.GetValue<string>() == "plain" && state.SelectedPresetId == "night",
+            "renaming another preset (ids compare case-insensitively) touches only that preset and keeps the selection");
+
+        var refused = false;
+        try { Rename("""{"id":"gone","name":"Ghost"}"""); }
+        catch (InvalidOperationException) { refused = true; }
+        Check.True(refused && state.UserPresets.Count == 2, "renaming a preset that no longer exists is an error, never a new preset");
     }
 }
