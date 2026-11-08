@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from urllib.parse import quote
 from pathlib import Path
@@ -25,6 +26,46 @@ STUB = """
   window.__smokeMessages = [];
   window.__smokeReplies = [];
   window.__heldPreviewReplies = [];
+  // The preset store, applied synchronously in arrival order as ConfiguratorForm does:
+  // SaveDraft, SavePreset, DeletePreset and the renamePreset contract (Name only).
+  // scratchDraft follows the host contract: a sent object wins; when absent an unlinked save
+  // derives it from the draft and a linked save keeps it.
+  const host = window.__host = structuredClone(state.state);
+  const same = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+  const object = value => value && typeof value === 'object' && !Array.isArray(value) ? structuredClone(value) : {};
+  const text = value => typeof value === 'string' ? value : null;
+  const reply = preset => ({preset: structuredClone(preset), state: structuredClone(host)});
+  const store = {
+    saveDraft: p => {
+      host.lastDraft = object(p.draft); host.selectedPresetId = text(p.selectedPresetId);
+      if (p.scratchDraft && typeof p.scratchDraft === 'object' && !Array.isArray(p.scratchDraft)) host.scratchDraft = structuredClone(p.scratchDraft);
+      else if (!host.selectedPresetId) host.scratchDraft = object(p.draft);
+      return {saved:true};
+    },
+    savePreset: p => {
+      const id = text(p.preset.id)?.trim() ? p.preset.id : crypto.randomUUID().replaceAll('-', '');
+      let preset = host.userPresets.find(item => same(item.id, id));
+      if (!preset) host.userPresets.push(preset = {id});
+      preset.name = text(p.preset.name)?.trim() ? p.preset.name : 'Untitled preset';
+      preset.values = object(p.preset.values);
+      host.selectedPresetId = id; host.lastDraft = structuredClone(preset.values);
+      return reply(preset);
+    },
+    renamePreset: p => {
+      const preset = host.userPresets.find(item => same(item.id, text(p.id)));
+      if (!preset) throw new Error('Unknown preset.');
+      if (text(p.name)?.trim()) preset.name = p.name.trim();
+      return reply(preset);
+    },
+    deletePreset: p => {
+      const id = text(p.id);
+      if (id?.trim()) {
+        host.userPresets = host.userPresets.filter(item => !same(item.id, id));
+        if (same(host.selectedPresetId, id)) host.selectedPresetId = null;
+      }
+      return {state: structuredClone(host)};
+    },
+  };
   window.chrome = window.chrome || {};
   window.chrome.webview = { postMessage: async msg => {
     window.__smokeMessages.push(structuredClone(msg));
@@ -35,15 +76,19 @@ STUB = """
         const response = await fetch('/__host', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(msg)});
         if (!response.ok) throw new Error(await response.text());
         payload = await response.json();
-      } else if (msg.type === 'saveDraft') payload = {saved:true};
+      } else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
       else if (msg.type === 'restoreScreensaver') payload = {restored:true,message:'Synthetic restore action recorded.'};
+      else if (msg.type === 'exportPowerShell') {  // {script, copied}, or {error} for a failed export, set by the check
+        if (window.__exportReply?.error) throw new Error(window.__exportReply.error);
+        payload = window.__exportReply;
+      }
       window.__smokeReplies.push({type:msg.type,payload:structuredClone(payload)});
       if(msg.type==='buildWebQuery' && window.__holdPreviewReplies) {
         window.__heldPreviewReplies.push({id:msg.id,ok:true,payload});return;
       }
-      setTimeout(() => window.configHost.receive({id:msg.id,ok:true,payload}),0);
+      setTimeout(() => window.configHost.receive({id:msg.id,ok:true,payload}),window.__replyDelay||0);
     } catch (error) { window.configHost.receive({id:msg.id,ok:false,payload:{message:String(error)}}); }
   }};
 })();
@@ -333,6 +378,314 @@ def check_preview_race(page, _fixture):
     assert page.locator("#previewFrame").get_attribute("src") == expected, "a preview reply navigated after the pane was hidden"
 
 
+def check_doc_labels(page, _fixture):
+    # README, docs/ZMATRIX.md and the guide (shown by the configurator's own ? modal) name
+    # these controls; each rendered label must appear in each document, read-only from disk.
+    docs = {name: " ".join((ROOT / name).read_text(encoding="utf-8").split())
+            for name in ("README.md", "docs/ZMATRIX.md", "MatrixDesktop_Argument_Guide.txt")}
+    problems = []
+    for selector in ("#screensaverButton", "#restoreScreensaverButton"):
+        label = " ".join(page.locator(selector).inner_text().split())
+        assert label, selector + " rendered no label"
+        problems += [name + " does not name " + selector + " '" + label + "'" for name, text in docs.items() if label not in text]
+    assert not problems, "; ".join(problems)
+
+
+def preset_store(fixture):
+    # A saved store with two presets and an unlinked working draft of 33 columns.
+    def values(columns):
+        return dict(fixture["defaultDraft"], numColumns=columns)
+    presets = [{"id": "alpha", "name": "Alpha", "values": values(50)}, {"id": "beta", "name": "Beta", "values": values(60)}]
+    return dict(fixture, state=dict(fixture["state"], selectedPresetId=None, lastDraft=values(33), userPresets=presets))
+
+
+def check_rename(page, _fixture):
+    columns = field(page, "numColumns").locator('input[type="number"]')
+    page.locator("#presetSelect").select_option("alpha")
+    assert columns.input_value() == "50", "the Alpha preset did not load: " + columns.input_value()
+    columns.fill("77")
+    assert saved(page)["numColumns"] == 77, "the edit was not autosaved as the working draft"
+    page.once("dialog", lambda dialog: dialog.accept("Alpha renamed"))
+    page.locator("#renamePresetButton").click()
+    page.wait_for_function("[...document.querySelector('#presetSelect').options].some(option=>option.text==='Alpha renamed')")
+    host = page.evaluate("window.__host")
+    alpha = next(preset for preset in host["userPresets"] if preset["id"] == "alpha")
+    assert alpha["values"]["numColumns"] == 50, "Rename committed the unsaved draft to the preset's saved values: " + str(alpha["values"]["numColumns"])
+    assert columns.input_value() == "77", "Rename replaced the working draft in the editor"
+    assert host["selectedPresetId"] == "alpha" and host["lastDraft"]["numColumns"] == 77, "Rename changed the stored selection or draft"
+    assert page.locator("#presetSelect").input_value() == "alpha", "Rename lost the dropdown selection"
+    renames = [message["payload"] for message in page.evaluate("window.__smokeMessages") if message["type"] == "renamePreset"]
+    assert renames == [{"id": "alpha", "name": "Alpha renamed"}], "Rename must send only the id and name: " + json.dumps(renames)
+    assert page.locator("#statusLine").inner_text() == "Preset renamed.", page.locator("#statusLine").inner_text()
+
+
+def relaunch(page, fixture, stored):
+    # A second configurator page loaded from the store the first page left behind.
+    fresh = page.context.browser.new_page(viewport={"width": 1280, "height": 860})
+    errors = []
+    fresh.on("pageerror", lambda error: errors.append(str(error)))
+    fresh.add_init_script(STUB.replace("__STATE__", json.dumps(dict(fixture, state=stored), ensure_ascii=False)))
+    fresh.goto(page.url, wait_until="load")
+    fresh.wait_for_function("document.querySelectorAll('.field').length>40")
+    return fresh, errors
+
+
+def check_scratch_draft(page, fixture):
+    def columns(target):
+        return field(target, "numColumns").locator('input[type="number"]').input_value()
+    drafts = "window.__smokeMessages.filter(m=>m.type==='saveDraft').map(m=>m.payload)"
+    presets = page.locator("#presetSelect")
+    assert columns(page) == "33", "the unlinked draft did not load: " + columns(page)
+    presets.select_option("alpha")
+    page.wait_for_timeout(400)
+    witness = page.evaluate(drafts)[-1]
+    assert witness["selectedPresetId"] == "alpha" and witness["draft"]["numColumns"] == 50, "no saveDraft witnessed the Alpha selection"
+    presets.select_option("")
+    page.wait_for_timeout(400)
+    assert columns(page) == "33", "Last draft brought back the preset instead of the unlinked draft: " + columns(page)
+    last = page.evaluate(drafts)[-1]
+    assert last["selectedPresetId"] is None and last["draft"]["numColumns"] == 33, "the Last draft save stored the wrong draft or selection"
+    # An unlinked edit still inside the save debounce when a preset is chosen.
+    page.evaluate("""() => {
+        const input = document.querySelector('[data-field="numColumns"] input[type=number]');
+        input.value = '44'; input.dispatchEvent(new Event('input', {bubbles: true}));
+        const select = document.querySelector('#presetSelect');
+        select.value = 'beta'; select.dispatchEvent(new Event('change', {bubbles: true}));
+    }""")
+    assert columns(page) == "60", "the Beta preset did not load: " + columns(page)
+    page.wait_for_timeout(400)
+    presets.select_option("")
+    assert columns(page) == "44", "choosing a preset inside the save debounce lost the unlinked edit: " + columns(page)
+    presets.select_option("alpha")
+    page.wait_for_timeout(400)
+    stored = page.evaluate("window.__host")
+    assert stored["selectedPresetId"] == "alpha" and stored.get("scratchDraft", {}).get("numColumns") == 44, "the store did not keep the unlinked draft beside the selected preset"
+    # A relaunch, then a store written before scratchDraft existed (falls back to the last draft).
+    old_store = {key: value for key, value in stored.items() if key != "scratchDraft"}
+    for state, expected, label in ((stored, "44", "after a relaunch"), (old_store, "50", "for a store without scratchDraft")):
+        fresh, errors = relaunch(page, fixture, state)
+        try:
+            assert columns(fresh) == "50", "the relaunch did not restore the selected preset's draft: " + columns(fresh)
+            fresh.locator("#presetSelect").select_option("")
+            assert columns(fresh) == expected, "Last draft " + label + " gave " + columns(fresh) + ", not " + expected
+            assert not errors, "; ".join(errors)
+        finally:
+            fresh.close()
+
+
+def held_dialog(answer=None):
+    # The page stays blocked in confirm()/prompt() past the 250 ms draft-save deadline. Callers
+    # also give the stub a real host's reply latency (15 ms), or the reply beats the overdue save.
+    def handle(dialog):
+        time.sleep(0.35)
+        dialog.accept(answer) if answer is not None else dialog.accept()
+    return handle
+
+
+def edit_then_click(page, selector):
+    # numColumns 77 arms the draft save and the click follows in the same task, so the save is
+    # still pending when the action starts; the state at click time is the witness.
+    return page.evaluate("""selector => {
+        const saves = () => window.__smokeMessages.filter(m => m.type === 'saveDraft').length;
+        const before = window.__smokeMessages.length, count = saves();
+        const input = document.querySelector('[data-field="numColumns"] input[type=number]');
+        input.value = '77'; input.dispatchEvent(new Event('input', {bubbles: true}));
+        const button = document.querySelector(selector);
+        let atClick = null;
+        button.addEventListener('click', () => {
+            atClick = {saves: saves(), label: document.querySelector('#saveState').textContent};
+        }, {capture: true, once: true});
+        button.click();
+        return {before, count, atClick};
+    }""", selector)
+
+
+def preset_messages(page, start):
+    sent = []
+    for message in page.evaluate("window.__smokeMessages")[start:]:
+        payload = message["payload"]
+        if message["type"] == "saveDraft":
+            sent.append("saveDraft(" + str(payload["selectedPresetId"]) + "," + str(payload["draft"]["numColumns"]) + ")")
+        elif message["type"] in ("deletePreset", "savePreset"):
+            sent.append(message["type"] + "(" + (payload.get("id") or payload.get("preset", {}).get("name")) + ")")
+    return sent
+
+
+def check_pending_save_delete(page, _fixture):
+    page.locator("#presetSelect").select_option("alpha")
+    page.wait_for_timeout(400)
+    page.evaluate("window.__replyDelay=15")
+    page.once("dialog", held_dialog())
+    witness = edit_then_click(page, "#deletePresetButton")
+    assert witness["atClick"] == {"saves": witness["count"], "label": "Saving…"}, "the draft save was not pending at the click: " + json.dumps(witness)
+    page.wait_for_function("window.__smokeReplies.some(r=>r.type==='deletePreset')")
+    page.wait_for_timeout(400)
+    sent = preset_messages(page, witness["before"])
+    assert sent == ["saveDraft(alpha,77)", "deletePreset(alpha)"], "a draft save pending at Delete arrived out of order: " + ", ".join(sent)
+    host = page.evaluate("window.__host")
+    assert host["selectedPresetId"] is None and host["lastDraft"]["numColumns"] == 77, "the store kept a deleted selection or lost the edit"
+
+
+def check_pending_save_save_as(page, _fixture):
+    page.locator("#presetSelect").select_option("alpha")
+    page.wait_for_timeout(400)
+    page.evaluate("window.__replyDelay=15")
+    page.once("dialog", held_dialog("Gamma"))
+    witness = edit_then_click(page, "#saveAsPresetButton")
+    assert witness["atClick"] == {"saves": witness["count"], "label": "Saving…"}, "the draft save was not pending at the click: " + json.dumps(witness)
+    page.wait_for_function("window.__smokeReplies.some(r=>r.type==='savePreset')")
+    page.wait_for_timeout(400)
+    sent = preset_messages(page, witness["before"])
+    assert sent == ["saveDraft(alpha,77)", "savePreset(Gamma)"], "a draft save pending at Save As arrived out of order: " + ", ".join(sent)
+    host = page.evaluate("window.__host")
+    gamma = next(preset for preset in host["userPresets"] if preset["name"] == "Gamma")
+    assert host["selectedPresetId"] == gamma["id"] and host["lastDraft"]["numColumns"] == 77, "the store did not select the new preset with the edit"
+
+
+def check_settled_save(page, _fixture):
+    # Control: nothing pending, so Delete must not post a draft save of its own.
+    page.locator("#presetSelect").select_option("alpha")
+    field(page, "numColumns").locator('input[type="number"]').fill("77")
+    page.wait_for_timeout(600)
+    start = page.evaluate("window.__smokeMessages.length")
+    assert preset_messages(page, 0)[-1] == "saveDraft(alpha,77)", "the edit was not saved before the control"
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#deletePresetButton").click()
+    page.wait_for_function("window.__smokeReplies.some(r=>r.type==='deletePreset')")
+    page.wait_for_timeout(400)
+    sent = preset_messages(page, start)
+    assert sent == ["deletePreset(alpha)"], "Delete posted a draft save with nothing pending: " + ", ".join(sent)
+    host = page.evaluate("window.__host")
+    assert host["selectedPresetId"] is None and host["lastDraft"]["numColumns"] == 77, "the control store is wrong"
+
+
+def check_test_exited(page, _fixture):
+    stop, status = page.locator("#stopButton"), page.locator("#statusLine")
+    launches = "window.__smokeReplies.filter(r=>r.type==='testCommand').length"
+    page.locator("#testButton").click()
+    page.wait_for_function("!document.querySelector('#stopButton').disabled")
+    pid = page.evaluate("window.__smokeReplies.filter(r=>r.type==='testCommand').at(-1).payload.processId")
+    assert pid == 123 and "Launched test process 123" in status.inner_text(), "launch witness: " + status.inner_text()
+    page.evaluate("pid=>configHost.testExited(pid)", pid - 1)
+    assert stop.is_enabled(), "a stale test exit notice disabled Stop Test"
+    assert "Launched test process 123" in status.inner_text(), "a stale test exit notice replaced the status"
+    page.evaluate("pid=>configHost.testExited(pid)", pid)
+    assert stop.is_disabled(), "the running test's exit notice left Stop Test enabled"
+    assert status.inner_text() == "Test window closed.", status.inner_text()
+    page.locator("#testButton").click()
+    page.wait_for_function(launches + "===2 && !document.querySelector('#stopButton').disabled")
+    stop.click()
+    page.wait_for_function("document.querySelector('#statusLine').textContent==='Test process stopped.'")
+    page.evaluate("pid=>configHost.testExited(pid)", pid)
+    assert status.inner_text() == "Test process stopped.", "a notice for a stopped test replaced its status: " + status.inner_text()
+
+
+def apply_import(page, text):
+    # One import through the real C# importer: the status line it left and the host's reply.
+    replies = "window.__smokeReplies.filter(r=>r.type==='importCommand')"
+    count = page.evaluate(replies + ".length")
+    page.locator("#importButton").click()
+    page.locator("#importInput").fill(text)
+    page.locator("#applyImportButton").click()
+    page.wait_for_function("n=>" + replies + ".length>n && document.querySelector('#importPanel').hidden", arg=count)
+    return page.locator("#statusLine").inner_text(), page.evaluate(replies + ".at(-1).payload")
+
+
+def check_import_status(page, _fixture):
+    status, reply = apply_import(page, "MatrixDesktop.exe --numColumns 80 --bogusFlag 1")
+    assert reply["applied"] == ["numColumns"] and reply["ignored"] == ["bogusFlag"], "importer witness: " + json.dumps([reply["applied"], reply["ignored"]])
+    assert status == "Imported 1 setting. Ignored 1 unknown or invalid setting: bogusFlag.", "a command import misreported its ignored setting: " + status
+    status, reply = apply_import(page, "MatrixDesktop.exe --numColumns 80 " + " ".join("--bogus" + str(index) + " 1" for index in range(1, 8)))
+    names = reply["ignored"]
+    assert len(names) == 7, "importer witness: " + json.dumps(names)
+    expected = "Imported 1 setting. Ignored 7 unknown or invalid settings: " + ", ".join(names[:5]) + " and 2 more."
+    assert status == expected, "seven ignored settings were not reported as five names and a count: " + status
+    # A .cfg keeps an unknown key for the import report, but a line without '=' is dropped.
+    cfg = """[General]
+MaxStream=777
+OwnerExtension=retained
+not a setting
+"""
+    status, reply = apply_import(page, cfg)
+    assert reply["applied"] == ["scene", "zmMaxStream"] and reply["ignored"] == ["General.OwnerExtension", "General: not a setting"], \
+        "importer witness: " + json.dumps([reply["applied"], reply["ignored"]])
+    expected = ("Imported 2 settings. Retained 1 unknown, unused or invalid setting for review in the ZMatrix import report."
+                " Ignored 1 unknown or invalid setting: General: not a setting.")
+    assert status == expected, "a .cfg import misreported its retained and unreadable settings: " + status
+    report = page.locator(".import-report")
+    assert report.count() == 1, "the status points to an import report that is not shown"
+    report.locator("summary").first.click()
+    assert "General.OwnerExtension retained" in report.inner_text(), "the import report does not list the retained setting"
+
+
+CRLF, LF = chr(13) + chr(10), chr(10)
+EXPORT_SCRIPT = CRLF.join(["# synthetic-ps1-marker", "$matrixStartInfo.Arguments = '--numColumns 80'",
+                           "[void][System.Diagnostics.Process]::Start($matrixStartInfo)"]) + CRLF
+
+
+def check_export_fallback(page, _fixture):
+    panel, script, status = page.locator("#exportPanel"), page.locator("#exportScript"), page.locator("#statusLine")
+
+    def export(reply):
+        # The status line is cleared first, so a new status marks the reply as handled.
+        page.evaluate("reply=>{window.__exportReply=reply;document.querySelector('#statusLine').textContent='';}", reply)
+        page.locator("#exportPsButton").click()
+        page.wait_for_function("document.querySelector('#statusLine').textContent!==''")
+        if "error" not in reply:
+            sent = page.evaluate("window.__smokeReplies.filter(r=>r.type==='exportPowerShell').at(-1).payload")
+            assert sent == reply, "stub witness: " + json.dumps(sent)
+
+    busy, copied = {"script": EXPORT_SCRIPT, "copied": False}, {"script": EXPORT_SCRIPT, "copied": True}
+    assert panel.is_hidden(), "the export panel showed before any export"
+    export(busy)
+    shown = script.input_value().replace(CRLF, LF) if panel.is_visible() else None
+    assert shown == EXPORT_SCRIPT.replace(CRLF, LF), "the clipboard fallback did not show the exported script: " + status.inner_text()
+    assert script.get_attribute("readonly") is not None, "the shown script is editable"
+    selected = page.evaluate("() => { const box = document.activeElement; return box?.id === 'exportScript' && box.selectionStart === 0 && box.selectionEnd === box.value.length; }")
+    assert selected, "the shown script was not focused and selected for copying"
+    assert status.inner_text() == "The clipboard is in use by another program. Copy the script shown above.", status.inner_text()
+    export(copied)
+    assert status.inner_text() == "PowerShell script copied to clipboard.", status.inner_text()
+    assert panel.is_hidden(), "an export that reached the clipboard left the earlier fallback script on screen"
+    export(busy)
+    assert panel.is_visible(), "the second clipboard fallback did not show the script"
+    export({"error": "The launch arguments exceed Windows' 32,767-character limit."})
+    assert status.inner_text().startswith("PowerShell export failed:"), "failure witness: " + status.inner_text()
+    assert panel.is_hidden(), "a failed export left the earlier fallback script on screen"
+    export(busy)
+    assert panel.is_visible(), "the third clipboard fallback did not show the script"
+    page.locator("#closeExportButton").click()
+    assert panel.is_hidden(), "Close did not hide the exported script"
+    assert page.evaluate("document.activeElement?.id") == "exportPsButton", "Close did not return focus to Export .ps1"
+
+
+def check_test_status(page, _fixture):
+    status = page.locator("#statusLine")
+    replies = "window.__smokeReplies.filter(r=>r.type==='testCommand')"
+
+    def launch():
+        count = page.evaluate(replies + ".length")
+        page.locator("#testButton").click()
+        page.wait_for_function("n=>" + replies + ".length>n && !document.querySelector('#stopButton').disabled", arg=count)
+        return page.evaluate(replies + ".at(-1).payload")["command"]
+
+    command = launch()
+    assert command.startswith("MatrixDesktop.exe --windowed") and len(command) <= 160, "short launch witness: " + command
+    assert status.inner_text() == "Launched test process 123: " + command, "the Test status did not show the launched command: " + status.inner_text()
+    assert status.get_attribute("title") == command, "the Test status tooltip does not hold the launched command"
+    page.locator("#stopButton").click()
+    page.wait_for_function("document.querySelector('#statusLine').textContent==='Test process stopped.'")
+    assert status.get_attribute("title") == "", "a later status kept the launched command's tooltip"
+    choose_zmatrix(page)
+    phrase = "a" * 200
+    field(page, "zmPhrases").locator('input[type="text"]').fill(phrase)
+    command = launch()
+    assert "--zmPhrases" in command and len(command) > 160, "long launch witness: " + command[:80]
+    expected = "Launched test process 123: " + command[:159] + "…"
+    assert status.inner_text() == expected, "a long launched command was not shortened in the status: " + str(len(status.inner_text())) + " characters"
+    assert status.get_attribute("title") == command, "the shortened Test status lost the whole command from its tooltip"
+
+
 def check_limits(page, fixture):
     choose_zmatrix(page)
     original = fixture["defaultDraft"]["zmCharacters"]
@@ -419,7 +772,18 @@ CHECKS = [
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
     ("Preview ignores obsolete and hidden asynchronous query replies", check_preview_race),
+    ("Screensaver action labels match the controls the docs name", check_doc_labels),
+    ("Rename changes only the preset name and keeps its saved values", check_rename),
+    ("Stop Test follows the host's exit notice for the running test only", check_test_exited),
+    ("Last draft brings back the unlinked draft after a preset was chosen", check_scratch_draft),
+    ("A draft save pending at Delete lands before the delete", check_pending_save_delete),
+    ("A draft save pending at Save As lands before the new preset", check_pending_save_save_as),
+    ("Delete with no pending draft save posts no save of its own", check_settled_save),
+    ("Import status names dropped settings and points only retained ones to the report", check_import_status),
+    ("Export .ps1 shows the script for manual copy when the clipboard is busy", check_export_fallback),
+    ("Test status shows the command the host launched", check_test_status),
 ]
+PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
 
 def main():
@@ -456,6 +820,8 @@ def main():
                 page_fixture = dict(fixture)
                 if function is check_preview_race:
                     page_fixture["preview"] = {"available": True, "origin": origin + "/preview/"}
+                if function in PRESET_CHECKS:
+                    page_fixture = preset_store(page_fixture)
                 page.add_init_script(STUB.replace("__STATE__", json.dumps(page_fixture, ensure_ascii=False)))
                 try:
                     page.goto(origin + "/index.html", wait_until="load")

@@ -583,7 +583,8 @@ h1 {
 	text-transform: uppercase;
 }
 
-#importInput {
+#importInput,
+#exportScript {
 	width: 100%;
 	min-height: 76px;
 	resize: vertical;

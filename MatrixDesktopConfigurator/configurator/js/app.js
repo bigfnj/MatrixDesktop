@@ -3,7 +3,9 @@
 const state = {
 	metadata: null,
 	defaultDraft: {},
-	lastDraft: {},
+	// The unlinked draft that 'Last draft' brings back. While no preset is selected it is the
+	// editor draft (syncScratchDraft); choosing a preset leaves it as it was.
+	scratchDraft: {},
 	draft: {},
 	presets: [],
 	selectedPresetId: null,
@@ -11,7 +13,9 @@ const state = {
 	filter: "",
 	// dirty and testRunning used to live here. Both were written and never read once:
 	// the save indicator is driven by setSaveState's argument, and the Stop Test button's
-	// own disabled property is the single source of truth for whether a test is running.
+	// own disabled property says whether a test is running. A launch enables it and keeps
+	// the pid on the button; Stop, or the host's configHost.testExited(pid) for that same
+	// pid when the test window closes on its own, disables it again.
 	// Keeping a second copy of state that nothing consults is how the two get to disagree.
 	requestId: 0,
 	pending: new Map(),
@@ -58,6 +62,9 @@ const el = {
 	saveState: document.querySelector("#saveState"),
 	// v1.0 additions
 	exportPsButton: document.querySelector("#exportPsButton"),
+	exportPanel: document.querySelector("#exportPanel"),
+	exportScript: document.querySelector("#exportScript"),
+	closeExportButton: document.querySelector("#closeExportButton"),
 	themeButton: document.querySelector("#themeButton"),
 	previewButton: document.querySelector("#previewButton"),
 	previewPane: document.querySelector("#previewPane"),
@@ -72,7 +79,7 @@ window.configHost = {
     snapshotDraft() {
         if (!state.metadata) return null;
         window.clearTimeout(state.saveTimer);
-        return { draft: clone(state.draft), selectedPresetId: state.selectedPresetId };
+        return { draft: clone(state.draft), selectedPresetId: state.selectedPresetId, scratchDraft: clone(syncScratchDraft()) };
     },
 	receive(message) {
 		const pending = state.pending.get(message.id);
@@ -83,6 +90,14 @@ window.configHost = {
 		} else {
 			pending.reject(new Error(message.payload?.message || "Configurator request failed"));
 		}
+	},
+	// The host reports a test window that exited on its own. Only the last launched pid
+	// counts, so a late notice for an earlier or already stopped test changes nothing.
+	testExited(pid) {
+		if (!el.stopButton.dataset.pid || el.stopButton.dataset.pid !== String(pid)) return;
+		delete el.stopButton.dataset.pid;
+		el.stopButton.disabled = true;
+		setStatus("Test window closed.");
 	},
 };
 
@@ -194,8 +209,10 @@ const normalizeDraft = (draft) => {
 	return { ...clone(effectiveDefaultsFor({ ...state.defaultDraft, ...state.metadata?.sceneDefaults?.[saved.scene], ...saved })), ...saved };
 };
 
-const setStatus = (message, tone = "normal") => {
+// detail is the status line's tooltip, for text too long to show whole; any other status clears it.
+const setStatus = (message, tone = "normal", detail = "") => {
 	el.statusLine.textContent = message || "";
+	el.statusLine.title = detail;
 	el.statusLine.style.color = tone === "error" ? "var(--danger)" : tone === "ok" ? "var(--green)" : "var(--muted)";
 };
 
@@ -207,24 +224,47 @@ const setDirty = (dirty) => {
 	setSaveState(dirty ? "Draft changed" : "Draft saved");
 };
 
+// Everything that reads the scratch draft, or leaves the unlinked state, calls this first, so
+// an edit still inside the save debounce is kept.
+const syncScratchDraft = () => {
+	if (!state.selectedPresetId) state.scratchDraft = clone(state.draft);
+	return state.scratchDraft;
+};
+
+// requestHost posts before its first await, so a call orders the save at once.
+const saveDraftNow = async () => {
+	try {
+		await requestHost("saveDraft", {
+			draft: state.draft,
+			selectedPresetId: state.selectedPresetId,
+			scratchDraft: syncScratchDraft(),
+		});
+		// Unconditional. The old guard was `if (!state.dirty)`, which could never be
+		// true here because updateDraftValue sets dirty before scheduling the save.
+		setSaveState("Draft saved");
+	} catch (error) {
+		setSaveState("Save failed");
+		setStatus(error.message, "error");
+	}
+};
+
 const scheduleSaveDraft = () => {
 	window.clearTimeout(state.saveTimer);
 	setSaveState("Saving…");
-	state.saveTimer = window.setTimeout(async () => {
-		try {
-			await requestHost("saveDraft", {
-				draft: state.draft,
-				selectedPresetId: state.selectedPresetId,
-			});
-			state.lastDraft = clone(state.draft);
-			// Unconditional. The old guard was `if (!state.dirty)`, which could never be
-			// true here because updateDraftValue sets dirty before scheduling the save.
-			setSaveState("Draft saved");
-		} catch (error) {
-			setSaveState("Save failed");
-			setStatus(error.message, "error");
-		}
+	state.saveTimer = window.setTimeout(() => {
+		state.saveTimer = 0;
+		saveDraftNow();
 	}, 250);
+};
+
+// confirm() and prompt() block the page, so a save armed just before one comes due only after
+// the preset request that follows the dialog, and stores the selection from before it. The
+// preset actions post a pending save first instead.
+const flushPendingDraftSave = () => {
+	if (!state.saveTimer) return;
+	window.clearTimeout(state.saveTimer);
+	state.saveTimer = 0;
+	saveDraftNow();
 };
 
 const scheduleCommandBuild = () => {
@@ -1140,6 +1180,7 @@ const refreshAll = () => {
 };
 
 const saveCurrentPreset = async (forceName = false) => {
+	flushPendingDraftSave();
 	const existing = state.presets.find((preset) => preset.id === state.selectedPresetId);
 	let name = existing?.name;
 	if (!name || forceName) {
@@ -1170,21 +1211,15 @@ const renamePreset = async () => {
 		setStatus("Select a saved preset to rename.", "error");
 		return;
 	}
-	const name = window.prompt("Preset name", existing.name);
+	const name = window.prompt("Preset name", existing.name)?.trim();
 	if (!name) return;
-	await savePresetWithName(existing.id, name, state.draft);
-};
-
-const savePresetWithName = async (id, name, values) => {
 	try {
-		const result = await requestHost("savePreset", {
-			preset: { id, name, values },
-		});
-		state.presets = result.state.userPresets || [];
-		state.selectedPresetId = result.state.selectedPresetId || id;
-		setDirty(false);
-		refreshAll();
-		setStatus("Preset saved.", "ok");
+		// Only the name changes. Saving values is Save's job, so an unsaved experiment in
+		// the editor is never committed to the preset by renaming it and the save indicator stays.
+		const result = await requestHost("renamePreset", { id: existing.id, name });
+		state.presets = result.state?.userPresets || state.presets;
+		renderPresetSelect();
+		setStatus("Preset renamed.", "ok");
 	} catch (error) {
 		setStatus(error.message, "error");
 	}
@@ -1196,6 +1231,7 @@ const deletePreset = async () => {
 		setStatus("Select a saved preset to delete.", "error");
 		return;
 	}
+	flushPendingDraftSave();
 	if (!window.confirm(`Delete "${existing.name}"?`)) return;
 	try {
 		const result = await requestHost("deletePreset", { id: existing.id });
@@ -1228,15 +1264,25 @@ const importCommand = async () => {
 		state.selectedPresetId = null;
 		state.draft = normalizeDraft(result.draft);
 		rememberDraftEdits(result.applied || []);
-		state.lastDraft = clone(state.draft);
 		state.presets = result.state?.userPresets || state.presets;
 		showImportPanel(false);
 		setDirty(true);
 		refreshAll();
-		const applied = result.applied?.length || 0;
-		const ignored = result.ignored?.length || 0;
-		const suffix = ignored ? " Retained " + ignored + " unknown, unused or invalid settings for review." : "";
-		setStatus(`Imported ${applied} setting${applied === 1 ? "" : "s"}.${suffix}`, ignored ? "normal" : "ok");
+		// The host names every setting it did not apply. A ZMatrix .cfg import keeps an unknown or
+		// unused key in zmImportedSettings, which the import report lists; anything else (every
+		// command or query setting, or a .cfg line it could not read) is dropped, so it is named here.
+		const plural = (count, noun) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+		const ignored = result.ignored || [];
+		const kept = result.draft?.zmImportedSettings || {};
+		const retained = ignored.filter((name) => Object.hasOwn(kept, name)).length;
+		const dropped = ignored.filter((name) => !Object.hasOwn(kept, name));
+		let message = `Imported ${plural(result.applied?.length || 0, "setting")}.`;
+		if (retained) message += ` Retained ${plural(retained, "unknown, unused or invalid setting")} for review in the ZMatrix import report.`;
+		if (dropped.length) {
+			const more = dropped.length > 5 ? ` and ${dropped.length - 5} more` : "";
+			message += ` Ignored ${plural(dropped.length, "unknown or invalid setting")}: ${dropped.slice(0, 5).join(", ")}${more}.`;
+		}
+		setStatus(message, ignored.length ? "normal" : "ok");
 	} catch (error) {
 		setStatus(error.message, "error");
 	}
@@ -1279,8 +1325,9 @@ const bindEvents = () => {
 	el.presetSelect.addEventListener("change", () => {
 		const id = el.presetSelect.value || null;
 		const preset = state.presets.find((item) => item.id === id);
+		syncScratchDraft();
 		state.selectedPresetId = id;
-		state.draft = normalizeDraft(preset?.values || state.lastDraft);
+		state.draft = normalizeDraft(preset?.values || state.scratchDraft);
 		rememberDraftEdits();
 		setDirty(false);
 		scheduleSaveDraft();
@@ -1341,8 +1388,14 @@ const bindEvents = () => {
 	el.testButton.addEventListener("click", async () => {
 		try {
 			const result = await requestHost("testCommand", { draft: state.draft });
+			el.stopButton.dataset.pid = String(result.processId);
 			el.stopButton.disabled = false;
-			setStatus(`Launched test process ${result.processId}.`, "ok");
+			// The host describes what it launched: the generated command run windowed, or a note that
+			// a configuration too long for one command line went over direct arguments. A long
+			// description is shortened here and kept whole in the tooltip.
+			const command = String(result.command ?? "");
+			const shown = command.length > 160 ? command.slice(0, 159) + "…" : command;
+			setStatus(`Launched test process ${result.processId}: ${shown}`, "ok", command);
 		} catch (error) {
 			setStatus(error.message, "error");
 		}
@@ -1351,6 +1404,7 @@ const bindEvents = () => {
 	el.stopButton.addEventListener("click", async () => {
 		try {
 			await requestHost("stopTest");
+			delete el.stopButton.dataset.pid;
 			el.stopButton.disabled = true;
 			setStatus("Test process stopped.", "ok");
 		} catch (error) {
@@ -1364,14 +1418,26 @@ const bindEvents = () => {
 		el.exportPsButton.addEventListener("click", async () => {
 			try {
 				const result = await requestHost("exportPowerShell", { draft: state.draft });
+				// The host returns the script either way. When the clipboard is busy it is shown,
+				// selected, for copying by hand; a later export that reaches the clipboard, or fails,
+				// hides it, so the panel only ever holds the latest export.
+				el.exportPanel.hidden = Boolean(result?.copied);
 				if (result?.copied) {
 					setStatus("PowerShell script copied to clipboard.", "ok");
 				} else {
-					setStatus("Script generated, but the clipboard is in use by another program.", "error");
+					el.exportScript.value = result?.script ?? "";
+					el.exportScript.focus();
+					el.exportScript.select();
+					setStatus("The clipboard is in use by another program. Copy the script shown above.", "error");
 				}
 			} catch (error) {
+				el.exportPanel.hidden = true;
 				setStatus(`PowerShell export failed: ${error.message}`, "error");
 			}
+		});
+		el.closeExportButton.addEventListener("click", () => {
+			el.exportPanel.hidden = true;
+			el.exportPsButton.focus();
 		});
 	}
 
@@ -1427,8 +1493,11 @@ const init = async () => {
 		state.defaultDraft = payload.defaultDraft;
 		state.presets = payload.state?.userPresets || [];
 		state.selectedPresetId = payload.state?.selectedPresetId || null;
-		state.lastDraft = normalizeDraft(payload.state?.lastDraft);
-		state.draft = normalizeDraft(state.lastDraft);
+		state.draft = normalizeDraft(payload.state?.lastDraft);
+		// With no preset selected the last draft is the unlinked draft, and a store written before
+		// scratchDraft existed has only the last draft.
+		state.scratchDraft = state.selectedPresetId && payload.state?.scratchDraft
+			? normalizeDraft(payload.state.scratchDraft) : clone(state.draft);
 		rememberDraftEdits();
 		state.activeGroupId = state.metadata.groups[0]?.id || null;
 		el.storageStatus.textContent = payload.storage?.portable ? "Portable preset storage" : "AppData preset storage";
