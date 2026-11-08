@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -275,14 +276,16 @@ class DefaultMediaGrantTests(unittest.TestCase):
 STAND_IN = Path(sys.base_prefix) / "python.exe"
 STAND_IN_HOST = (
     "import subprocess, sys\n"
-    "browser = subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], stdout=subprocess.PIPE)\n"
+    "browser = subprocess.Popen([sys.executable, '-c', *sys.argv[1:]], stdout=subprocess.PIPE)\n"
     "assert browser.stdout.readline().strip() == b'held'\n"
     "print(browser.pid, flush=True)\n")
-STAND_IN_BROWSER = (
-    "import sys, time\n"
+STAND_IN_BROWSER = (  # holds the file until the release flag exists, 30 s at most
+    "import os, sys, time\n"
     "with open(sys.argv[1], 'rb'):  # no FILE_SHARE_DELETE, like the DIPS file in the gate's WARN\n"
     "    print('held', flush=True)\n"
-    "    time.sleep(2)\n")
+    "    deadline = time.monotonic() + 30\n"
+    "    while not os.path.exists(sys.argv[2]) and time.monotonic() < deadline:\n"
+    "        time.sleep(0.05)\n")
 
 
 def load_script(name):
@@ -370,32 +373,36 @@ class ProfileDeletionTests(unittest.TestCase):
 
     def test_a_file_held_by_a_process_the_host_started_is_deleted_once_that_process_exits(self):
         # Killing mutation: skip wait_for_descendants in delete_owned_profile. The stand-in
-        # browser holds DIPS for 2 s after its host exits (the gate measured WinError 32 after
-        # 5 s), longer than the 0.5 s of retries allowed here, so the profile would leak.
+        # browser keeps DIPS open after its host exits (the gate saw WinError 32 after 5 s of
+        # retries) and lets go 1.5 s into the deletion, after the 0.5 s of retries allowed
+        # here, so without the wait the profile leaks.
         self.assertTrue(STAND_IN.is_file(), f"no base interpreter at {STAND_IN}")
         with tempfile.TemporaryDirectory() as directory:
-            profile = self.make_profile(directory)
+            profile, release = self.make_profile(directory), Path(directory) / "release"
             host = subprocess.Popen([str(STAND_IN), "-c", STAND_IN_HOST, STAND_IN_BROWSER,
-                                     str(profile / "EBWebView" / "Default" / "DIPS")], stdout=subprocess.PIPE)
+                                     str(profile / "EBWebView" / "Default" / "DIPS"), str(release)], stdout=subprocess.PIPE)
             out, _ = host.communicate(timeout=60)
             self.assertEqual(host.returncode, 0, "the stand-in host exited before its browser held the file")
-            browser = native.KERNEL32.OpenProcess(0x00100000, False, int(out))  # SYNCHRONIZE, for cleanup
+            browser = native.KERNEL32.OpenProcess(0x00100000, False, int(out))  # SYNCHRONIZE
+            self.assertTrue(browser, "could not open the stand-in browser")
             host.webview_profile = profile
             real_remove, output = native.remove_profile, io.StringIO()
+            timer = threading.Timer(1.5, release.touch)
             try:
-                started = time.monotonic()
+                self.assertEqual(native.KERNEL32.WaitForSingleObject(browser, 0), 0x102,  # WAIT_TIMEOUT
+                                 "the stand-in browser exited before deletion began, so the case proves nothing")
+                timer.start()
                 with patch.object(native, "LEAKED_PROFILES", []) as leaked, \
                      patch.object(native, "remove_profile", lambda path: real_remove(path, attempts=2, delay=0.25)), \
                      patch("sys.stdout", output):
                     native.stop_application(host)
-                waited = time.monotonic() - started
             finally:
-                if browser:
-                    native.KERNEL32.WaitForSingleObject(browser, 10000)
-                    native.KERNEL32.CloseHandle(browser)
+                timer.cancel()
+                release.touch()
+                native.KERNEL32.WaitForSingleObject(browser, 10000)
+                native.KERNEL32.CloseHandle(browser)
             self.assertFalse(profile.exists(), f"profile survived its host's browser: {output.getvalue()}")
             self.assertEqual(leaked, [])
-            self.assertGreater(waited, 1, "deletion did not wait for the browser that held the file")
 
     def test_an_older_process_that_claims_the_host_as_its_parent_is_not_waited_for(self):
         # Killing mutation: drop the started-after-its-parent check in open_descendants. This
