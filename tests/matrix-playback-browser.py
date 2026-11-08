@@ -209,12 +209,13 @@ def main():
                     assert ImageChops.difference(paused, capture(page)).getbbox() is None, "paused original Matrix changed pixels"
                     page.evaluate("window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:false}}))")
                     page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 3", arg=frames)
-                    assert not errors, errors
                     page.evaluate("matrixRuntimeDiagnostics.dispose()")
                     frames = page.evaluate("matrixRuntimeDiagnostics.frames")
                     page.wait_for_timeout(100)
                     assert page.evaluate("matrixRuntimeDiagnostics.disposed && !matrixRuntimeDiagnostics.ready")
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames
+                    # AUD-55: checked after teardown, so errors raised by disposal are seen too.
+                    assert not errors, errors
                     print(f"PASS original Matrix {backend}: initial pause, shader initialization, mid-run pause, resume and disposal", flush=True)
                     if backend == "regl":
                         failed = context.new_page()

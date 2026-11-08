@@ -192,12 +192,13 @@ def main():
                     if "after" not in report:
                         report["after"] = page.evaluate("matrixRuntimeDiagnostics.inspect()")
                     report.update(name=name, dimensions=dimensions, parameters=params, visiblePixels=visible)
-                    assert not errors and not report["errors"], errors or report
                     page.evaluate("matrixRuntimeDiagnostics.dispose()")
                     assert page.evaluate("matrixRuntimeDiagnostics.inspect().disposed"), "original CPU scene survived disposal"
                     before = page.evaluate("matrixRuntimeDiagnostics.frames")
                     page.wait_for_timeout(40)
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == before, "render loop survived disposal"
+                    # AUD-55: checked after teardown, so errors raised by disposal are seen too.
+                    assert not errors and not report["errors"], errors or report
                     (folder / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
                     reports.append(report)
                     print(f"PASS {backend} {name}: {report['activeStreams']} streams, {report['glyphInstances']} glyphs, {visible} visible pixels", flush=True)

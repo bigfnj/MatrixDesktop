@@ -164,6 +164,7 @@ def check_configurator(page, origin, state_json):
         fail("configurator loads without console errors", "; ".join(errors[:3]))
     else:
         ok("configurator loads without console errors")
+    load_errors = len(errors)
 
     box = page.evaluate("""() => {
         const r = (sel) => {
@@ -471,6 +472,14 @@ def check_configurator(page, origin, state_json):
         fail("UC3D animation validation respects original and legacy motion units", "; ".join(problems))
     else:
         ok("UC3D animation validation respects original and legacy motion units")
+
+    # AUD-55: the load check reads the collector once; theme toggles, scene dependencies and
+    # late picker callbacks since then must not raise either.
+    late = errors[load_errors:]
+    if late:
+        fail("configurator interactions raise no page errors", "; ".join(late[:3]))
+    else:
+        ok("configurator interactions raise no page errors")
 
 
 UC3D_SLIDER_NAMES = {
