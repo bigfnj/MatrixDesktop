@@ -8,11 +8,13 @@ import functools
 import hashlib
 import http.server
 import json
+import re
 import subprocess
 import sys
 import threading
 import time
 import traceback
+from collections import Counter
 from urllib.parse import quote
 from pathlib import Path
 
@@ -77,6 +79,7 @@ STUB = """
         if (!response.ok) throw new Error(await response.text());
         payload = await response.json();
       } else if (Object.hasOwn(store, msg.type)) payload = store[msg.type](msg.payload || {});
+      else if (msg.type === 'loadHelp') payload = {text:window.__helpText??null};
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
       else if (msg.type === 'restoreScreensaver') payload = {restored:true,message:'Synthetic restore action recorded.'};
@@ -296,6 +299,17 @@ def check_cfg_chooser(page, _fixture):
     assert field(page, "zmCharacters").locator("textarea").input_value() == "ABΩ"
 
 
+def popover_hidden(page):
+    return page.evaluate("document.querySelector('.color-popover')?.hidden ?? true")
+
+
+def late_hex(page, value):
+    # Dispatched rather than typed: a hidden popover takes no keystrokes, but a stale
+    # listener would still act on an input event.
+    page.evaluate("""value => { const box = document.querySelector('.color-popover .cp-hex');
+        box.value = value; box.dispatchEvent(new Event('input', {bubbles: true})); }""", value)
+
+
 def check_late_picker(page, _fixture):
     for key, effect in (("palette", "palette"), ("stripeColors", "stripes")):
         field(page, "scene").locator("select").select_option("matrix")
@@ -309,12 +323,338 @@ def check_late_picker(page, _fixture):
         assert abs(expected[0]["r"] - 35 / 255) < 1e-10, "the enabled picker must first persist its color"
         field(page, "scene").locator("select").select_option("zmatrix")
         assert field(page, key).locator(".color-swatch").first.is_disabled()
-        assert picker.is_visible(), "the test must retain the open picker callback across the scene change"
-        picker.fill("#ff0000")
-        assert saved(page)[key] == expected, key + " changed saved state through a late disabled picker callback"
-        page.keyboard.press("Escape")
+        assert popover_hidden(page), key + ": the scene change re-rendered the editor but left its popover open"
+        late_hex(page, "#ff0000")
+        assert saved(page)[key] == expected, key + " changed saved state through a late picker callback"
         field(page, "scene").locator("select").select_option("matrix")
         assert saved(page)[key] == expected, key + " lost its saved color after returning to Matrix"
+
+
+def check_picker_closes_on_rerender(page, _fixture):
+    stops = page.evaluate("configHost.snapshotDraft().draft.palette")
+    assert len(stops) == 4, "the default palette must have four stops for this check"
+    rows = field(page, "palette").locator(".list-row")
+    # Opened by Enter and re-rendered by a click that sends no pointerdown and moves no focus,
+    # as keyboard and assistive-technology activation do, so neither the popover's outside
+    # pointer handler nor any focus handler can close it: only the rebuild can.
+    rows.nth(0).locator(".color-swatch").focus()
+    page.keyboard.press("Enter")
+    assert not popover_hidden(page), "Enter on a palette swatch did not open the popover"
+    rows.nth(0).locator("button", has_text="↓").evaluate("node => node.click()")
+    assert popover_hidden(page), "moving a stop re-rendered the palette but left the popover open on the detached row"
+    late_hex(page, "#00ff00")
+    assert saved(page)["palette"] == [stops[1], stops[0], stops[2], stops[3]], "a late picker edit rewrote the reordered palette"
+    rows.nth(3).locator(".color-swatch").focus()
+    page.keyboard.press("Enter")
+    assert not popover_hidden(page), "Enter on the last swatch did not open the popover"
+    rows.nth(3).locator("button", has_text="×").evaluate("node => node.click()")
+    assert popover_hidden(page), "removing a stop left the popover open on the removed row"
+    late_hex(page, "#ff0000")
+    assert len(saved(page)["palette"]) == 3, "a late picker edit brought a removed stop back"
+    # Defence in depth: an anchor detached by anything other than renderFields still refuses the edit.
+    rows.nth(0).locator(".color-swatch").focus()
+    page.keyboard.press("Enter")
+    assert not popover_hidden(page), "Enter on the first swatch did not open the popover"
+    before = page.evaluate("window.__smokeMessages.filter(m=>m.type==='saveDraft').length")
+    rows.nth(0).locator(".color-swatch").evaluate("node => node.remove()")
+    late_hex(page, "#0000ff")
+    page.wait_for_timeout(400)
+    assert page.evaluate("window.__smokeMessages.filter(m=>m.type==='saveDraft').length") == before, "a popover whose anchor left the document still saved its edit"
+    assert popover_hidden(page), "a popover whose anchor left the document stayed open"
+
+
+def marked_invalid(locator):
+    return "invalid-input" in (locator.get_attribute("class") or "")
+
+
+def check_invalid_hex(page, _fixture):
+    for key, effect in (("palette", "palette"), ("stripeColors", "stripes")):
+        field(page, "effect").locator("select").select_option(effect)
+        row = field(page, key).locator(".list-row").first
+        box = row.locator(".hex-input")
+        first = lambda: saved(page)[key][0]
+        rgb = lambda stop: [round(stop[channel] * 255) for channel in "rgb"]
+        box.fill("#123456")
+        good = first()
+        assert rgb(good) == [0x12, 0x34, 0x56] and not marked_invalid(box), key + ": the row did not save '#123456': " + str(good)
+        for text in ("red", " #ff880"):
+            box.fill(text)
+            now = first()
+            assert all(isinstance(now[channel], (int, float)) for channel in "rgb"), key + ": " + repr(text) + " saved a non-number channel: " + str(now)
+            assert now == good, key + ": the row saved the invalid hex " + repr(text) + ": " + str(now)
+            assert marked_invalid(box), key + ": the row did not mark the invalid hex " + repr(text)
+        box.fill(" #abc ")
+        assert rgb(first()) == [0xaa, 0xbb, 0xcc], key + ": the row refused ' #abc ': " + str(first())
+        assert not marked_invalid(box), key + ": the row kept its invalid mark after ' #abc '"
+        box.fill("red")
+        # The popover reads the same text the same way: refused where the row refuses, taken where it takes.
+        row.locator(".color-swatch").click()
+        picker = page.locator(".color-popover .cp-hex")
+        picker.fill(" #ff880")
+        assert rgb(first()) == [0xaa, 0xbb, 0xcc], key + ": the popover took ' #ff880', which the row refuses: " + str(first())
+        assert marked_invalid(picker), key + ": the popover did not mark ' #ff880' invalid"
+        picker.fill(" #123 ")
+        assert rgb(first()) == [0x11, 0x22, 0x33], key + ": the popover refused ' #123 ': " + str(first())
+        assert not marked_invalid(picker), key + ": the popover kept its invalid mark after ' #123 '"
+        assert box.input_value() == "#112233" and not marked_invalid(box), key + ": the popover's colour left the row box stale or marked invalid"
+        picker.fill("zz")
+        page.keyboard.press("Escape")
+        row.locator(".color-swatch").click()
+        assert picker.input_value() == "#112233" and not marked_invalid(picker), key + ": the reopened popover kept the refused text or its invalid mark"
+        page.keyboard.press("Escape")
+
+
+def focused(page):
+    return page.evaluate("""() => { const node = document.activeElement;
+        const shell = node?.closest('[data-field]'); const row = node?.closest('.list-row, .phrase-row');
+        const rows = shell ? [...shell.querySelectorAll('.list-row, .phrase-row')] : [];
+        return {tag: node?.tagName, field: shell?.dataset.field ?? null, text: shell ? node.textContent : '',
+                row: row ? rows.indexOf(row) : -1, rows: rows.length, value: node?.value ?? null}; }""")
+
+
+def check_focus_rerender(page, _fixture):
+    field(page, "isometric").locator("input").focus()
+    page.keyboard.press("Space")
+    now = focused(page)
+    assert now["field"] == "isometric", "control: the non-gating isometric checkbox lost focus: " + str(now)
+    field(page, "volumetric").locator("input").focus()
+    page.keyboard.press("Space")
+    now = focused(page)
+    assert now["field"] == "volumetric" and now["tag"] == "INPUT", "Space on the gating volumetric checkbox moved focus to " + str(now)
+    palette = field(page, "palette")
+    palette.locator(".list-row").nth(3).locator("button", has_text="×").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["row"], now["rows"], now["text"]) == ("palette", 2, 3, "×"), "removing the last stop did not land on the new last row's remove: " + str(now)
+    palette.locator(".add-row").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["rows"], now["text"]) == ("palette", 4, "Add stop"), "Add stop did not keep focus: " + str(now)
+    field(page, "effect").locator("select").focus()
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    now = focused(page)
+    assert (now["field"], now["value"]) == ("effect", "none"), "two ArrowDowns on the gating effect select did not step two options with focus kept: " + str(now)
+    choose_zmatrix(page)
+    phrases = field(page, "zmPhrases")
+    phrases.get_by_role("button", name="Add phrase").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["rows"], now["text"]) == ("zmPhrases", 2, "Add phrase"), "Add phrase did not keep focus: " + str(now)
+    phrases.locator(".phrase-row").nth(1).get_by_role("button", name="Remove").focus()
+    page.keyboard.press("Enter")
+    now = focused(page)
+    assert (now["field"], now["row"], now["rows"], now["text"]) == ("zmPhrases", 0, 1, "Remove"), "removing the last phrase did not land on the new last row's remove: " + str(now)
+
+
+def check_phrase_rows(page, _fixture):
+    choose_zmatrix(page)
+    phrases = field(page, "zmPhrases")
+    rows = phrases.locator(".phrase-row input")
+    hint = phrases.locator(":scope > .field-help").last
+    values = lambda: rows.evaluate_all("nodes => nodes.map(node => node.value)")
+    # Marked means both the visible invalid-input class and a constraint-validation message.
+    marked = lambda: rows.evaluate_all("nodes => nodes.map(node => node.classList.contains('invalid-input') && node.matches(':invalid'))")
+    add = phrases.get_by_role("button", name="Add phrase")
+    add.click()
+    add.click()
+    shown, kept = values(), saved(page)["zmPhrases"]
+    assert len(set(shown)) == len(shown) == 3 and kept == shown, "two Adds gave rows " + str(shown) + " but saved " + str(kept)
+    assert hint.text_content() == "3 phrase entries", "the hint does not count the saved phrases: " + repr(hint.text_content())
+    rows.nth(2).fill(shown[1])
+    kept = saved(page)["zmPhrases"]
+    assert kept == shown[:2], "a repeated phrase was saved twice or lost: " + str(kept)
+    assert marked() == [False, False, True], "only the repeating row must be marked invalid: " + str(marked())
+    assert hint.text_content() == "2 phrase entries; 1 duplicate ignored", "the hint does not count distinct phrases and report the repeat: " + repr(hint.text_content())
+    phrases.locator(".phrase-row").first.get_by_role("button", name="Remove").click()
+    assert values() == [shown[1], shown[1]] and marked() == [False, True], "after removing a row the remaining repeat lost its mark: " + str(marked())
+    rows.nth(1).fill("Third phrase")
+    assert marked() == [False, False] and saved(page)["zmPhrases"] == [shown[1], "Third phrase"], "editing the repeat away did not clear its mark or save it: " + str(marked())
+
+
+def where(page):
+    return page.evaluate("""() => { const node = document.activeElement;
+        return {tag: node?.tagName, id: node?.id ?? '', cls: String(node?.className ?? ''),
+                field: node?.closest('[data-field]')?.dataset.field ?? null, popover: Boolean(node?.closest('.color-popover')),
+                modal: Boolean(node?.closest('#helpModal')), section: node?.closest('.field-section')?.id ?? null}; }""")
+
+
+def popover_box(page):
+    return page.evaluate("document.querySelector('.color-popover').getBoundingClientRect().top")
+
+
+def check_keyboard_focus(page, _fixture):
+    swatch = field(page, "cursorColor").locator(".color-swatch")
+    hex_box = page.locator(".color-popover .cp-hex")
+    swatch.evaluate("node => node.scrollIntoView({block: 'center'})")
+    swatch.focus()
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)  # the popover focuses its hex box on the next frame
+    assert "cp-hex" in where(page)["cls"], "opening the popover did not move focus into its hex box: " + str(where(page))
+    # cursorColor is saturated, so a hue step changes its hex (black would not).
+    for selector, key in ((".cp-hue", "ArrowRight"), (".cp-square", "ArrowDown")):
+        before = hex_box.input_value()
+        page.locator(".color-popover " + selector).focus()
+        page.keyboard.press(key)
+        assert hex_box.input_value() != before, key + " on " + selector + " did not change the colour from " + before
+    # The popover is fixed to the viewport and follows its swatch when the field surface scrolls.
+    anchor_before, box_before = swatch.bounding_box()["y"], popover_box(page)
+    page.locator("#fieldSurface").evaluate("node => node.scrollBy(0, 60)")
+    page.wait_for_timeout(150)
+    moved = (swatch.bounding_box()["y"] - anchor_before, popover_box(page) - box_before)
+    assert abs(moved[0] + 60) < 1 and abs(moved[1] - moved[0]) < 1, "scrolling left the popover behind its swatch (swatch, popover moved): " + str(moved)
+    page.keyboard.press("Escape")
+    now = where(page)
+    assert popover_hidden(page) and now["field"] == "cursorColor" and now["tag"] == "BUTTON", "Escape did not close the popover and return focus to its swatch: " + str(now)
+    # Tab order treats the popover as if it sat right after its swatch, which it closes behind it.
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)
+    for _ in range(3):  # from the hex box to the hue bar, the square, then out of the popover
+        page.keyboard.press("Shift+Tab")
+    now = where(page)
+    assert popover_hidden(page) and now["field"] == "cursorColor" and now["tag"] == "BUTTON", "Shift+Tab out of the popover did not close it and return to its swatch: " + str(now)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)
+    for _ in range(4):  # from the hex box to R, G, B, then out of the popover
+        page.keyboard.press("Tab")
+    now = where(page)
+    assert popover_hidden(page) and now["field"] == "cursorColor" and now["tag"] == "INPUT", "Tab out of the popover did not close it and move on from its swatch: " + str(now)
+    # Focus moved out of it by anything else (assistive technology, a script) closes it too.
+    page.keyboard.press("Shift+Tab")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(150)
+    assert not popover_hidden(page), "Enter on the swatch did not reopen the popover: " + str(where(page))
+    page.locator("#fieldFilter").focus()
+    assert popover_hidden(page), "focus moved outside the popover left it open: " + str(where(page))
+    # Help honours its aria-modal: focus starts inside, stays inside, and returns to the opener.
+    page.locator("#helpButton").focus()
+    page.keyboard.press("Enter")
+    page.wait_for_function("!document.querySelector('#helpModal').hidden")
+    assert where(page)["id"] == "helpBody", "opening help did not move focus to the guide: " + str(where(page))
+    # Tab cycles between Close and the guide, so the guide stays reachable for arrow-key scrolling.
+    trail = []
+    for _ in range(3):
+        page.keyboard.press("Tab")
+        trail.append(where(page)["id"] or where(page)["tag"])
+    assert trail == ["helpCloseButton", "helpBody", "helpCloseButton"], "Tab did not cycle between Close and the guide inside the open help dialog: " + str(trail)
+    page.locator("#fieldFilter").focus()
+    assert where(page)["modal"], "the page behind the open help dialog still takes focus: " + str(where(page))
+    page.keyboard.press("Escape")
+    now = where(page)
+    assert page.locator("#helpModal").is_hidden() and now["id"] == "helpButton", "closing help did not return focus to the help button: " + str(now)
+    # Focus starts in the guide, so a guide longer than the dialog scrolls with the arrow keys at once.
+    page.evaluate("window.__helpText = Array.from({length: 400}, (_, i) => 'Line ' + i).join(String.fromCharCode(10))")
+    page.keyboard.press("Enter")
+    page.wait_for_function("!document.querySelector('#helpModal').hidden")
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(400)
+    assert page.evaluate("document.querySelector('#helpBody').scrollTop") > 0, "ArrowDown in the open help dialog did not scroll the guide: " + str(where(page))
+    page.keyboard.press("Escape")
+    # A section jump moves focus with the view.
+    page.locator("#sectionJump button[data-group='advanced']").focus()
+    page.keyboard.press("Enter")
+    assert where(page)["section"] == "section-advanced", "the advanced jump left focus outside its section: " + str(where(page))
+    page.keyboard.press("Tab")
+    now = where(page)
+    assert now["section"] == "section-advanced" and now["field"], "Tab after the advanced jump did not reach its first field: " + str(now)
+
+
+CONTROL_ROLES = {"checkbox", "combobox", "textbox", "searchbox", "spinbutton", "slider", "button", "listbox"}
+COMPOUND_KINDS = {"color", "rgb8", "font", "phrases", "palette", "stripes"}
+
+
+def ax_snapshot(page):
+    """Chromium's computed accessibility tree, each live node joined to its DOM element."""
+    cdp = page.context.new_cdp_session(page)
+    try:
+        root = cdp.send("DOM.getDocument", {"depth": -1})["root"]
+        nodes = cdp.send("Accessibility.getFullAXTree")["nodes"]
+    finally:
+        cdp.detach()
+    elements = {}
+    stack = [(root, ())]
+    while stack:
+        node, ancestors = stack.pop()
+        flat = node.get("attributes", [])
+        chain = ancestors + ((node.get("localName", ""), dict(zip(flat[::2], flat[1::2]))),)
+        elements[node["backendNodeId"]] = chain
+        stack.extend((child, chain) for child in node.get("children", []))
+    live = []
+    for node in nodes:
+        chain = elements.get(node.get("backendDOMNodeId"))
+        if node.get("ignored") or not chain:
+            continue
+        live.append({"role": node.get("role", {}).get("value", ""), "name": str(node.get("name", {}).get("value", "")).strip(),
+                     "tag": chain[-1][0], "attrs": chain[-1][1],
+                     "field": next((attrs["data-field"] for _, attrs in reversed(chain) if "data-field" in attrs), None),
+                     "surface": any(attrs.get("id") == "fieldSurface" for _, attrs in chain)})
+    return live
+
+
+def describe(node):
+    where = "#" + node["attrs"]["id"] if node["attrs"].get("id") else "[" + str(node["field"]) + "]"
+    return node["role"] + " " + node["tag"] + where
+
+
+def check_accessible_names(page, fixture):
+    page.locator("#importButton").click()  # #importInput is only in the tree while its panel is open
+    page.wait_for_function("!document.querySelector('#importPanel').hidden")
+    live = ax_snapshot(page)
+    roles = Counter(node["role"] for node in live)
+    for role in ("checkbox", "combobox", "textbox", "spinbutton", "slider", "button"):
+        assert roles[role], "witness: the accessibility tree has no live " + role + ": " + str(dict(roles))
+    controls = [node for node in live if node["role"] in CONTROL_ROLES]
+    unnamed = [describe(node) for node in controls if not node["name"]]
+    assert not unnamed, str(len(unnamed)) + " controls have no accessible name: " + ", ".join(unnamed[:10])
+    glyphs = [describe(node) + " " + repr(node["name"]) for node in controls if node["surface"] and not re.search("[A-Za-z]", node["name"])]
+    assert not glyphs, str(len(glyphs)) + " field buttons are named only by a glyph: " + ", ".join(glyphs[:6])
+    compound = sorted(entry["id"] for group in fixture["metadata"]["groups"] for entry in group["fields"] if entry["kind"] in COMPOUND_KINDS)
+    labels = dict(page.evaluate("ids => ids.map(id => [id, document.querySelector(`[data-field='${id}'] > label`).textContent])", compound))
+    # Chromium names from rendered text, so the label's text-transform: uppercase shows in the name.
+    groups = {node["attrs"]["data-field"]: node["name"].casefold() for node in live if node["role"] == "group" and "data-field" in node["attrs"]}
+    wrong = [key + "=" + repr(groups.get(key)) for key in compound if groups.get(key) != labels[key].casefold()]
+    assert not wrong, str(len(wrong)) + " compound editors are not a group named by their label: " + ", ".join(wrong)
+    page.locator("#cancelImportButton").click()
+    # The visible label operates the control it names: a click toggles the box or focuses the control.
+    key = page.locator(".checkbox-field:not(.disabled-field)").first.get_attribute("data-field")
+    before = field(page, key).locator("input").is_checked()
+    field(page, key).locator(":scope > label").click()
+    assert field(page, key).locator("input").is_checked() != before, "clicking the " + key + " label did not toggle its checkbox"
+    for control in ("select", "input[type=number]"):
+        key = page.locator(".field:not(.disabled-field):has(> " + control + ")").first.get_attribute("data-field")
+        field(page, key).locator(":scope > label").click()
+        assert page.evaluate("([key, control]) => document.activeElement === document.querySelector(`[data-field='${key}'] > ${control}`)", [key, control]), \
+            "clicking the " + key + " label did not focus its " + control
+
+
+FONT_NAMES = ["Fixture Font " + str(index) for index in range(50)]
+
+
+def check_font_list(page, _fixture):
+    lists = page.evaluate("[...document.querySelectorAll('[data-font-field=name]')].map(input => input.list?.options.length ?? null)")
+    assert lists == [len(FONT_NAMES)] * 2, "the two font-name boxes do not each offer the installed fonts: " + str(lists)
+    page.evaluate("window.__fontList = document.querySelector('[data-field=zmFont] [data-font-field=name]').list")
+    for text in ("font", ""):  # two full re-renders of the field surface
+        page.locator("#fieldFilter").fill(text)
+    now = page.evaluate("""() => ({options: document.querySelectorAll('datalist option').length,
+        connected: window.__fontList.isConnected,
+        shared: [...document.querySelectorAll('[data-font-field=name]')].map(input => input.list === window.__fontList)})""")
+    assert now["connected"] and now["shared"] == [True, True], "re-rendering replaced the font list instead of reusing it: " + str(now)
+    assert now["options"] == len(FONT_NAMES), "the page holds " + str(now["options"]) + " font options for " + str(len(FONT_NAMES)) + " fonts"
+
+
+def check_filter_actions(page, _fixture):
+    for text, shown in (("screensaver", True), ("RESTORE SCREEN", True), ("cursor", True), ("palette", False), ("", True)):
+        page.locator("#fieldFilter").fill(text)
+        now = page.evaluate("""() => ({buttons: ['#screensaverButton', '#restoreScreensaverButton'].map(id => document.querySelector(id)?.isConnected ?? false),
+            empty: Boolean(document.querySelector('.empty-hint')), grids: document.querySelectorAll('#section-launch .field-grid').length,
+            fields: document.querySelectorAll('#section-launch .field').length})""")
+        assert now["buttons"] == [shown, shown], "filter " + repr(text) + (" lost" if shown else " kept") + " the screensaver actions: " + str(now)
+        if text in ("screensaver", "RESTORE SCREEN"):
+            assert not now["empty"] and now["grids"] == 0, "an action-only match showed an empty hint or an empty field grid: " + str(now)
+            assert page.locator("#screensaverButton").is_visible() and page.locator("#restoreScreensaverButton").is_visible()
+        if text == "cursor":
+            assert now["fields"] > 0, "control: 'cursor' must match a Launch field: " + str(now)
 
 
 def check_close_snapshot(page, _fixture):
@@ -354,7 +694,21 @@ def check_actions(page, _fixture):
     page.wait_for_function("window.__smokeMessages.filter(m=>m.type==='restoreScreensaver').length===1")
 
 
+def check_preview_unavailable(page, fixture):
+    assert not fixture["preview"]["available"], "this check needs the default fixture, which has no web assets"
+    button = page.locator("#previewButton")
+    title = button.get_attribute("title") or ""
+    assert button.is_disabled(), "the preview button is enabled although there are no web assets"
+    assert "web assets not found" in title, "the disabled preview button does not say why: " + repr(title)
+    # A disabled button dispatches no click, even a programmatic one, so no click handler can explain it.
+    status = page.locator("#statusLine").inner_text()
+    button.evaluate("node => node.click()")
+    assert page.locator("#statusLine").inner_text() == status, "a click on the disabled preview button reached a handler"
+
+
 def check_preview_race(page, _fixture):
+    title = page.locator("#previewButton").get_attribute("title") or ""
+    assert page.locator("#previewButton").is_enabled() and "not found" not in title, "control: an available preview is reported missing: " + repr(title)
     choose_zmatrix(page)
     page.wait_for_function("document.querySelector('#previewFrame').src.includes('scene=zmatrix')")
     page.evaluate("window.__holdPreviewReplies=true;window.__heldPreviewReplies=[]")
@@ -768,6 +1122,14 @@ CHECKS = [
     ("ZMatrix CFG import preserves launch choices and reports migration", check_cfg),
     ("CFG chooser retains selected file text and cancellation", check_cfg_chooser),
     ("Late picker callbacks preserve disabled palette and stripe saved values", check_late_picker),
+    ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
+    ("Hex boxes refuse invalid colours and read text as the popover does", check_invalid_hex),
+    ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
+    ("Phrase editor shows and counts each saved phrase once", check_phrase_rows),
+    ("Keyboard focus moves into and back out of the popover, help and section jumps", check_keyboard_focus),
+    ("Field controls have accessible names and their labels operate them", check_accessible_names),
+    ("Font-name boxes share one installed-font list across re-renders", check_font_list),
+    ("Filter finds the screensaver actions by their own text", check_filter_actions),
     ("Closing snapshot captures the latest edit before the save debounce", check_close_snapshot),
     ("Wallpaper tests stay windowed and registration requires explicit actions", check_actions),
     ("ZMatrix editor bounds reject invalid glyphs and preserve empty phrases", check_limits),
@@ -782,11 +1144,16 @@ CHECKS = [
     ("Import status names dropped settings and points only retained ones to the report", check_import_status),
     ("Export .ps1 shows the script for manual copy when the clipboard is busy", check_export_fallback),
     ("Test status shows the command the host launched", check_test_status),
+    ("Preview button says why it is disabled without web assets", check_preview_unavailable),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
 
 def main():
+    # A failure message can quote a glyph (a button named only by an arrow). A redirected cp1252
+    # stream must escape it rather than crash the harness and skip the remaining checks.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", default="")
     parser.add_argument("--app-js", type=Path)
@@ -798,6 +1165,10 @@ def main():
     assert len([field for group in fixture["metadata"]["groups"] for field in group["fields"] if field["id"].startswith("zm")]) == 27, "stale fixture: rebuild the C# harness and dump loadState"
     source = args.app_js or CONFIGURATOR / "js" / "app.js"
     print("SOURCE", source, "sha256=" + hashlib.sha256(source.read_bytes()).hexdigest(), flush=True)
+    picker_source = CONFIGURATOR / "js" / "colorPicker.js"
+    print("PICKER", picker_source, "sha256=" + hashlib.sha256(picker_source.read_bytes()).hexdigest(), flush=True)
+    page_source = CONFIGURATOR / "index.html"
+    print("PAGE", page_source, "sha256=" + hashlib.sha256(page_source.read_bytes()).hexdigest(), flush=True)
     print("HARNESS", HARNESS, "sha256=" + hashlib.sha256(HARNESS.with_suffix(".dll").read_bytes()).hexdigest(), flush=True)
     try:
         from playwright.sync_api import sync_playwright
@@ -822,11 +1193,15 @@ def main():
                     page_fixture["preview"] = {"available": True, "origin": origin + "/preview/"}
                 if function in PRESET_CHECKS:
                     page_fixture = preset_store(page_fixture)
+                if function is check_font_list:
+                    page_fixture["fonts"] = FONT_NAMES
                 page.add_init_script(STUB.replace("__STATE__", json.dumps(page_fixture, ensure_ascii=False)))
                 try:
                     page.goto(origin + "/index.html", wait_until="load")
                     page.wait_for_function("document.querySelectorAll('.field').length>40")
                     assert page.request.get(origin + "/js/app.js").body() == source.read_bytes(), "served source witness mismatch"
+                    assert page.request.get(origin + "/js/colorPicker.js").body() == picker_source.read_bytes(), "served colorPicker witness mismatch"
+                    assert page.request.get(origin + "/index.html").body() == page_source.read_bytes(), "served index.html witness mismatch"
                     function(page, fixture)
                     assert not errors, "; ".join(errors)
                     print("PASS", name, flush=True)

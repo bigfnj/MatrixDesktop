@@ -24,7 +24,7 @@
 					<button id="renamePresetButton" type="button">Rename</button>
 					<button id="deletePresetButton" type="button">Delete</button>
 					<span class="toolbar-sep" aria-hidden="true"></span>
-					<button id="previewButton" type="button" title="Open live preview window">Preview</button>
+					<button id="previewButton" type="button" title="Show or hide the live preview pane">Preview</button>
 					<button id="themeButton" type="button" title="Toggle dark / light theme">🌙</button>
 					<button id="helpButton" type="button" title="Argument reference">?</button>
 				</div>
@@ -47,11 +47,11 @@
 
 			<footer class="command-panel">
 				<div class="command-header">
-					<span>Generated command</span>
+					<span id="commandLabel">Generated command</span>
 					<span id="saveState" class="save-state"></span>
 				</div>
 				<div class="command-row">
-					<textarea id="commandOutput" spellcheck="false" readonly></textarea>
+					<textarea id="commandOutput" spellcheck="false" readonly aria-labelledby="commandLabel"></textarea>
 					<div class="command-actions">
 						<select id="randomizeScope" aria-label="Randomize scope">
 							<option value="visual">Visual preset</option>
@@ -69,8 +69,8 @@
 					</div>
 				</div>
 				<div id="importPanel" class="import-panel" hidden>
-					<div class="import-header">Paste a command, arguments or ZMatrix .cfg</div>
-					<textarea id="importInput" spellcheck="false"></textarea>
+					<div id="importLabel" class="import-header">Paste a command, arguments or ZMatrix .cfg</div>
+					<textarea id="importInput" spellcheck="false" aria-labelledby="importLabel"></textarea>
 					<div class="import-actions">
 						<button id="applyImportButton" type="button">Apply Import</button>
 						<button id="importFileButton" type="button">Choose .cfg file</button>
@@ -94,7 +94,7 @@
 					<h2 id="helpTitle">Argument reference</h2>
 					<button id="helpCloseButton" type="button" aria-label="Close">×</button>
 				</div>
-				<pre id="helpBody" class="modal-body"></pre>
+				<pre id="helpBody" class="modal-body" tabindex="-1"></pre>
 			</div>
 		</div>
 

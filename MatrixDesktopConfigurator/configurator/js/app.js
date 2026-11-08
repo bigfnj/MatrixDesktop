@@ -1,4 +1,4 @@
-﻿import { openColorPicker } from "./colorPicker.js";
+﻿import { clamp01, closeColorPicker, colorToHex, format01, openColorPicker, parseHex } from "./colorPicker.js";
 
 const state = {
 	metadata: null,
@@ -33,6 +33,7 @@ const state = {
 };
 
 const el = {
+	appShell: document.querySelector(".app-shell"),
 	storageStatus: document.querySelector("#storageStatus"),
 	presetSelect: document.querySelector("#presetSelect"),
 	newPresetButton: document.querySelector("#newPresetButton"),
@@ -40,7 +41,6 @@ const el = {
 	saveAsPresetButton: document.querySelector("#saveAsPresetButton"),
 	renamePresetButton: document.querySelector("#renamePresetButton"),
 	deletePresetButton: document.querySelector("#deletePresetButton"),
-	groupNav: document.querySelector("#groupNav"),
 	fieldFilter: document.querySelector("#fieldFilter"),
 	sectionJump: document.querySelector("#sectionJump"),
 	fieldSurface: document.querySelector("#fieldSurface"),
@@ -109,35 +109,9 @@ const requestHost = (type, payload = {}) =>
 	});
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
-const clamp01 = (value) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 const toNumber = (value, fallback = 0) => {
 	const number = Number.parseFloat(value);
 	return Number.isFinite(number) ? number : fallback;
-};
-
-const colorToHex = (color) => {
-	const channel = (value) =>
-		Math.round(clamp01(Number(value)) * 255)
-			.toString(16)
-			.padStart(2, "0");
-	return `#${channel(color?.r)}${channel(color?.g)}${channel(color?.b)}`;
-};
-
-const hexToColor = (hex) => {
-	const normalized = String(hex || "#000000").replace("#", "");
-	const value = normalized.length === 3
-		? normalized.split("").map((c) => c + c).join("")
-		: normalized.padEnd(6, "0").slice(0, 6);
-	return {
-		r: Number.parseInt(value.slice(0, 2), 16) / 255,
-		g: Number.parseInt(value.slice(2, 4), 16) / 255,
-		b: Number.parseInt(value.slice(4, 6), 16) / 255,
-	};
-};
-
-const format01 = (value) => {
-	const number = clamp01(Number(value));
-	return Number.isInteger(number) ? String(number) : number.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
 
 const normalizeColor = (color) => ({
@@ -161,7 +135,6 @@ const makeSwatchButton = (color, { disabled = false, label = "color" } = {}) => 
 	return button;
 };
 
-const allFields = () => state.metadata.groups.flatMap((group) => group.fields);
 // AUD-13: what the renderer draws for each field a command leaves out, for this draft's
 // scene, version and effect, in config.js's order: an effect's implied values over the scene
 // profile over the version over the catalog. The page's copy of ConfiguratorMetadata
@@ -338,7 +311,9 @@ const setPreviewVisible = (visible) => {
 	document.body.classList.toggle("preview-hidden", !state.previewVisible);
 	if (el.previewButton) {
 		el.previewButton.textContent = state.previewVisible ? "Hide preview" : "Show preview";
-		el.previewButton.title = state.previewVisible ? "Hide the live preview pane" : "Show the live preview pane";
+		// Without web assets the button stays disabled, and its title is the only place the reason shows.
+		el.previewButton.title = !state.previewAvailable ? "Matrix web assets not found next to the configurator"
+			: state.previewVisible ? "Hide the live preview pane" : "Show the live preview pane";
 	}
 	if (state.previewVisible) {
 		state.previewLastUrl = ""; // force a refresh on next push
@@ -384,7 +359,11 @@ const renderNav = () => {
 		button.addEventListener("click", () => {
 			state.activeGroupId = group.id;
 			const section = document.getElementById(`section-${group.id}`);
-			if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+			if (section) {
+				section.scrollIntoView({ behavior: "smooth", block: "start" });
+				// Focus moves with the view, so the next Tab continues inside the section.
+				section.querySelector(".section-title")?.focus({ preventScroll: true });
+			}
 			highlightNav();
 		});
 		el.sectionJump.append(button);
@@ -453,14 +432,61 @@ const sceneSections = (scene) => {
 	return sections;
 };
 
+// Keyboard focus across a rebuild. A removed control takes focus with it to <body>, so
+// every gating change and list edit used to send the next Tab back to the first field.
+// The focused control is recorded by position (its field, its list row and its index in
+// that row, or among the field's controls outside rows) and the same position is focused
+// in the rebuilt field. A removed last row lands on the new last row; an emptied list, or
+// a control that is now disabled, falls back to the field's first enabled control.
+const focusableSelector = "input, select, textarea, button, summary";
+const focusRowSelector = ".list-row, .phrase-row";
+const focusControls = (scope, inRow) =>
+	[...scope.querySelectorAll(focusableSelector)].filter((node) => inRow || !node.closest(focusRowSelector));
+const captureFocus = (root) => {
+	const node = document.activeElement;
+	if (!node || node === document.body || !root.contains(node)) return null;
+	const shell = node.closest("[data-field]");
+	const row = node.closest(focusRowSelector);
+	return {
+		node,
+		field: shell?.dataset.field ?? null,
+		row: row && shell ? [...shell.querySelectorAll(focusRowSelector)].indexOf(row) : -1,
+		index: (row ? focusControls(row, true) : focusControls(shell ?? root, false)).indexOf(node),
+	};
+};
+const restoreFocus = (shell, focus) => {
+	if (!focus) return;
+	// Moved rather than rebuilt (the screensaver actions): the same node, refocused.
+	if (focus.node.isConnected) {
+		focus.node.focus({ preventScroll: true });
+		return;
+	}
+	if (!shell) return;
+	const rows = shell.querySelectorAll(focusRowSelector);
+	const row = focus.row >= 0 && rows.length ? rows[Math.min(focus.row, rows.length - 1)] : null;
+	const inRow = row ? focusControls(row, true) : [];
+	const outside = focusControls(shell, false);
+	const preferred = row ? inRow[Math.min(focus.index, inRow.length - 1)] : focus.row < 0 ? outside[focus.index] : null;
+	for (const candidate of [preferred, ...inRow, ...outside]) {
+		if (!candidate || candidate.disabled) continue;
+		candidate.focus({ preventScroll: true });
+		if (document.activeElement === candidate) return;
+	}
+};
+
 // Render every group as a section (sticky header + field grid) into one
 // scrollable surface. A non-empty filter keeps only fields whose visible label,
 // catalog label or either section title matches, and drops emptied sections, so a
 // field moved for the scene is still found by its catalog name. Scroll position is
 // preserved so a gating-triggered re-render doesn't jump the view.
 const renderFields = () => {
+	// The popover is bound to the row that opened it. A rebuild without a pointerdown
+	// (keyboard activation, a gating select, refreshAll) used to leave it writing through
+	// that detached row's closure: a removed stop came back, or a reorder lost a neighbour.
+	closeColorPicker();
 	const surface = el.fieldSurface;
 	const prevScroll = surface.scrollTop;
+	const focus = captureFocus(surface);
 	surface.replaceChildren();
 
 	const filter = state.filter.trim().toLowerCase();
@@ -469,7 +495,12 @@ const renderFields = () => {
 			? fields.filter((field) => [field.label, field.catalogLabel, group.title, field.catalogGroupTitle]
 				.some((text) => typeof text === "string" && text.toLowerCase().includes(filter)))
 			: fields;
-		if (matching.length === 0) continue;
+		// The screensaver actions belong to the Launch section and are also found by their own text.
+		const actions = group.id === "launch" && el.screensaverButton && el.restoreScreensaverButton
+			? [el.screensaverButton, el.restoreScreensaverButton] : [];
+		const showActions = actions.length > 0
+			&& (matching.length > 0 || actions.some((button) => button.textContent.toLowerCase().includes(filter)));
+		if (matching.length === 0 && !showActions) continue;
 
 		const section = document.createElement("section");
 		section.className = "field-section";
@@ -477,6 +508,7 @@ const renderFields = () => {
 
 		const header = document.createElement("h2");
 		header.className = "section-title";
+		header.tabIndex = -1; // the jump list focuses it
 		header.textContent = group.title;
 		section.append(header);
 
@@ -485,10 +517,10 @@ const renderFields = () => {
 		for (const field of matching) {
 			grid.append(renderField(field));
 		}
-		section.append(grid);
-		if (group.id === "launch" && el.screensaverButton && el.restoreScreensaverButton) {
-			const actions = document.createElement("div"); actions.className = "screensaver-actions";
-			actions.append(el.screensaverButton, el.restoreScreensaverButton); section.append(actions);
+		if (matching.length > 0) section.append(grid);
+		if (showActions) {
+			const row = document.createElement("div"); row.className = "screensaver-actions";
+			row.append(...actions); section.append(row);
 		}
 		if (group.id === "zmatrix" && state.draft.scene === "zmatrix" && state.draft.zmImportNotes?.length) {
 			const report = document.createElement("details");
@@ -523,6 +555,7 @@ const renderFields = () => {
 		surface.append(empty);
 	}
 
+	restoreFocus(focus?.field ? surface.querySelector(`[data-field="${CSS.escape(focus.field)}"]`) : null, focus);
 	surface.scrollTop = prevScroll;
 };
 
@@ -531,6 +564,14 @@ const renderField = (field) => {
 		color: renderColorField, rgb8: renderRgb8Field, font: renderFontField, characters: renderCharacterField,
 		phrases: renderPhraseField, palette: renderPaletteField, stripes: renderStripesField };
 	const shell = (renderers[field.kind] || renderTextField)(field);
+	// A compound editor holds several controls under one visible label, so the label names
+	// the editor as a group; single-control renderers bind it to their control (bindLabel).
+	const label = shell.querySelector(":scope > label");
+	if (label && !label.htmlFor) {
+		label.id = `label-${field.id}`;
+		shell.setAttribute("role", "group");
+		shell.setAttribute("aria-labelledby", label.id);
+	}
 	// Compound editors contain several native controls. Disable every descendant,
 	// including swatches and palette actions, rather than only styling the shell.
 	if (getDisabledReason(field)) {
@@ -615,10 +656,18 @@ const createFieldShell = (field, extraClass = "") => {
 	return shell;
 };
 
+// The visible label names a single-control field for assistive technology and operates it:
+// a click toggles the checkbox or focuses the control.
+const bindLabel = (shell, control, field) => {
+	control.id = `field-${field.id}`;
+	shell.querySelector(":scope > label").htmlFor = control.id;
+};
+
 const renderBoolField = (field) => {
 	const shell = createFieldShell(field, "checkbox-field");
 	const input = document.createElement("input");
 	input.type = "checkbox";
+	bindLabel(shell, input, field);
 	input.disabled = Boolean(getDisabledReason(field));
 	input.checked = Boolean(state.draft[field.id]);
 	input.addEventListener("change", () => {
@@ -634,6 +683,7 @@ const renderBoolField = (field) => {
 const renderSelectField = (field) => {
 	const shell = createFieldShell(field);
 	const select = document.createElement("select");
+	bindLabel(shell, select, field);
 	for (const option of field.options || []) {
 		select.add(new Option(option.label, option.value));
 	}
@@ -656,6 +706,7 @@ const renderNumberField = (definition) => {
 	const input = document.createElement("input");
 	input.type = "number";
 	input.setAttribute("aria-label", `${field.label} value`);
+	bindLabel(shell, input, field);
 	if (field.min != null) input.min = field.min;
 	if (field.max != null) input.max = field.max;
 	if (field.step != null) input.step = field.step;
@@ -762,6 +813,7 @@ const renderTextField = (field) => {
 	const shell = createFieldShell(field);
 	const input = document.createElement("input");
 	input.type = "text";
+	bindLabel(shell, input, field);
 	input.disabled = Boolean(getDisabledReason(field));
 	input.value = state.draft[field.id] ?? "";
 	input.addEventListener("input", () => updateDraftValue(field, input.value));
@@ -770,6 +822,7 @@ const renderTextField = (field) => {
         const browse = document.createElement("button");
         browse.type = "button";
         browse.textContent = "Browse...";
+        browse.setAttribute("aria-label", `Browse for ${field.label}`);
         browse.disabled = input.disabled;
         browse.addEventListener("click", async () => {
             try {
@@ -791,6 +844,7 @@ const renderCharacterField = (field) => {
 	const input = document.createElement("textarea");
 	input.rows = 2;
 	input.setAttribute("aria-label", field.label);
+	bindLabel(shell, input, field);
 	input.value = (state.draft[field.id] ?? field.defaultValue ?? []).join("");
 	const hint = document.createElement("div"); hint.className = "field-help";
 	const validate = () => {
@@ -814,15 +868,29 @@ const renderPhraseField = (field) => {
 	const editor = document.createElement("div"); editor.className = "phrase-editor";
 	let phrases = [...(state.draft[field.id] ?? field.defaultValue ?? [])];
 	const hint = document.createElement("div"); hint.className = "field-help";
+	const validPhrase = value => value.length > 0 && value.length <= 256 && !invalidBmpText(value);
+	// The draft keeps each phrase once, so the count is of distinct phrases and a row repeating an
+	// earlier one is marked: the editor used to show and count rows the save had dropped.
+	const countText = () => {
+		const distinct = new Set(phrases).size, repeated = phrases.length - distinct;
+		return distinct + " phrase entries" + (repeated ? "; " + repeated + (repeated === 1 ? " duplicate" : " duplicates") + " ignored" : "");
+	};
+	// Only where the rows match the list: after typing and at the end of every redraw. Add and
+	// Remove save before they redraw, while the old rows are still on screen.
+	const markRows = () => editor.querySelectorAll(".phrase-row input").forEach((input, index) => {
+		const first = phrases.indexOf(phrases[index]);
+		input.setCustomValidity(first < index ? "Repeats phrase " + (first + 1) + ", so it is saved once." : "");
+		input.classList.toggle("invalid-input", first < index || !validPhrase(phrases[index]));
+	});
 	const save = () => {
-		const valid = phrases.length <= 64 && phrases.every(value => value.length > 0 && value.length <= 256 && !invalidBmpText(value))
-			&& new Set(phrases.join("")).size <= 1024;
-		hint.textContent = valid ? phrases.length + " phrase entries" : "Use up to 64 nonempty phrases, 256 BMP characters each and 1024 distinct glyphs.";
+		const valid = phrases.length <= 64 && phrases.every(validPhrase) && new Set(phrases.join("")).size <= 1024;
+		hint.textContent = valid ? countText() : "Use up to 64 nonempty phrases, 256 BMP characters each and 1024 distinct glyphs.";
 		hint.classList.toggle("validation-error", !valid);
 		if (valid) updateDraftValue(field, [...new Set(phrases)]);
 		return valid;
 	};
 	const draw = () => {
+		const focus = captureFocus(editor);
 		editor.replaceChildren();
 		phrases.forEach((phrase, index) => {
 			const row = document.createElement("div"); row.className = "phrase-row";
@@ -831,7 +899,9 @@ const renderPhraseField = (field) => {
 			input.addEventListener("input", () => {
 				if (getDisabledReason(field)) return;
 				phrases[index] = input.value;
-				input.classList.toggle("invalid-input", !save());
+				const valid = save();
+				markRows();
+				if (!valid) input.classList.add("invalid-input");
 			});
 			const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
 			remove.addEventListener("click", () => { if (!getDisabledReason(field)) { phrases.splice(index, 1); save(); draw(); } });
@@ -839,11 +909,29 @@ const renderPhraseField = (field) => {
 		});
 		const add = document.createElement("button"); add.type = "button"; add.textContent = "Add phrase";
 		add.disabled = phrases.length >= 64;
-		add.addEventListener("click", () => { if (!getDisabledReason(field) && phrases.length < 64) { phrases.push("New phrase"); save(); draw(); } });
+		add.addEventListener("click", () => {
+			if (getDisabledReason(field) || phrases.length >= 64) return;
+			let text = "New phrase";
+			for (let n = 2; phrases.includes(text); n++) text = "New phrase " + n;
+			phrases.push(text); save(); draw();
+		});
 		editor.append(add);
 		if (getDisabledReason(field)) for (const control of editor.querySelectorAll("input, button")) control.disabled = true;
+		markRows();
+		restoreFocus(shell, focus);
 	};
-	hint.textContent = phrases.length + " phrase entries"; draw(); shell.append(editor, hint); return shell;
+	hint.textContent = countText(); draw(); shell.append(editor, hint); return shell;
+};
+
+// One list of installed font families serves every font-name box. It is built once, outside
+// the field surface: renderFields clears the surface on every filter keystroke, gating change
+// and list edit, and used to rebuild two copies of the list each time.
+const fontListId = "installed-font-families";
+const renderFontList = (names) => {
+	const list = document.createElement("datalist");
+	list.id = fontListId;
+	for (const name of names) list.append(new Option(name, name));
+	document.body.append(list);
 };
 
 const renderFontField = (field) => {
@@ -871,9 +959,7 @@ const renderFontField = (field) => {
 			if (input.type === "number") { input.min = String(option.min); input.max = String(option.max); input.step = "1"; }
 			else {
 				input.maxLength = 31;
-				const list = document.createElement("datalist"); list.id = field.id + "-families";
-				for (const name of state.fontNames || []) list.append(new Option(name, name));
-				input.setAttribute("list", list.id); label.append(list);
+				input.setAttribute("list", fontListId);
 			}
 			input.addEventListener("input", () => {
 				const valid = input.type === "number" ? input.value !== "" && Number.isFinite(Number(input.value))
@@ -1030,9 +1116,9 @@ const renderPaletteRow = (field, stops, stop, index) => {
 	at.step = "0.01";
 	at.setAttribute("aria-label", `${name} position`);
 	at.value = format01(value.at);
-	const up = miniButton("↑");
-	const down = miniButton("↓");
-	const remove = miniButton("×");
+	const up = miniButton("↑", `Move ${name} up`);
+	const down = miniButton("↓", `Move ${name} down`);
+	const remove = miniButton("×", `Remove ${name}`);
 
 	// Color/hex/at edits update in place (no renderFields → no focus loss).
 	const persist = () => {
@@ -1049,10 +1135,16 @@ const renderPaletteRow = (field, stops, stop, index) => {
 		value = { ...value, ...normalizeColor(next) };
 		swatch.style.background = colorToHex(value);
 		hex.value = colorToHex(value);
+		hex.classList.remove("invalid-input");
 		persist();
 	}));
+	// Text that is not a whole hex colour is marked and not saved: the lenient parser this
+	// replaces stored a NaN channel for "red", which the draft saved as null.
 	hex.addEventListener("input", () => {
-		value = { ...value, ...hexToColor(hex.value) };
+		const parsed = parseHex(hex.value);
+		hex.classList.toggle("invalid-input", !parsed);
+		if (!parsed) return;
+		value = { ...value, ...normalizeColor(parsed) };
 		swatch.style.background = colorToHex(value);
 		persist();
 	});
@@ -1115,9 +1207,9 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 	hex.setAttribute("aria-label", `${name} hex`);
 	hex.value = colorToHex(value);
 	hex.disabled = disabled;
-	const up = miniButton("↑");
-	const down = miniButton("↓");
-	const remove = miniButton("×");
+	const up = miniButton("↑", `Move ${name} up`);
+	const down = miniButton("↓", `Move ${name} down`);
+	const remove = miniButton("×", `Remove ${name}`);
 
 	const persist = () => {
 		colors[index] = { ...value };
@@ -1134,11 +1226,15 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 			value = normalizeColor(next);
 			swatch.style.background = colorToHex(value);
 			hex.value = colorToHex(value);
+			hex.classList.remove("invalid-input");
 			persist();
 		});
 	});
 	hex.addEventListener("input", () => {
-		value = normalizeColor(hexToColor(hex.value));
+		const parsed = parseHex(hex.value);
+		hex.classList.toggle("invalid-input", !parsed);
+		if (!parsed) return;
+		value = normalizeColor(parsed);
 		swatch.style.background = colorToHex(value);
 		persist();
 	});
@@ -1161,10 +1257,12 @@ const renderStripeRow = (field, colors, color, index, disabled) => {
 	return row;
 };
 
-const miniButton = (text) => {
+// The glyph is the visible face; label is what assistive technology announces.
+const miniButton = (text, label) => {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.textContent = text;
+	button.setAttribute("aria-label", label);
 	return button;
 };
 
@@ -1455,22 +1553,31 @@ const bindEvents = () => {
 
 	if (el.previewButton) {
 		el.previewButton.addEventListener("click", () => {
-			if (!state.previewAvailable) {
-				setStatus("Live preview unavailable: matrix web assets not found next to the configurator.", "error");
-				return;
-			}
 			setPreviewVisible(!state.previewVisible);
 			setStatus(state.previewVisible ? "Preview shown." : "Preview hidden.", "ok");
 		});
 	}
 
 	if (el.helpButton && el.helpModal && el.helpBody && el.helpCloseButton) {
-		const closeHelp = () => { el.helpModal.hidden = true; };
+		// The dialog declares aria-modal, so it behaves as one: the page behind is inert, focus
+		// starts in the guide, Tab cycles inside the dialog and closing returns focus to the opener.
+		let opener = null;
+		const closeHelp = () => {
+			if (el.helpModal.hidden) return;
+			el.helpModal.hidden = true;
+			if (el.appShell) el.appShell.inert = false;
+			if (opener?.isConnected) opener.focus();
+			opener = null;
+		};
 		el.helpButton.addEventListener("click", async () => {
+			const from = document.activeElement;
 			try {
 				const result = await requestHost("loadHelp");
 				el.helpBody.textContent = result?.text ?? "Argument guide unavailable.";
+				opener = from;
+				if (el.appShell) el.appShell.inert = true;
 				el.helpModal.hidden = false;
+				el.helpBody.focus();
 			} catch (error) {
 				setStatus(`Help failed: ${error.message}`, "error");
 			}
@@ -1478,6 +1585,12 @@ const bindEvents = () => {
 		el.helpCloseButton.addEventListener("click", closeHelp);
 		el.helpModal.addEventListener("click", (event) => {
 			if (event.target === el.helpModal) closeHelp();
+		});
+		el.helpModal.addEventListener("keydown", (event) => {
+			if (event.key !== "Tab") return;
+			event.preventDefault();
+			const stops = [el.helpBody, el.helpCloseButton];
+			stops[(stops.indexOf(document.activeElement) + (event.shiftKey ? stops.length - 1 : 1)) % stops.length].focus();
 		});
 		document.addEventListener("keydown", (event) => {
 			if (event.key === "Escape" && !el.helpModal.hidden) closeHelp();
@@ -1489,7 +1602,7 @@ const init = async () => {
 	try {
 		const payload = await requestHost("loadState");
 		state.metadata = payload.metadata;
-		state.fontNames = payload.fonts || [];
+		renderFontList(payload.fonts || []);
 		state.defaultDraft = payload.defaultDraft;
 		state.presets = payload.state?.userPresets || [];
 		state.selectedPresetId = payload.state?.selectedPresetId || null;
@@ -1511,10 +1624,7 @@ const init = async () => {
 		const preview = payload.preview || {};
 		state.previewAvailable = Boolean(preview.available && preview.origin);
 		state.previewOrigin = preview.origin || null;
-		if (!state.previewAvailable && el.previewButton) {
-			el.previewButton.disabled = true;
-			el.previewButton.title = "Matrix web assets not found next to the configurator";
-		}
+		if (!state.previewAvailable && el.previewButton) el.previewButton.disabled = true;
 
 		bindEvents();
 		setDirty(false);

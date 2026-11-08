@@ -5,10 +5,13 @@
 //
 // One popover element is created lazily and reused for every swatch, so the
 // DOM stays light no matter how many colors / palette stops are on screen.
+//
+// The colour helpers are exported so app.js reads and writes colours exactly as the popover
+// does. Its own copies had drifted: " #ff880" was #0ff880 in a row box and #ff8800 here.
 
-const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+export const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
-export const rgbToHsv = ({ r, g, b }) => {
+const rgbToHsv = ({ r, g, b }) => {
 	r = clamp01(r); g = clamp01(g); b = clamp01(b);
 	const max = Math.max(r, g, b);
 	const min = Math.min(r, g, b);
@@ -24,7 +27,7 @@ export const rgbToHsv = ({ r, g, b }) => {
 	return { h, s: max === 0 ? 0 : d / max, v: max };
 };
 
-export const hsvToRgb = ({ h, s, v }) => {
+const hsvToRgb = ({ h, s, v }) => {
 	h = ((h % 360) + 360) % 360;
 	s = clamp01(s);
 	v = clamp01(v);
@@ -41,23 +44,29 @@ export const hsvToRgb = ({ h, s, v }) => {
 	return { r: r + m, g: g + m, b: b + m };
 };
 
-export const colorToHex = ({ r, g, b }) => {
-	const ch = (v) => Math.round(clamp01(v) * 255).toString(16).padStart(2, "0");
-	return `#${ch(r)}${ch(g)}${ch(b)}`;
+// A missing colour or channel reads as 0.
+export const colorToHex = (color) => {
+	const ch = (v) => Math.round(clamp01(Number(v)) * 255).toString(16).padStart(2, "0");
+	return `#${ch(color?.r)}${ch(color?.g)}${ch(color?.b)}`;
 };
 
-export const hexToColor = (hex) => {
-	const n = String(hex || "").replace(/[^0-9a-f]/gi, "");
-	const s = n.length === 3 ? n.split("").map((c) => c + c).join("") : n.padEnd(6, "0").slice(0, 6);
+// Strict: "#rgb" or "#rrggbb" (the "#" optional, surrounding spaces ignored), otherwise null,
+// so a partly typed or mistyped value is refused rather than guessed. The lenient parsers it
+// replaces read "red" as #ed0000 here and as a NaN channel in a palette row, which the draft
+// saved as null.
+export const parseHex = (text) => {
+	const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(text ?? "").trim());
+	if (!match) return null;
+	const digits = match[1].length === 3 ? [...match[1]].map((c) => c + c).join("") : match[1];
 	return {
-		r: parseInt(s.slice(0, 2), 16) / 255,
-		g: parseInt(s.slice(2, 4), 16) / 255,
-		b: parseInt(s.slice(4, 6), 16) / 255,
+		r: parseInt(digits.slice(0, 2), 16) / 255,
+		g: parseInt(digits.slice(2, 4), 16) / 255,
+		b: parseInt(digits.slice(4, 6), 16) / 255,
 	};
 };
 
-const fmt = (v) => {
-	const n = clamp01(v);
+export const format01 = (v) => {
+	const n = clamp01(Number(v));
 	return Number.isInteger(n) ? String(n) : n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 };
 
@@ -65,14 +74,16 @@ let refs = null;   // cached element references (built once)
 let ctx = null;    // { hsv, color, onChange, anchor }
 let outsideHandler = null;
 let keyHandler = null;
+let focusHandler = null;
+let scrollHandler = null;
 
 const build = () => {
 	const root = document.createElement("div");
 	root.className = "color-popover";
 	root.hidden = true;
 	root.innerHTML = `
-		<div class="cp-square" tabindex="-1"><div class="cp-square-thumb"></div></div>
-		<div class="cp-hue"><div class="cp-hue-thumb"></div></div>
+		<div class="cp-square" tabindex="0" role="slider" aria-label="Saturation and brightness" aria-valuemin="0" aria-valuemax="100"><div class="cp-square-thumb"></div></div>
+		<div class="cp-hue" tabindex="0" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360"><div class="cp-hue-thumb"></div></div>
 		<div class="cp-inputs">
 			<label class="cp-hex-field">HEX<input type="text" class="cp-hex" spellcheck="false" maxlength="7" /></label>
 			<div class="cp-rgb">
@@ -97,7 +108,16 @@ const build = () => {
 	return root;
 };
 
+// The popover lives in document.body and outlives the editor that opened it. An edit that
+// arrives after its anchor left the document belongs to a row that no longer exists, so it
+// closes the popover instead of writing through that row's stale closure.
+const liveContext = () => {
+	if (ctx && !ctx.anchor.isConnected) closeColorPicker();
+	return ctx;
+};
+
 const emit = (skip) => {
+	if (!liveContext()) return;
 	ctx.color = hsvToRgb(ctx.hsv);
 	render(skip);
 	if (ctx.onChange) ctx.onChange({ ...ctx.color });
@@ -112,10 +132,17 @@ const render = (skip) => {
 	refs.squareThumb.style.top = `${(1 - v) * 100}%`;
 	refs.squareThumb.style.background = hex;
 	refs.hueThumb.style.left = `${(h / 360) * 100}%`;
-	if (skip !== refs.hex) refs.hex.value = hex;
-	if (skip !== refs.r) refs.r.value = fmt(ctx.color.r);
-	if (skip !== refs.g) refs.g.value = fmt(ctx.color.g);
-	if (skip !== refs.b) refs.b.value = fmt(ctx.color.b);
+	refs.square.setAttribute("aria-valuenow", String(Math.round(s * 100)));
+	refs.square.setAttribute("aria-valuetext", `Saturation ${Math.round(s * 100)}%, brightness ${Math.round(v * 100)}%`);
+	refs.hue.setAttribute("aria-valuenow", String(Math.round(h)));
+	refs.hue.setAttribute("aria-valuetext", `Hue ${Math.round(h)} degrees`);
+	if (skip !== refs.hex) {
+		refs.hex.value = hex;
+		refs.hex.classList.remove("invalid-input");
+	}
+	if (skip !== refs.r) refs.r.value = format01(ctx.color.r);
+	if (skip !== refs.g) refs.g.value = format01(ctx.color.g);
+	if (skip !== refs.b) refs.b.value = format01(ctx.color.b);
 };
 
 // Preserve the current hue when saturation collapses to 0 (grays have no
@@ -180,9 +207,42 @@ const wire = () => {
 	refs.square.addEventListener("pointerdown", startDrag(dragSquare));
 	refs.hue.addEventListener("pointerdown", startDrag((x) => dragHue(x)));
 
+	// Arrow keys step the square (saturation across, brightness up and down) by 0.01 and the hue
+	// bar by 1 degree, ten times that with Shift, so neither needs a pointer.
+	refs.square.addEventListener("keydown", (event) => {
+		const step = event.shiftKey ? 0.1 : 0.01;
+		const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowDown: [0, -step], ArrowUp: [0, step] }[event.key];
+		if (!delta || !liveContext()) return;
+		event.preventDefault();
+		ctx.hsv.s = clamp01(ctx.hsv.s + delta[0]);
+		ctx.hsv.v = clamp01(ctx.hsv.v + delta[1]);
+		emit();
+	});
+	refs.hue.addEventListener("keydown", (event) => {
+		const step = event.shiftKey ? 10 : 1;
+		const delta = { ArrowLeft: -step, ArrowDown: -step, ArrowRight: step, ArrowUp: step }[event.key];
+		if (!delta || !liveContext()) return;
+		event.preventDefault();
+		ctx.hsv.h = Math.max(0, Math.min(360, ctx.hsv.h + delta));
+		emit();
+	});
+	// The popover is the last element of the page but belongs to its swatch: Shift+Tab before its
+	// first control returns to the swatch, and Tab past its last moves on from the swatch.
+	refs.root.addEventListener("keydown", (event) => {
+		if (event.key !== "Tab" || event.target !== (event.shiftKey ? refs.square : refs.b) || !ctx) return;
+		const { anchor } = ctx;
+		closeColorPicker();
+		if (!anchor.isConnected) return;
+		if (event.shiftKey) event.preventDefault();
+		anchor.focus(); // without preventDefault the browser's own Tab then leaves the swatch
+	});
+
 	refs.hex.addEventListener("input", () => {
-		if (!ctx) return;
-		ctx.color = hexToColor(refs.hex.value);
+		if (!liveContext()) return;
+		const color = parseHex(refs.hex.value);
+		refs.hex.classList.toggle("invalid-input", !color);
+		if (!color) return;
+		ctx.color = color;
 		ctx.hsv = hsvFromColor(ctx.color);
 		render(refs.hex);
 		if (ctx.onChange) ctx.onChange({ ...ctx.color });
@@ -190,7 +250,7 @@ const wire = () => {
 
 	for (const channel of ["r", "g", "b"]) {
 		refs[channel].addEventListener("input", () => {
-			if (!ctx) return;
+			if (!liveContext()) return;
 			ctx.color = { ...ctx.color, [channel]: clamp01(Number.parseFloat(refs[channel].value)) };
 			ctx.hsv = hsvFromColor(ctx.color);
 			render(refs[channel]);
@@ -213,8 +273,12 @@ const position = (anchor) => {
 const detachGlobal = () => {
 	if (outsideHandler) document.removeEventListener("pointerdown", outsideHandler, true);
 	if (keyHandler) document.removeEventListener("keydown", keyHandler);
+	if (focusHandler) document.removeEventListener("focusin", focusHandler, true);
+	if (scrollHandler) document.removeEventListener("scroll", scrollHandler, true);
 	outsideHandler = null;
 	keyHandler = null;
+	focusHandler = null;
+	scrollHandler = null;
 };
 
 export const closeColorPicker = () => {
@@ -236,11 +300,27 @@ export const openColorPicker = (anchor, color, onChange) => {
 		if (refs.root.contains(event.target) || anchor === event.target || anchor.contains(event.target)) return;
 		closeColorPicker();
 	};
-	keyHandler = (event) => { if (event.key === "Escape") closeColorPicker(); };
+	// Escape hands focus back to the swatch that opened the popover, and focus moved anywhere
+	// outside the popover and its swatch by other means (assistive technology, a script) closes it.
+	keyHandler = (event) => {
+		if (event.key !== "Escape") return;
+		closeColorPicker();
+		if (anchor.isConnected) anchor.focus();
+	};
+	focusHandler = (event) => {
+		if (refs.root.contains(event.target) || anchor.contains(event.target)) return;
+		closeColorPicker();
+	};
+	// The popover is fixed to the viewport, so it follows its swatch when the page scrolls.
+	scrollHandler = () => { if (ctx) position(ctx.anchor); };
 	// Defer so the click that opened the popover doesn't immediately close it.
 	setTimeout(() => {
 		if (!ctx) return;
 		document.addEventListener("pointerdown", outsideHandler, true);
 		document.addEventListener("keydown", keyHandler);
+		document.addEventListener("focusin", focusHandler, true);
+		document.addEventListener("scroll", scrollHandler, true);
 	}, 0);
+	// Keyboard users land in the popover, which is the last element of the page.
+	requestAnimationFrame(() => { if (ctx?.anchor === anchor) refs.hex.focus(); });
 };
