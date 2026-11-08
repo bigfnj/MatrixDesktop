@@ -9,6 +9,7 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Web.WebView2.Core;
@@ -48,16 +49,18 @@ internal sealed class NativeMediaBridge : IDisposable
     private bool _disposed;
 
     // 2026-11-08 (AUD-09, AUD-11): native work is cached on its real inputs, so an edit or a
-    // refresh rebuilds only what changed. Atlases key on everything GDI rasterises from,
-    // including the font-smoothing settings that DEFAULT_QUALITY follows. The wallpaper has
-    // no readable input, so an environment epoch (a refresh, a preference or display change)
-    // expires it, and a re-read that matches keeps its resource id.
+    // refresh rebuilds only what changed. Atlases key on their request (asset, DPI, font,
+    // repertoire), the font-smoothing settings that DEFAULT_QUALITY follows, and a font-table
+    // epoch (R2-07: a font install or a refresh), because GDI resolves a requested face through
+    // the live font table and that has no readable input. The wallpaper has none either, so an
+    // environment epoch (a refresh, a preference or display change) expires it. A rebuild or a
+    // re-read that matches what is cached keeps its resource ids.
     private sealed record WallpaperEntry(Rectangle Bounds, int Epoch, int Built, WallpaperBackground.Capture Capture);
-    private readonly record struct AtlasKey(string Asset, int Dpi, string Raster, string? Font, string Repertoire);
+    private readonly record struct AtlasKey(string Asset, int Dpi, string Raster, int Fonts, string? Font, string Repertoire);
     private sealed record AtlasEntry(AtlasKey Key, GdiGlyphAtlas.Atlas Atlas);
     private WallpaperEntry? _wallpaperCache;
     private AtlasEntry? _normalAtlas, _specialAtlas;
-    private int _environment;
+    private int _environment, _fonts;
 
     // 2026-11-08 (AUD-09): native work an edit or a refresh built on the thread pool, held with
     // the inputs it was built from until Prepare takes it. A failed build is kept and rethrown
@@ -80,6 +83,7 @@ internal sealed class NativeMediaBridge : IDisposable
         _hostKind = hostKind;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        SystemEvents.InstalledFontsChanged += OnInstalledFontsChanged;
     }
 
     // Capture seams for the native harness; production uses the real captures.
@@ -206,7 +210,7 @@ internal sealed class NativeMediaBridge : IDisposable
         }
         try
         {
-            var (normal, special) = AtlasInputs(options, dpi, inputs.Raster);
+            var (normal, special) = AtlasInputs(options, dpi, inputs);
             var regular = Atlas(ref _normalAtlas, normal.Key, normal.Repertoire, false);
             var specialAtlas = Atlas(ref _specialAtlas, special.Key, special.Repertoire, true);
             foreach (var (id, bytes) in regular.Atlas.Resources.Concat(specialAtlas.Atlas.Resources)) _nativeResources.Add(id, bytes);
@@ -225,26 +229,28 @@ internal sealed class NativeMediaBridge : IDisposable
 
     // Both atlas roles with everything GDI rasterises them from. Each role has its own
     // inputs, so an edit to one font rebuilds only that atlas.
-    private ((AtlasKey Key, string[] Repertoire) Normal, (AtlasKey Key, string[] Repertoire) Special) AtlasInputs(Dictionary<string, string> options, int dpi, string raster)
+    private ((AtlasKey Key, string[] Repertoire) Normal, (AtlasKey Key, string[] Repertoire) Special) AtlasInputs(Dictionary<string, string> options, int dpi, Inputs inputs)
     {
         var characters = ReadTextArray(options.GetValueOrDefault("zmCharacters"), "1234567890ABCDEFGHIJKLMNOPQRSUTVWXYZabcd".Select(c => c.ToString()).ToArray(), phrases: false);
         var phrases = ReadTextArray(options.GetValueOrDefault("zmPhrases"), ["The matrix has you"], phrases: true);
         var special = phrases.SelectMany(text => text.Select(c => c.ToString())).Distinct(StringComparer.Ordinal).ToArray();
         var asset = Path.Combine(_assetRoot ?? Path.Combine(AppContext.BaseDirectory, "web"), "assets", "zmatrix", "matrix-code.ttf");
-        return ((new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmFont")), string.Concat(characters)), characters),
-            (new AtlasKey(asset, dpi, raster, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special));
+        return ((new AtlasKey(asset, dpi, inputs.Raster, inputs.Fonts, DecodeStructured(options.GetValueOrDefault("zmFont")), string.Concat(characters)), characters),
+            (new AtlasKey(asset, dpi, inputs.Raster, inputs.Fonts, DecodeStructured(options.GetValueOrDefault("zmSpecialFont")), string.Concat(special)), special));
     }
 
-    // The same request is unchanged only while the wallpaper it applied is still current: the
-    // configurator re-sends its query when the preview is shown, after any wallpaper change.
+    // The same request is unchanged only while the native work it applied is still current: the
+    // configurator re-sends its query when the preview is shown, after any wallpaper change, font
+    // install or smoothing change. Both atlas roles are keyed on the same environment.
     private bool Unchanged(string query, Rectangle bounds, int dpi, Inputs inputs) => query == _configuration && bounds == _captureBounds && dpi == _atlasDpi
-        && (_wallpaper is null || _wallpaper.Epoch == inputs.Epoch);
+        && (_wallpaper is null || _wallpaper.Epoch == inputs.Epoch)
+        && (_zmatrixFonts is not { } fonts || (fonts.Normal.Key.Fonts == inputs.Fonts && fonts.Normal.Key.Raster == inputs.Raster));
 
     // 2026-11-08 (R2-08): the environment native work is built from. A call reads it on the UI
     // thread before each build pass and hands Prepare the inputs of its last pass, so a broadcast
     // that arrives during a build never makes Prepare build on the UI thread.
-    private readonly record struct Inputs(int Epoch, string Raster);
-    private Inputs ReadInputs() => new(Volatile.Read(ref _environment), RasterEnvironment());
+    private readonly record struct Inputs(int Epoch, int Fonts, string Raster);
+    private Inputs ReadInputs() => new(Volatile.Read(ref _environment), Volatile.Read(ref _fonts), RasterEnvironment());
     private const int BuildPasses = 3;
 
     // 2026-11-08 (AUD-09): the wallpaper capture with its PNG encode and both GDI atlases take
@@ -270,7 +276,7 @@ internal sealed class NativeMediaBridge : IDisposable
             var roles = new List<(AtlasKey Key, string[] Repertoire, bool Special)>();
             try
             {
-                var (normal, special) = AtlasInputs(options, dpi, inputs.Raster);
+                var (normal, special) = AtlasInputs(options, dpi, inputs);
                 if (_normalAtlas?.Key != normal.Key && BuiltAtlas(normal.Key, false) < 0) roles.Add((normal.Key, normal.Repertoire, false));
                 if (_specialAtlas?.Key != special.Key && BuiltAtlas(special.Key, true) < 0) roles.Add((special.Key, special.Repertoire, true));
             }
@@ -325,9 +331,28 @@ internal sealed class NativeMediaBridge : IDisposable
     {
         if (cache is not null && cache.Key == key) return cache;
         var built = BuiltAtlas(key, special);
-        cache = new AtlasEntry(key, built >= 0 ? _builtAtlases[built].Atlas.Result
-            : AtlasFactory(key.Font, repertoire, special, key.Dpi, key.Asset, AtlasPrefix(_generation, special), ResourceUrl));
+        var atlas = built >= 0 ? _builtAtlases[built].Atlas.Result
+            : AtlasFactory(key.Font, repertoire, special, key.Dpi, key.Asset, AtlasPrefix(_generation, special), ResourceUrl);
+        // A rebuild that draws what is cached (a refresh, or a font install that left this face
+        // alone) keeps the cached ids under the new key, so nothing is republished.
+        cache = cache is not null && SameAtlas(cache.Atlas, atlas) ? cache with { Key = key } : new AtlasEntry(key, atlas);
         return cache;
+    }
+
+    // Ids carry the generation that built them, so two atlases match when their pages hold the
+    // same bytes in id order (one prefix per atlas) and their metadata matches without page urls.
+    private static bool SameAtlas(GdiGlyphAtlas.Atlas a, GdiGlyphAtlas.Atlas b)
+    {
+        static IEnumerable<byte[]> Pages(GdiGlyphAtlas.Atlas atlas) => atlas.Resources.OrderBy(page => page.Key, StringComparer.Ordinal).Select(page => page.Value);
+        static JsonNode? Content(GdiGlyphAtlas.Atlas atlas)
+        {
+            var node = JsonSerializer.SerializeToNode(atlas.Metadata);
+            if (node?["pages"] is JsonArray pages)
+                foreach (var page in pages.OfType<JsonObject>()) page.Remove("url");
+            return node;
+        }
+        return a.Resources.Count == b.Resources.Count && Pages(a).Zip(Pages(b)).All(pair => pair.First.AsSpan().SequenceEqual(pair.Second))
+            && JsonNode.DeepEquals(Content(a), Content(b));
     }
 
     private static string AtlasPrefix(int generation, bool special) => $"font-{generation}-{(special ? "special" : "normal")}";
@@ -354,6 +379,9 @@ internal sealed class NativeMediaBridge : IDisposable
     private void OnDisplaySettingsChanged(object? sender, EventArgs e) => InvalidateEnvironment();
 
     private void InvalidateEnvironment() => Interlocked.Increment(ref _environment);
+
+    // WM_FONTCHANGE: an installed or removed font can change the face GDI resolves for a name.
+    internal void OnInstalledFontsChanged(object? sender, EventArgs e) => Interlocked.Increment(ref _fonts);
 
     // 2026-11-08: the list rules of zmatrix/settings.js (BMP only, no C0 or DEL, the size
     // limits). config.js silently replaces a rejected list with its default, so the atlas
@@ -424,6 +452,8 @@ internal sealed class NativeMediaBridge : IDisposable
         {
             if (_disposed) return false;
             InvalidateEnvironment();
+            // The font table too: a font installed without a broadcast is resolved by a refresh.
+            Interlocked.Increment(ref _fonts);
             var generation = _generation;
             var before = BootstrapJson(0);
             _configuration = "";
@@ -558,6 +588,7 @@ internal sealed class NativeMediaBridge : IDisposable
         _disposed = true;
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        SystemEvents.InstalledFontsChanged -= OnInstalledFontsChanged;
         if (_core is not null)
         {
             try { _core.WebResourceRequested -= OnResourceRequested; } catch (InvalidOperationException) { }

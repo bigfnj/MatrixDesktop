@@ -28,6 +28,9 @@ internal static class NativeBridgeTests
         ("Native bridge keeps atlas roles apart when their inputs match", BuiltAtlasRolesStayApart),
         ("Native bridge same-query update follows a wallpaper change", SameQueryUpdateFollowsWallpaper),
         ("Native bridge keeps native work off the UI thread when the environment changes mid-build", MidBuildChangesStayOffTheUiThread),
+        ("Native bridge refresh and same-query update re-resolve the atlases after a font install", FontInstallReResolvesAtlases),
+        ("Native bridge same-query update follows a font-smoothing change", SameQueryUpdateFollowsSmoothing),
+        ("Native bridge refresh republishes nothing when real GDI atlases draw the same", RealAtlasRefreshKeepsGeneration),
     ];
 
     // MainForm's startup order: the constructor runs the before-show step, then
@@ -224,6 +227,8 @@ internal static class NativeBridgeTests
         internal int Wallpaper, Normal, Special;
         internal byte Fill = 4;
         internal string Raster = "smoothing-a";
+        // The face GDI resolves for the requested name: a substitute until a font install provides it.
+        internal string Face = "Arial";
         internal int Atlases => Normal + Special;
         // The thread each builder and each raster-settings read ran on.
         internal readonly ConcurrentQueue<(string Step, int Thread)> Threads = new();
@@ -253,8 +258,8 @@ internal static class NativeBridgeTests
             work.Ran(special ? "special atlas" : "normal atlas");
             if (special) Interlocked.Increment(ref work.Special); else Interlocked.Increment(ref work.Normal);
             var id = prefix + "-0";
-            return work.Raced(special ? "special atlas" : "normal atlas", new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi },
-                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{font}|{string.Concat(repertoire)}") }));
+            return work.Raced(special ? "special atlas" : "normal atlas", new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi, resolvedFace = work.Face },
+                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{work.Face}|{font}|{string.Concat(repertoire)}") }));
         },
         RasterEnvironment = () => { work.Ran("raster settings read"); return work.Raster; },
     };
@@ -459,5 +464,74 @@ internal static class NativeBridgeTests
             $"That refresh must stop after three pool captures and publish the last: {work.Wallpaper - captures} captures, published={published}, serves [{Wallpaper()}] with fill {work.Fill} current.");
         Leg("The same-query update after it", "", 0, () => { }, () => Update(bridge, query));
         Require(Wallpaper().StartsWith($"{work.Fill},", StringComparison.Ordinal), $"The next update must catch up with the wallpaper that changed after the last pass: [{Wallpaper()}], fill {work.Fill}.");
+    }
+
+    // The served atlas pages, as the text the stand-in wrote into them.
+    private static string[] AtlasTexts(NativeMediaBridge bridge) => Served(bridge).Where(pair => pair.Key.Contains("/font-", StringComparison.Ordinal))
+        .Select(pair => pair.Value is null ? "" : Encoding.UTF8.GetString(pair.Value)).ToArray();
+
+    // R2-07: GDI resolves a requested face through the live font table, so a font installed after
+    // an atlas was built changes what a rebuild draws. A refresh re-reads the font table, the
+    // configurator rebuilds on the install broadcast, and a rebuild that draws the same keeps its ids.
+    private static void FontInstallReResolvesAtlases()
+    {
+        var query = "scene=zmatrix&zmFont=" + Uri.EscapeDataString("{\"name\":\"Late Font\"}");
+        var work = new Work();
+        using (var bridge = ZMatrixBridge(work))
+        {
+            bridge.Prepare(query, Virtual);
+            work.Face = "Late Font";
+            var published = Refresh(bridge, query);
+            var texts = AtlasTexts(bridge);
+            Require(work.Atlases == 4 && published && Generation(bridge) == 2 && texts.Length == 2 && texts.All(text => text.Contains("|Late Font|", StringComparison.Ordinal)),
+                $"A refresh after a font install must re-resolve and publish both atlases: atlases={work.Atlases}, published={published}, generation={Generation(bridge)}, serves [{string.Join(", ", texts)}].");
+        }
+        var preview = new Work();
+        using (var bridge = ZMatrixBridge(preview))
+        {
+            void Installed() => bridge.OnInstalledFontsChanged(null, EventArgs.Empty);
+            string Ids() => string.Join(",", Served(bridge).Keys);
+            Update(bridge, query);
+            var ids = Ids();
+            Installed();
+            Update(bridge, query);
+            Update(bridge, query);
+            Require(preview.Atlases == 4 && Ids() == ids && Generation(bridge) == 1,
+                $"After an install that left the face alone, the same-query update must rebuild both atlases once and keep their ids at generation 1: atlases={preview.Atlases}, ids [{Ids()}] were [{ids}], generation {Generation(bridge)}.");
+            preview.Face = "Late Font";
+            Installed();
+            Update(bridge, query);
+            var texts = AtlasTexts(bridge);
+            Require(texts.Length == 2 && texts.All(text => text.Contains("|Late Font|", StringComparison.Ordinal)) && Generation(bridge) == 2,
+                $"After an install that provides the face, the same-query update must serve atlases drawn with it as generation 2: [{string.Join(", ", texts)}] at generation {Generation(bridge)}.");
+        }
+    }
+
+    // A smoothing change need not come with a broadcast the bridge listens to, and colour mode has
+    // no wallpaper to expire, so the same-query update compares the smoothing its atlases used.
+    private static void SameQueryUpdateFollowsSmoothing()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        Update(bridge, "scene=zmatrix");
+        work.Raster = "smoothing-b";
+        Update(bridge, "scene=zmatrix");
+        var texts = AtlasTexts(bridge);
+        Require(work.Atlases == 4 && texts.Length == 2 && texts.All(text => text.StartsWith("smoothing-b|", StringComparison.Ordinal)),
+            $"A same-query update after a smoothing change must serve atlases built under it: atlases={work.Atlases}, serves [{string.Join(", ", texts)}].");
+    }
+
+    // Every refresh rebuilds the atlases for the font table, so the identical-output reuse must
+    // hold for the real GDI atlas and its metadata, or each refresh would republish and the
+    // ZMatrix page would discard its raster.
+    private static void RealAtlasRefreshKeepsGeneration()
+    {
+        const string query = "scene=zmatrix";
+        using var bridge = Bridge(NativeHostKind.Wallpaper, new Captures());
+        bridge.Prepare(query, Virtual);
+        var before = bridge.BootstrapJson();
+        var published = Refresh(bridge, query);
+        Require(Bootstrap(bridge).GetProperty("zmatrixFonts").ValueKind == JsonValueKind.Object && !published && bridge.BootstrapJson() == before,
+            $"A refresh over unchanged real GDI atlases must keep generation 1 and not publish: published={published}, generation={Generation(bridge)}, warnings {Bootstrap(bridge).GetProperty("warnings")}.");
     }
 }
