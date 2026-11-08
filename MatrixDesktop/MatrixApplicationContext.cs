@@ -45,8 +45,11 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             }));
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
-        // Priority before TryCreateSurface in both branches (WebView2 children inherit the
-        // class), and after CreateTray so a refused class can show its balloon.
+        // Priority before TryCreateSurface in both branches: the WebView2 browser process this host
+        // starts, and its utility processes, inherit an Idle or Below-normal class (the wallpaper
+        // default is Idle). Windows passes no higher class to a child, and WebView2 runs renderers
+        // at Normal and the GPU process at AboveNormal whatever the host runs at. After CreateTray,
+        // so a refused class can show its balloon.
         if (_wallpaper)
         {
             if (!TakeWallpaperOwnership()) return;
