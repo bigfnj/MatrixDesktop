@@ -3,7 +3,7 @@ import resolveConfig from "../MatrixDesktop/web/js/config.js";
 import { createScene as createConfiguredScene, createGrid, projection, viewProjection, attachMouse } from "../MatrixDesktop/web/js/uc3d/scene.js";
 import { createNativeRandom, nativeSettings, nativeFallSpeed, nativePictureGrid, wrapNative } from "../MatrixDesktop/web/js/uc3d/native.js";
 import { selectImages, createMedia } from "../MatrixDesktop/web/js/uc3d/media.js";
-import { formatClock } from "../MatrixDesktop/web/js/uc3d/overlays.js";
+import { formatClock, createOverlays } from "../MatrixDesktop/web/js/uc3d/overlays.js";
 import { createAudio } from "../MatrixDesktop/web/js/uc3d/audio.js";
 import { startLoop, createRuntime } from "../MatrixDesktop/web/js/uc3d/runtime.js";
 import { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
@@ -530,6 +530,35 @@ await asyncTest("legacy first touch during a forming picture keeps the flattened
         assert.ok(Math.abs(jump) < 1e-4, `first touch during a forming picture moved ${name} by ${jump.toFixed(3)} rad`);
       }
     } finally { runtime.dispose(); }
+  } finally { dom.restore(); }
+});
+await asyncTest("a failed slideshow picture warns once however often the slideshow revisits it", async () => {
+  const dom = runtimeDom({ images: [{ url: "synthetic:broken-a", group: "custom" }, { url: "synthetic:broken-b", group: "custom" }] });
+  const previousWarn = console.warn; console.warn = () => {};
+  globalThis.Image = class { async decode() { throw new Error("synthetic decode failure"); } };
+  try {
+    const config = resolveConfig({ scene: "uc3d", isometric: "false", showPictures: "true", pictureDelay: "1", pictureDuration: "1" });
+    const runtime = await createRuntime(dom.canvas, config, "regl");
+    try {
+      const visited = [];
+      for (let i = 0; i < 20; i++) {
+        const index = runtime.update(i * 1.1, 200, 100).state.pictureIndex;
+        if (visited.at(-1) !== index) visited.push(index);
+        await settle();
+      }
+      assert.ok(visited.length >= 6, `witness: the slideshow revisited only ${visited.length} pictures`);
+      const decoded = runtime.diagnostics.warnings.filter(message => message.startsWith("A picture could not be decoded"));
+      assert.equal(decoded.length, 1, `the failure warning was pushed ${decoded.length} times`);
+    } finally { runtime.dispose(); }
+  } finally { console.warn = previousWarn; dom.restore(); }
+});
+test("UC3D overlay warnings are capped at 32 distinct entries", () => {
+  const dom = runtimeDom();
+  try {
+    const warnings = [], overlays = createOverlays({}, warnings);
+    for (let i = 0; i < 40; i++) overlays.addWarning(`distinct warning ${i}`);
+    assert.equal(warnings.length, 32, `${warnings.length} distinct warnings were retained`); assert.equal(warnings.at(-1), "distinct warning 31");
+    overlays.dispose();
   } finally { dom.restore(); }
 });
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
