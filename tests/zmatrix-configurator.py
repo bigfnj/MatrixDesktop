@@ -1371,6 +1371,36 @@ def check_popover_fits(page, _fixture):
         page.keyboard.press("Escape")
 
 
+def sorted_keys(value):
+    # A store after a close and reopen (R2-44): every object's keys sorted, so a colour is {b, g, r}
+    # and a palette stop {at, b, g, r}.
+    if isinstance(value, dict):
+        return {key: sorted_keys(value[key]) for key in sorted(value)}
+    return [sorted_keys(item) for item in value] if isinstance(value, list) else value
+
+
+def check_sorted_store_retarget(page, fixture):
+    # R2-45: rememberDraftEdits and the switch re-target compared values as JSON strings, so a
+    # default colour or palette whose keys came back in another order counted as an edit and kept
+    # the old version's value on a version switch.
+    operator = fixture["metadata"]["versionDefaults"]["operator"]
+    stored = dict(fixture["state"], selectedPresetId=None, lastDraft=sorted_keys(fixture["defaultDraft"]))
+    fresh, errors = relaunch(page, fixture, stored)
+    try:
+        keys = fresh.evaluate("(({cursorColor, palette}) => [Object.keys(cursorColor), Object.keys(palette[0])])(configHost.snapshotDraft().draft)")
+        assert keys == [["b", "g", "r"], ["at", "b", "g", "r"]], "witness: the reopened draft does not hold sorted keys: " + str(keys)
+        field(fresh, "version").locator("select").select_option("operator")
+        draft = saved(fresh)
+        assert draft["numColumns"] == operator["numColumns"], "control: Version operator did not move untouched Columns: " + str(draft["numColumns"])
+        kept = [key + "=" + json.dumps(draft[key])[:60] for key in ("cursorColor", "palette") if draft[key] != operator[key]]
+        assert not kept, "untouched editors stored with sorted keys kept the classic values on operator: " + "; ".join(kept)
+        shown = field(fresh, "cursorColor").locator('input[type="number"]').evaluate_all("nodes => nodes.map(node => Number(node.value))")
+        assert shown == [operator["cursorColor"][channel] for channel in "rgb"], "the cursor editor shows " + str(shown)
+        assert not errors, "; ".join(errors)
+    finally:
+        fresh.close()
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1408,6 +1438,7 @@ CHECKS = [
     ("Typing a name in a gating select picks the option it spells", check_select_typeahead),
     ("Colour popover sliders show a visible keyboard focus ring in both themes", check_slider_focus_ring),
     ("Colour popover content stays inside its box", check_popover_fits),
+    ("A reopened store's sorted colour keys still follow a version switch", check_sorted_store_retarget),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 

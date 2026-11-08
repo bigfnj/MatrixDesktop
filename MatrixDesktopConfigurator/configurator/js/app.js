@@ -155,12 +155,20 @@ const effectiveDefaultsFor = (draft) => {
 	return defaults;
 };
 const defaultValueFor = (field) => effectiveDefaultsFor(state.draft)[field.id] ?? field.defaultValue;
+// Equal values whatever their objects' key order. A store reopened after a close holds colours as
+// {b, g, r} (R2-44), which a JSON string comparison counted as an edit of the default (R2-45).
+const sameValue = (a, b) => {
+	if (a === b) return true;
+	if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+	const keys = Object.keys(a);
+	return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameValue(a[key], b[key]));
+};
 const editedSceneFields = new Set();
 const rememberDraftEdits = (explicitKeys = []) => {
 	editedSceneFields.clear();
 	const defaults = effectiveDefaultsFor(state.draft);
 	for (const key of Object.keys(state.draft))
-		if (key !== "scene" && JSON.stringify(state.draft[key]) !== JSON.stringify(defaults[key])) editedSceneFields.add(key);
+		if (key !== "scene" && !sameValue(state.draft[key], defaults[key])) editedSceneFields.add(key);
 	for (const key of explicitKeys) if (key !== "scene") editedSceneFields.add(key);
 };
 const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "transPride"]);
@@ -268,7 +276,7 @@ const updateDraftValue = (field, value) => {
 		const previous = effectiveDefaultsFor(state.draft);
 		const next = effectiveDefaultsFor({ ...state.draft, [field.id]: value });
 		for (const key of Object.keys(next)) {
-			if (!defaultContextFields.has(key) && !editedSceneFields.has(key) && JSON.stringify(state.draft[key]) === JSON.stringify(previous[key]))
+			if (!defaultContextFields.has(key) && !editedSceneFields.has(key) && sameValue(state.draft[key], previous[key]))
 				state.draft[key] = clone(next[key]);
 		}
 	}
