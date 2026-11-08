@@ -26,3 +26,36 @@ internal sealed class PlaybackPolicy
         monitors.Any(monitor => foreground.Left <= monitor.Left && foreground.Top <= monitor.Top
             && foreground.Right >= monitor.Right && foreground.Bottom >= monitor.Bottom);
 }
+
+// Process priority is a request. Without SeIncreaseBasePriorityPrivilege Windows applies High
+// for RealTime and throws nothing, and Process caches the class it was given, so only a read
+// after Refresh shows what Windows applied.
+internal interface IPriorityTarget
+{
+    System.Diagnostics.ProcessPriorityClass PriorityClass { get; set; }
+    void Refresh();
+}
+
+internal static class PriorityPolicy
+{
+    internal static System.Diagnostics.ProcessPriorityClass ClassOf(string value) => value switch
+    {
+        "idle" => System.Diagnostics.ProcessPriorityClass.Idle, "below-normal" => System.Diagnostics.ProcessPriorityClass.BelowNormal,
+        "above-normal" => System.Diagnostics.ProcessPriorityClass.AboveNormal, "high" => System.Diagnostics.ProcessPriorityClass.High,
+        "realtime" => System.Diagnostics.ProcessPriorityClass.RealTime, _ => System.Diagnostics.ProcessPriorityClass.Normal,
+    };
+
+    internal static void Apply(System.Diagnostics.ProcessPriorityClass requested, IPriorityTarget target, Action<string> report)
+    {
+        target.PriorityClass = requested;
+        target.Refresh();
+        var granted = target.PriorityClass;
+        if (granted != requested) report($"Process priority {requested} was not granted; Windows applied {granted}.");
+    }
+}
+
+internal sealed class ProcessPriorityTarget(System.Diagnostics.Process process) : IPriorityTarget
+{
+    public System.Diagnostics.ProcessPriorityClass PriorityClass { get => process.PriorityClass; set => process.PriorityClass = value; }
+    public void Refresh() => process.Refresh();
+}

@@ -34,12 +34,14 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             {
                 if (!_exiting && !_playback.Paused) _form?.PostHostPointer(pointer);
             }));
-        ApplyPriority();
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        // Priority before TryCreateSurface in both branches (WebView2 children inherit the
+        // class), and after CreateTray so a refused class can show its balloon.
         if (_wallpaper)
         {
             CreateTray();
+            ApplyPriority();
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             _timer.Tick += OnTick;
             _timer.Start();
@@ -47,6 +49,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         }
         else
         {
+            ApplyPriority();
             if (plan.IsPreview || plan.IsScreensaver) { _timer.Interval = 100; _timer.Tick += OnTick; _timer.Start(); }
             TryCreateSurface();
         }
@@ -232,14 +235,9 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     {
         try
         {
-            var value = PlaybackPolicy.ResolvePriority(_options.ProcessPriority, _wallpaper);
+            var requested = PriorityPolicy.ClassOf(PlaybackPolicy.ResolvePriority(_options.ProcessPriority, _wallpaper));
             using var process = Process.GetCurrentProcess();
-            process.PriorityClass = value switch
-            {
-                "idle" => ProcessPriorityClass.Idle, "below-normal" => ProcessPriorityClass.BelowNormal,
-                "above-normal" => ProcessPriorityClass.AboveNormal, "high" => ProcessPriorityClass.High,
-                "realtime" => ProcessPriorityClass.RealTime, _ => ProcessPriorityClass.Normal,
-            };
+            PriorityPolicy.Apply(requested, new ProcessPriorityTarget(process), Report);
         }
         catch (Exception error) { Report($"The requested process priority was not applied: {error.Message}"); }
     }

@@ -11,7 +11,59 @@ internal static class HostLifecyclePolicyTests
         ("Host write probe stays writable while another instance holds its probe open", OverlappingProbes),
         ("Host write probe still reports a write-denied folder as unwritable", DeniedProbe),
         ("Host storage warns when it falls back past the preferred base folder", FallbackWarning),
+        ("Host priority reports a class Windows did not grant", PriorityReadBack),
     ];
+
+    // Models System.Diagnostics.Process: the setter caches the requested class, Windows
+    // grants High for RealTime without the privilege, and only Refresh exposes the grant.
+    private sealed class FakePriorityTarget(Func<System.Diagnostics.ProcessPriorityClass, System.Diagnostics.ProcessPriorityClass> grant) : IPriorityTarget
+    {
+        private System.Diagnostics.ProcessPriorityClass _cached, _os;
+        private bool _haveCached;
+        internal List<string> Operations { get; } = [];
+        public System.Diagnostics.ProcessPriorityClass PriorityClass
+        {
+            get { Operations.Add("get"); return _haveCached ? _cached : _os; }
+            set { Operations.Add("set:" + value); _cached = value; _haveCached = true; _os = grant(value); }
+        }
+        public void Refresh() { Operations.Add("refresh"); _haveCached = false; }
+    }
+
+    private static void PriorityReadBack()
+    {
+        var unprivileged = (System.Diagnostics.ProcessPriorityClass requested) =>
+            requested == System.Diagnostics.ProcessPriorityClass.RealTime ? System.Diagnostics.ProcessPriorityClass.High : requested;
+        var reports = new List<string>();
+        var target = new FakePriorityTarget(unprivileged);
+        PriorityPolicy.Apply(System.Diagnostics.ProcessPriorityClass.RealTime, target, reports.Add);
+        Check.Equal("set:RealTime,refresh,get", string.Join(",", target.Operations), "the class must be read back after Refresh, never from the setter's cache");
+        Check.Equal(1, reports.Count, "a downgraded RealTime must be reported exactly once");
+        Check.Contains(reports[0], "RealTime", "the report must name the requested class");
+        Check.Contains(reports[0], "High", "the report must name the class Windows applied");
+        foreach (var value in new[] { "idle", "below-normal", "normal", "above-normal", "high" })
+        {
+            reports.Clear();
+            PriorityPolicy.Apply(PriorityPolicy.ClassOf(value), new FakePriorityTarget(unprivileged), reports.Add);
+            Check.Equal(0, reports.Count, $"a granted '{value}' class must not be reported");
+        }
+        Check.Equal(System.Diagnostics.ProcessPriorityClass.RealTime, PriorityPolicy.ClassOf("realtime"), "the CLI value maps to RealTime");
+
+        // Real Process leg on a child this test owns. Unprivileged tokens (the normal case)
+        // must see the downgrade reported; a token holding the privilege cannot, and says so.
+        using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ping.exe", "-n 30 127.0.0.1")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!;
+        try
+        {
+            reports.Clear();
+            PriorityPolicy.Apply(System.Diagnostics.ProcessPriorityClass.RealTime, new ProcessPriorityTarget(child), reports.Add);
+            using var fresh = System.Diagnostics.Process.GetProcessById(child.Id);
+            if (fresh.PriorityClass == System.Diagnostics.ProcessPriorityClass.RealTime)
+                Console.WriteLine("NOTE  real-process priority leg UNCHECKED: this token was granted RealTime");
+            else
+                Check.Equal(1, reports.Count, $"a real unprivileged RealTime request (Windows applied {fresh.PriorityClass}) must be reported");
+        }
+        finally { try { child.Kill(); child.WaitForExit(5000); } catch { } }
+    }
 
     private static string NewTempFolder() => Path.Combine(Path.GetTempPath(), "md-host-probe-" + Guid.NewGuid().ToString("N"));
 
