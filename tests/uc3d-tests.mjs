@@ -538,28 +538,43 @@ await asyncTest("legacy isometric mouse rotation starts from the displayed pose 
     } finally { runtime.dispose(); }
   } finally { dom.restore(); }
 });
-await asyncTest("legacy first touch during a forming picture keeps the flattened pose continuous", async () => {
-  const dom = runtimeDom({ images: [{ url: "synthetic:picture", group: "custom" }] });
-  try {
-    const config = resolveConfig({ scene: "uc3d", isometric: "false", mouseRotation: "true", showPictures: "true", pictureDelay: "1", pictureDuration: "8" });
-    assert.equal(config.uc3dControls, "legacy"); assert.equal(config.isometric, false); assert.equal(config.codeRotation, true);
-    const runtime = await createRuntime(dom.canvas, config, "regl");
-    try {
-      runtime.update(0, 200, 100); await settle();
-      assert.equal(runtime.diagnostics.pictureStatus, "ready");
-      const forming = runtime.update(2.85, 200, 100);
-      assert.ok(forming.state.pictureWeight > .2 && forming.state.pictureWeight < .8, `witness: picture weight ${forming.state.pictureWeight} is not forming`);
-      const before = forming.uniforms.slice(22, 24);
-      assert.ok(Math.abs(before[0]) + Math.abs(before[1]) > .01, "witness: automatic rotation must be visible before the touch");
-      dom.move(50, 50); dom.move(50, 50);
-      const after = runtime.update(2.85 + 1/60, 200, 100);
-      assert.equal(after.state.mouseActive, true); near(after.state.pictureWeight, 0);
-      for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
-        const jump = after.uniforms[22 + index] - before[index];
-        assert.ok(Math.abs(jump) < 1e-4, `first touch during a forming picture moved ${name} by ${jump.toFixed(3)} rad`);
-      }
-    } finally { runtime.dispose(); }
-  } finally { dom.restore(); }
+await asyncTest("legacy first touch during a forming or shown picture keeps the flattened pose continuous, isometric or not", async () => {
+  // 2.85 s: the picture is forming (weight about 0.48); 5 s: it is fully shown and faces the viewer.
+  for (const time of [2.85, 5]) {
+    let flat = null;
+    for (const isometric of [false, true]) {
+      const label = `${isometric ? "isometric" : "flat"} at ${time} s`;
+      const dom = runtimeDom({ images: [{ url: "synthetic:picture", group: "custom" }] });
+      try {
+        const config = resolveConfig({ scene: "uc3d", isometric: String(isometric), mouseRotation: "true", showPictures: "true", pictureDelay: "1", pictureDuration: "8" });
+        assert.equal(config.uc3dControls, "legacy"); assert.equal(config.volumetric, true); assert.equal(config.isometric, isometric); assert.equal(config.codeRotation, true);
+        const runtime = await createRuntime(dom.canvas, config, "regl");
+        try {
+          runtime.update(0, 200, 100); await settle();
+          assert.equal(runtime.diagnostics.pictureStatus, "ready");
+          const shown = runtime.update(time, 200, 100), weight = shown.state.pictureWeight, before = shown.uniforms.slice(22, 24);
+          if (time < 5) {
+            assert.ok(weight > .2 && weight < .8, `witness: ${label}: picture weight ${weight} is not forming`);
+            assert.ok(Math.abs(before[0]) + Math.abs(before[1]) > .01, `witness: ${label}: automatic rotation must be visible before the touch`);
+          } else {
+            assert.equal(weight, 1, `witness: ${label}: the picture must be fully shown`);
+            assert.ok(Math.abs(before[0]) + Math.abs(before[1]) < 1e-6, `witness: ${label}: a shown picture must face the viewer, got ${before[0]}, ${before[1]}`);
+          }
+          // What renders is unchanged: the isometric view is the flat pose plus the fixed offset, faded with the picture.
+          if (isometric) [Math.PI / 4, Math.PI / 8].forEach((offset, i) => assert.ok(Math.abs(before[i] - flat[i] - offset * (1 - weight)) < 2e-6,
+            `${label}: the displayed ${i ? "pitch" : "yaw"} ${before[i]} is not the flat pose ${flat[i]} plus the faded offset`));
+          else flat = before;
+          dom.move(50, 50); dom.move(50, 50);
+          const after = runtime.update(time + 1/60, 200, 100);
+          assert.equal(after.state.mouseActive, true); near(after.state.pictureWeight, 0);
+          for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
+            const jump = after.uniforms[22 + index] - before[index];
+            assert.ok(Math.abs(jump) < 1e-4, `${label}: first touch moved ${name} by ${jump.toFixed(3)} rad`);
+          }
+        } finally { runtime.dispose(); }
+      } finally { dom.restore(); }
+    }
+  }
 });
 await asyncTest("a failed slideshow picture warns once however often the slideshow revisits it", async () => {
   const dom = runtimeDom({ images: [{ url: "synthetic:broken-a", group: "custom" }, { url: "synthetic:broken-b", group: "custom" }] });

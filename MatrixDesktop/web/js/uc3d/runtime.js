@@ -92,10 +92,15 @@ export async function createRuntime(canvas, options, backend) {
       // A forming picture returns to a front-facing pose, as manual movement already
       // suppresses the picture. Keep the relief visible without shearing its silhouette.
       if (!scene.grid) {
-        state.yaw *= 1 - state.pictureWeight; state.pitch *= 1 - state.pictureWeight; state.roll *= 1 - state.pictureWeight;
-        // The scene seeds a mouse gesture from its own state, so the fixed isometric
-        // view offset belongs to this derived view only, never to the scene's object.
-        if (config.volumetric && config.isometric) state = { ...state, yaw: state.yaw + Math.PI / 4 * (1 - state.pictureWeight), pitch: state.pitch + Math.PI / 8 * (1 - state.pictureWeight) };
+        // The scene seeds a mouse gesture from its own state, and the touch drops the picture
+        // weight to 0. So its state keeps the flattened pose less the faded share of the fixed
+        // isometric offset, and only this derived view adds the whole offset: the same pose
+        // shows, and a gesture starts exactly where the view was.
+        const weight = state.pictureWeight, isometric = config.volumetric && config.isometric;
+        state.yaw = state.yaw * (1 - weight) - (isometric ? Math.PI / 4 * weight : 0);
+        state.pitch = state.pitch * (1 - weight) - (isometric ? Math.PI / 8 * weight : 0);
+        state.roll *= 1 - weight;
+        if (isometric) state = { ...state, yaw: state.yaw + Math.PI / 4, pitch: state.pitch + Math.PI / 8 };
       }
       const changed = dirty || Boolean(scene.grid);
       if (changed) { grid = scene.grid ? scene.grid(aspect, photo) : createGrid(config, aspect, photo); dirty = false; }
