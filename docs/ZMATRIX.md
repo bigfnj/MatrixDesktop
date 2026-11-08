@@ -26,10 +26,15 @@ Windows. It does not change icon list styles or the saved Windows wallpaper.
 Explorer recovery rediscovers the shell host. A missing host is reported instead
 of opening a fullscreen window over the owner's applications.
 
-The tray menu controls pause, settings, exit and startup. Startup is an explicit
-per-user choice. Fullscreen pause defaults on; battery pause defaults off. Pause
-reasons combine, so resuming manually does not override a session lock or another
-automatic pause. Renderers use active time and exclude paused intervals.
+The tray menu controls pause, settings, exit and startup. For a ZMatrix wallpaper it
+also offers **Refresh desktop**, which re-reads the wallpaper and font-smoothing
+settings. The same refresh runs about 400 ms after a wallpaper, desktop pattern,
+high-contrast, font-smoothing, system color or theme change, and waits for resume
+while paused. A refresh that finds nothing changed keeps the accumulated rain.
+Startup is an explicit per-user choice. Fullscreen pause defaults on; battery
+pause defaults off. Pause reasons combine, so resuming manually does not override
+a session lock or another automatic pause. Renderers use active time and exclude
+paused intervals.
 `--process-priority auto` uses Idle for wallpaper and Normal otherwise. This
 setting applies to the host process; it does not promise a WebView2 GPU priority.
 
@@ -83,7 +88,10 @@ and 7, including quotes, equals, backslashes and Unicode.
 
 Existing preset migrations retain their historical field sets. Adding ZMatrix
 does not make an untouched old UC3D starter look edited, or recreate a previously
-deleted starter. Storage schema remains version 1; starter seed version is 6.
+deleted starter. Storage schema is version 2. The first load of a version 1 store
+moves each saved value that matched the old scene or catalog default to the default
+its version or effect actually renders, so saved drafts and presets render as
+before. Starter seed version is 6.
 
 ## Intentional compatibility choices
 
