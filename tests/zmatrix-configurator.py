@@ -1343,6 +1343,34 @@ def check_slider_focus_ring(page, _fixture):
         page.keyboard.press("Escape")
 
 
+POPOVER_BOXES = """() => { const box = document.querySelector('.color-popover').getBoundingClientRect();
+    let worst = {over: 0, node: ''}, measured = 0;
+    for (const node of document.querySelectorAll('.color-popover *')) {
+        const r = node.getBoundingClientRect();
+        if (!r.width && !r.height) continue;
+        measured++;
+        const over = Math.max(box.left - r.left, box.top - r.top, r.right - box.right, r.bottom - box.bottom);
+        if (over > worst.over) worst = {over: Math.round(over * 10) / 10, node: node.tagName + '.' + node.className};
+    }
+    return {width: box.width, measured, ...worst}; }"""
+
+
+def check_popover_fits(page, _fixture):
+    # R2-43: every part of the colour popover lies inside its box (1 px allowed), at the
+    # configurator's default window (ConfiguratorForm ClientSize 1240x820) and at 150% zoom.
+    swatch = field(page, "cursorColor").locator(".color-swatch")
+    for width, height in ((1240, 820), (827, 547)):
+        page.set_viewport_size({"width": width, "height": height})
+        swatch.evaluate("node => node.scrollIntoView({block: 'center'})")
+        swatch.focus()  # opened by keyboard: at 827x547 the sticky section title covers a centred swatch
+        page.keyboard.press("Enter")
+        page.wait_for_function("!document.querySelector('.color-popover').hidden")
+        now = page.evaluate(POPOVER_BOXES)
+        assert now["measured"] >= 8 and now["width"] > 100, "witness: the open popover has too little to measure: " + str(now)
+        assert now["over"] <= 1, "at " + str(width) + "x" + str(height) + " the popover's " + now["node"] + " overflows its box by " + str(now["over"]) + " px"
+        page.keyboard.press("Escape")
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1379,6 +1407,7 @@ CHECKS = [
     ("A Control units switch keeps an untouched Bloom strength on what renders", check_controls_switch_bloom),
     ("Typing a name in a gating select picks the option it spells", check_select_typeahead),
     ("Colour popover sliders show a visible keyboard focus ring in both themes", check_slider_focus_ring),
+    ("Colour popover content stays inside its box", check_popover_fits),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
