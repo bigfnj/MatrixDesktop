@@ -1290,6 +1290,59 @@ def check_select_typeahead(page, _fixture):
     assert now == "image", "typing 'im' in Effect picked " + now + ", not image"
 
 
+def css_color(text):
+    # "rgb(r, g, b)" or "rgba(r, g, b, a)" as computed by Chromium: ([r, g, b], a).
+    numbers = [float(part) for part in re.findall(r"[\d.]+", text)]
+    return numbers[:3], numbers[3] if len(numbers) > 3 else 1.0
+
+
+def contrast(first, second):
+    def luminance(rgb):
+        linear = [value / 255 / 12.92 if value / 255 <= 0.04045 else ((value / 255 + 0.055) / 1.055) ** 2.4 for value in rgb]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+SLIDER_FOCUS = """selector => { const node = document.querySelector('.color-popover ' + selector), style = getComputedStyle(node);
+    return {focused: document.activeElement === node && node.matches(':focus-visible'), outlineStyle: style.outlineStyle,
+            outlineWidth: parseFloat(style.outlineWidth), outlineColor: style.outlineColor, boxShadow: style.boxShadow,
+            background: getComputedStyle(node.closest('.color-popover')).backgroundColor}; }"""
+
+
+def check_slider_focus_ring(page, _fixture):
+    # R2-42: the popover's square and hue bar take keyboard focus. With no rule of their own they
+    # drew the UA ring (outline: auto, rgb(16, 16, 16)), about 1.2:1 on the dark popover, so a
+    # keyboard user could not see which one had focus. The ring must be the page's own (an outline
+    # other than auto, or a zero-offset spread box-shadow) and reach 3:1 on the popover in both themes.
+    swatch = field(page, "cursorColor").locator(".color-swatch")
+    for theme in ("dark", "light"):
+        if theme == "light":
+            page.locator("#themeButton").click()
+        assert page.evaluate("document.documentElement.dataset.theme") == theme, "witness: the page is not on the " + theme + " theme"
+        swatch.evaluate("node => node.scrollIntoView({block: 'center'})")
+        swatch.focus()
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)  # the popover focuses its hex box on the next frame
+        for selector in (".cp-hue", ".cp-square"):  # Shift+Tab from the hex box, then from the hue bar
+            page.keyboard.press("Shift+Tab")
+            style = page.evaluate(SLIDER_FOCUS, selector)
+            assert style["focused"], "witness: Shift+Tab did not give " + selector + " keyboard focus: " + str(style)
+            background = css_color(style["background"])[0]
+            shadow = re.match(r"(rgba?\([^)]*\)) 0px 0px 0px [1-9]", style["boxShadow"])
+            if style["outlineStyle"] not in ("none", "auto") and style["outlineWidth"] > 0:
+                ring = style["outlineColor"]
+            elif shadow:
+                ring = shadow.group(1)
+            else:
+                raise AssertionError(theme + " theme: " + selector + " has no focus ring of the page's own: " + str(style))
+            rgb, alpha = css_color(ring)
+            seen = [channel * alpha + under * (1 - alpha) for channel, under in zip(rgb, background)]
+            ratio = contrast(seen, background)
+            assert ratio >= 3, theme + " theme: the " + selector + " focus ring " + ring + " is " + str(round(ratio, 2)) + ":1 on the popover " + style["background"] + ", under 3:1"
+        page.keyboard.press("Escape")
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1325,6 +1378,7 @@ CHECKS = [
     ("Every element app.js looks up has a reader", check_el_lookups),
     ("A Control units switch keeps an untouched Bloom strength on what renders", check_controls_switch_bloom),
     ("Typing a name in a gating select picks the option it spells", check_select_typeahead),
+    ("Colour popover sliders show a visible keyboard focus ring in both themes", check_slider_focus_ring),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
@@ -1349,6 +1403,8 @@ def main():
     print("PICKER", picker_source, "sha256=" + hashlib.sha256(picker_source.read_bytes()).hexdigest(), flush=True)
     page_source = CONFIGURATOR / "index.html"
     print("PAGE", page_source, "sha256=" + hashlib.sha256(page_source.read_bytes()).hexdigest(), flush=True)
+    styles_source = CONFIGURATOR / "styles.css"
+    print("STYLES", styles_source, "sha256=" + hashlib.sha256(styles_source.read_bytes()).hexdigest(), flush=True)
     print("HARNESS", HARNESS, "sha256=" + hashlib.sha256(HARNESS.with_suffix(".dll").read_bytes()).hexdigest(), flush=True)
     try:
         from playwright.sync_api import sync_playwright
@@ -1382,6 +1438,7 @@ def main():
                     assert page.request.get(origin + "/js/app.js").body() == source.read_bytes(), "served source witness mismatch"
                     assert page.request.get(origin + "/js/colorPicker.js").body() == picker_source.read_bytes(), "served colorPicker witness mismatch"
                     assert page.request.get(origin + "/index.html").body() == page_source.read_bytes(), "served index.html witness mismatch"
+                    assert page.request.get(origin + "/styles.css").body() == styles_source.read_bytes(), "served styles.css witness mismatch"
                     function(page, fixture)
                     assert not errors, "; ".join(errors)
                     print("PASS", name, flush=True)
