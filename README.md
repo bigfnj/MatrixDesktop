@@ -15,13 +15,32 @@ Choose **Wallpaper** in the configurator's window mode, or launch any scene with
 `--wallpaper`. The tray menu provides pause/resume, settings, exit and explicit
 per-user startup control. Wallpaper mode leaves typing and desktop icons usable;
 desktop pointer effects are optional. Fullscreen applications pause it by default,
-and battery pause is available separately.
+and battery pause is available separately. A paused wallpaper keeps its last frame
+on the desktop; only a locked or disconnected session, sleep or a display turning off
+hides and suspends the renderer.
 
 ```cmd
 MatrixDesktop.exe --wallpaper --scene matrix
 MatrixDesktop.exe --wallpaper --scene uc3d
 MatrixDesktop.exe --wallpaper --scene zmatrix
 ```
+
+Launching the wallpaper again, for example with new settings, replaces the running one,
+and one tray icon remains. If the running wallpaper has not exited within 10 seconds,
+the new launch shows a message and stops.
+
+If WebView2's renderer process exits or stays unresponsive, the wallpaper reloads its
+page, at most 3 times in 10 minutes. If the browser process is lost, or a reload fails
+or would exceed that budget, the wallpaper rebuilds its surface after a backoff that
+starts at 0.5 s and doubles up to 8 s; the backoff starts over once a renderer has stayed
+ready for a minute. Fullscreen, windowed, screensaver and preview launches reload the
+same way, and exit where a wallpaper would rebuild.
+
+A ZMatrix wallpaper's tray menu also offers **Refresh desktop**, which re-reads what the
+scene takes from Windows (the desktop wallpaper and the font-smoothing settings) and
+updates the scene only if anything changed. The same refresh runs about 400 ms after
+Windows reports a wallpaper, desktop pattern, high-contrast, font-smoothing, system color
+or theme change, and waits for resume while the wallpaper is paused.
 
 The **ZMatrix Desktop** starter uses the original stream and font defaults.
 Its controls include per-stream speed variance, a separate simulation refresh
@@ -168,8 +187,10 @@ These screenshots are rendered by the same bundled offline web app that MatrixDe
   - Dark/light theme toggle (persisted).
   - Out-of-range numeric inputs show a red border + allowed-range hint inline.
   - "Export .ps1" button copies the current command as a runnable PowerShell script.
-- **Automated releases.** Push a version tag such as `v1.1.0` and GitHub Actions builds, zips, and
-  publishes a Release with both EXEs + assets + SHA256.
+- **Automated releases.** Push a tag for the source version, such as `v1.2.0`, and GitHub Actions
+  builds, zips, and publishes a Release with both EXEs + assets + SHA256. It first checks the
+  tag against both csproj versions and the guide header, and requires CI to have passed on the
+  tagged commit.
 
 ## Build warning cleanup (NETSDK1137 / MSB3277)
 
@@ -202,6 +223,10 @@ This wrapper stores WebView2 user data under AppData instead of beside the EXE:
 
 This avoids WebView2 startup failures when the app is launched from read-only folders, network-style paths, or WSL-mounted locations such as `Z:\home\...`.
 
+Tier 2 of the verification gate checks that the app requests the primary folder by reading
+its log record, because the gate runs with a private `WEBVIEW2_USER_DATA_FOLDER`, which
+WebView2 uses instead.
+
 The bundled `web\` runtime assets are also staged into AppData before WebView2 maps them:
 
 1. Primary: `%LOCALAPPDATA%\MatrixDesktop\Web\`
@@ -209,6 +234,9 @@ The bundled `web\` runtime assets are also staged into AppData before WebView2 m
 3. Last-resort fallback: `%TEMP%\MatrixDesktop\Web\`
 
 This keeps WebView2 asset loading on a normal local Windows path even when the EXE itself is launched from a WSL-mounted folder.
+
+For both the profile and the staged web assets, choosing a fallback logs a warning that
+names the folder used.
 
 ### Smaller web payload in build/publish output
 
@@ -236,11 +264,11 @@ guards the same paths on the commit side. Two clauses remain active rules:
 
 ### Invariant globalization
 
-Publish profiles now set:
-
-- `InvariantGlobalization=true`
-
-Revisit this setting before adding .NET code that requires culture-aware operations.
+Neither the release build nor the local framework-dependent publish profiles set
+`InvariantGlobalization`, so shipped and local builds use the operating system's ICU
+culture data. Tier 1 of the verification gate checks that the published
+`runtimeconfig.json` files do not turn it on and that the local profiles set no build
+property the release does not. Only the unsupported trimmed experiment still sets it.
 
 ## Runtime configuration (EXE arguments)
 
@@ -262,11 +290,14 @@ single scrollable surface rather than tabbed pages:
 
 - **Single-screen layout.** Groups, including the UC3D options, share a scrollable surface
   with sticky section headers. A left-hand jump list scrolls to
-  a section, and a filter box narrows the visible fields by name.
+  a section and moves keyboard focus to it, and a filter box narrows the visible fields by name.
 - **Custom color picker.** Color, palette-stop, and stripe swatches open an in-app popover
   with a draggable saturation/value square, a hue bar, and precise hex / 0–1 RGB entry: no
   OS color dialog, and palette/stripe rows are directly editable. RGB values in generated
-  commands use up to three decimal places.
+  commands use up to three decimal places. The popover opens with focus in its hex box, and
+  the square and hue bar are keyboard sliders (arrow keys, with Shift for tenfold steps).
+  Escape, or Shift+Tab out of the popover, returns focus to the swatch; Tab out of it moves
+  on past the swatch.
 - **Embedded live preview.** A preview pane renders the matrix effect (served to an iframe
   from the bundled `web/` assets) and refreshes on any change: field edits, preset
   selection, import, or randomize. Generated visual parameters also supply the preview
@@ -436,14 +467,14 @@ limits animation speed to 0 to 4.
 
 #### Feature toggles and click controls
 
-- `camera` (bool): enables webcam input (used by the mirror effect).
+- `camera` (bool): enables webcam input for the mirror effect only; other effects ignore it and never open the webcam.
 - `clickRipples` (bool): enables click-triggered ripples in non-mirror rain effects such as `stripes`, `palette`, or `image`.
 - `clickRippleShape` (string): click ripple shape: `circle` (default), `box`, `triangle`, or `star`. Invalid values fall back to `circle`.
 - `volumetric` (bool): enables volumetric/3D rendering.
 - `glyphFlip` (bool): flips glyphs horizontally.
 - `loops` (bool): loop mode (WIP).
 - `once` (bool): render a single frame then stop.
-- `skipIntro` (bool): when `false`, starts from the intro/blank-screen sequence (web default is `true`).
+- `skipIntro` (bool): when `false`, starts from the intro/blank-screen sequence (web default is `true`). In the Matrix scene, `false` is ignored with a console warning when `animationSpeed` times `fallSpeed` is zero or negative, because the intro could never finish.
 - `suppressWarnings` (bool): suppresses startup notices (e.g., hardware acceleration warning).
 - `isometric` (bool): experimental mode toggle.
 
@@ -487,7 +518,7 @@ Palettes and stripes are lists:
 
 #### Image effect
 
-- `url` (string): image URL to load when `effect=image`.
+- `url` (string): image URL to load when `effect=image`. Omitted or blank, it uses the bundled sand texture (`assets/sand.png`) and needs no network; an image that cannot be loaded leaves the rain uncolored, with a console warning naming the URL.
 
 #### Advanced / debug
 
@@ -573,7 +604,10 @@ build, the native regression harness, renderer lifecycle and UC3D scenario tests
 the media importer's synthetic tests, `node --check` over every first-party web module,
 every referenced shader and asset resolving, a headless DOM smoke, the embedded argument
 guide, a window icon in both executables at every size the app asks for, the guide header's
-version matching both csproj, embedded source-line symbols, and the publish payload.
+version matching both csproj (`tests/check-release-version.ps1`, which `release.yml` also
+runs with the tag), embedded source-line symbols, the publish payload, local publish
+profiles that set nothing the release does not, and ICU globalization in both published
+`runtimeconfig.json` files.
 The UC3D WebGL browser smoke checks rendered picture colors and relief as well as
 animation and disposal. The original-control WebGL calibration checks slider endpoints, independent
 population/size, 2D/portrait, motion and cleanup. The runtime tiers create real windows
@@ -581,7 +615,8 @@ and capture frames, so they need an attached session and cannot run on a headles
 
 One tier-1 check is about the gate itself: it asserts the publish flags it uses appear in
 both of `release.yml`'s publish steps. Without that the gate measures a payload nobody ships,
-which is exactly what it used to do.
+which is exactly what it used to do. Another asserts that `release.yml` runs the tag version
+check and the CI result check before its first `dotnet publish`.
 
 The headless DOM smoke (`tests/web-smoke.py`, Playwright + Chromium) is worth calling out,
 because it exists to catch the one thing the runtime tiers structurally cannot. Those tiers
@@ -592,7 +627,8 @@ bounding boxes inside the viewport, shell height equal to the viewport, the fiel
 actually scrolling, the command panel staying under 30% of the window, the preview pane's
 aspect ratio, and WCAG contrast in both themes. It needs no GPU, no window station and no
 WebView2, so it runs in CI. The additional `tests/zmatrix-configurator.py` DOM
-suite covers ZMatrix editors, imports, dependencies and preview request ordering.
+suite covers ZMatrix editors, imports, dependencies and preview request ordering, and the
+configurator's color popover, hex parsing, keyboard focus and accessible names.
 
 It also asserts that a render flag actually *changes* the render, by measuring screenshot
 luminance at two values of `glyphIntensity`. That is the check whose absence let
@@ -645,6 +681,12 @@ which is what `ci.yml` does. Exit 1 and 3 fail the build.
 - WebView2 web assets:
   - The wrapper stages the bundled `web\` folder into `%LOCALAPPDATA%\MatrixDesktop\Web\`.
   - If LocalAppData is not writable, it falls back to `%APPDATA%\MatrixDesktop\Web\`, then `%TEMP%\MatrixDesktop\Web\`.
+
+- GPU resets:
+  - If the GPU context or device is lost, for example after a GPU reset or a graphics driver
+    crash, the page reloads itself, up to 3 times in 5 minutes. After that it shows "Error
+    loading renderer: the GPU renderer was lost ... and could not be recovered automatically.
+    Restart MatrixDesktop to try again."
 
 ## Attribution / License
 
