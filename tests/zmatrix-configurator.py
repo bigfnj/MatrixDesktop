@@ -401,6 +401,31 @@ def check_focus_rerender(page, _fixture):
     assert (now["field"], now["row"], now["rows"], now["text"]) == ("zmPhrases", 0, 1, "Remove"), "removing the last phrase did not land on the new last row's remove: " + str(now)
 
 
+def check_phrase_rows(page, _fixture):
+    choose_zmatrix(page)
+    phrases = field(page, "zmPhrases")
+    rows = phrases.locator(".phrase-row input")
+    hint = phrases.locator(":scope > .field-help").last
+    values = lambda: rows.evaluate_all("nodes => nodes.map(node => node.value)")
+    # Marked means both the visible invalid-input class and a constraint-validation message.
+    marked = lambda: rows.evaluate_all("nodes => nodes.map(node => node.classList.contains('invalid-input') && node.matches(':invalid'))")
+    add = phrases.get_by_role("button", name="Add phrase")
+    add.click()
+    add.click()
+    shown, kept = values(), saved(page)["zmPhrases"]
+    assert len(set(shown)) == len(shown) == 3 and kept == shown, "two Adds gave rows " + str(shown) + " but saved " + str(kept)
+    assert hint.text_content() == "3 phrase entries", "the hint does not count the saved phrases: " + repr(hint.text_content())
+    rows.nth(2).fill(shown[1])
+    kept = saved(page)["zmPhrases"]
+    assert kept == shown[:2], "a repeated phrase was saved twice or lost: " + str(kept)
+    assert marked() == [False, False, True], "only the repeating row must be marked invalid: " + str(marked())
+    assert hint.text_content() == "2 phrase entries; 1 duplicate ignored", "the hint does not count distinct phrases and report the repeat: " + repr(hint.text_content())
+    phrases.locator(".phrase-row").first.get_by_role("button", name="Remove").click()
+    assert values() == [shown[1], shown[1]] and marked() == [False, True], "after removing a row the remaining repeat lost its mark: " + str(marked())
+    rows.nth(1).fill("Third phrase")
+    assert marked() == [False, False] and saved(page)["zmPhrases"] == [shown[1], "Third phrase"], "editing the repeat away did not clear its mark or save it: " + str(marked())
+
+
 CONTROL_ROLES = {"checkbox", "combobox", "textbox", "searchbox", "spinbutton", "slider", "button", "listbox"}
 COMPOUND_KINDS = {"color", "rgb8", "font", "phrases", "palette", "stripes"}
 
@@ -619,6 +644,7 @@ CHECKS = [
     ("Colour popover closes when the editor re-renders", check_picker_closes_on_rerender),
     ("Hex boxes refuse invalid colours and read text as the popover does", check_invalid_hex),
     ("Configurator keeps keyboard focus across re-render", check_focus_rerender),
+    ("Phrase editor shows and counts each saved phrase once", check_phrase_rows),
     ("Field controls have accessible names and their labels operate them", check_accessible_names),
     ("Font-name boxes share one installed-font list across re-renders", check_font_list),
     ("Filter finds the screensaver actions by their own text", check_filter_actions),

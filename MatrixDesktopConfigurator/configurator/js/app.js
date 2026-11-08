@@ -798,10 +798,23 @@ const renderPhraseField = (field) => {
 	const editor = document.createElement("div"); editor.className = "phrase-editor";
 	let phrases = [...(state.draft[field.id] ?? field.defaultValue ?? [])];
 	const hint = document.createElement("div"); hint.className = "field-help";
+	const validPhrase = value => value.length > 0 && value.length <= 256 && !invalidBmpText(value);
+	// The draft keeps each phrase once, so the count is of distinct phrases and a row repeating an
+	// earlier one is marked: the editor used to show and count rows the save had dropped.
+	const countText = () => {
+		const distinct = new Set(phrases).size, repeated = phrases.length - distinct;
+		return distinct + " phrase entries" + (repeated ? "; " + repeated + (repeated === 1 ? " duplicate" : " duplicates") + " ignored" : "");
+	};
+	// Only where the rows match the list: after typing and at the end of every redraw. Add and
+	// Remove save before they redraw, while the old rows are still on screen.
+	const markRows = () => editor.querySelectorAll(".phrase-row input").forEach((input, index) => {
+		const first = phrases.indexOf(phrases[index]);
+		input.setCustomValidity(first < index ? "Repeats phrase " + (first + 1) + ", so it is saved once." : "");
+		input.classList.toggle("invalid-input", first < index || !validPhrase(phrases[index]));
+	});
 	const save = () => {
-		const valid = phrases.length <= 64 && phrases.every(value => value.length > 0 && value.length <= 256 && !invalidBmpText(value))
-			&& new Set(phrases.join("")).size <= 1024;
-		hint.textContent = valid ? phrases.length + " phrase entries" : "Use up to 64 nonempty phrases, 256 BMP characters each and 1024 distinct glyphs.";
+		const valid = phrases.length <= 64 && phrases.every(validPhrase) && new Set(phrases.join("")).size <= 1024;
+		hint.textContent = valid ? countText() : "Use up to 64 nonempty phrases, 256 BMP characters each and 1024 distinct glyphs.";
 		hint.classList.toggle("validation-error", !valid);
 		if (valid) updateDraftValue(field, [...new Set(phrases)]);
 		return valid;
@@ -816,7 +829,9 @@ const renderPhraseField = (field) => {
 			input.addEventListener("input", () => {
 				if (getDisabledReason(field)) return;
 				phrases[index] = input.value;
-				input.classList.toggle("invalid-input", !save());
+				const valid = save();
+				markRows();
+				if (!valid) input.classList.add("invalid-input");
 			});
 			const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
 			remove.addEventListener("click", () => { if (!getDisabledReason(field)) { phrases.splice(index, 1); save(); draw(); } });
@@ -824,12 +839,18 @@ const renderPhraseField = (field) => {
 		});
 		const add = document.createElement("button"); add.type = "button"; add.textContent = "Add phrase";
 		add.disabled = phrases.length >= 64;
-		add.addEventListener("click", () => { if (!getDisabledReason(field) && phrases.length < 64) { phrases.push("New phrase"); save(); draw(); } });
+		add.addEventListener("click", () => {
+			if (getDisabledReason(field) || phrases.length >= 64) return;
+			let text = "New phrase";
+			for (let n = 2; phrases.includes(text); n++) text = "New phrase " + n;
+			phrases.push(text); save(); draw();
+		});
 		editor.append(add);
 		if (getDisabledReason(field)) for (const control of editor.querySelectorAll("input, button")) control.disabled = true;
+		markRows();
 		restoreFocus(shell, focus);
 	};
-	hint.textContent = phrases.length + " phrase entries"; draw(); shell.append(editor, hint); return shell;
+	hint.textContent = countText(); draw(); shell.append(editor, hint); return shell;
 };
 
 // One list of installed font families serves every font-name box. It is built once, outside
