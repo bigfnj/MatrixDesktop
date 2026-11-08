@@ -83,8 +83,14 @@ await test("Holoplay uses REGL before any WebGPU adapter probe", () => {
 });
 
 await test("web boolean parser accepts exact aliases and rejects embedded true", () => {
-	for (const text of ["", "true", "TRUE", "1", "y", "yes", " on "]) assert.equal(makeConfig({ camera: text }).useCamera, true, text);
-	for (const text of ["false", "0", "no", "off", "truthy", "untrue", "nottrue", "true-ish"]) assert.equal(makeConfig({ camera: text }).useCamera, false, text);
+	for (const text of ["", "true", "TRUE", "1", "y", "yes", " on "]) assert.equal(makeConfig({ camera: text, effect: "mirror" }).useCamera, true, text);
+	for (const text of ["false", "0", "no", "off", "truthy", "untrue", "nottrue", "true-ish"]) assert.equal(makeConfig({ camera: text, effect: "mirror" }).useCamera, false, text);
+});
+
+await test("camera is requested only by the mirror effect", () => {
+	assert.equal(makeConfig({ camera: "true", effect: "mirror" }).useCamera, true, "Mirror keeps its camera");
+	for (const effect of ["palette", "stripes", "image", "none", "Mirror"]) assert.equal(makeConfig({ camera: "true", effect }).useCamera, false, effect);
+	assert.equal(makeConfig({ camera: "true" }).useCamera, false, "the default palette effect must not open the camera");
 });
 
 await test("Looking Glass missing, invalid, timeout and late responses never invent calibration", async () => {

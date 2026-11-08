@@ -688,6 +688,9 @@ export default (urlParams) => {
 		hasBaseTexture,
 		hasGlintTexture,
 	};
+	// Only the mirror effect consumes the camera texture. A stale camera=true saved
+	// under Mirror must not open the webcam for an effect that cannot show it.
+	if (config.effect !== "mirror") config.useCamera = false;
 	if (config.scene === "uc3d" && config.uc3dControls === "original") {
 		config.animationSpeed = range(config.animationSpeed, 0, 4);
 		config.pictureScale = config.uc3dPictureScale / 100;
