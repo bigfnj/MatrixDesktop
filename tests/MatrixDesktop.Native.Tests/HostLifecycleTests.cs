@@ -8,7 +8,25 @@ internal static class HostLifecycleTests
         ("Native host detaches a dead controller before disposal", DetachBeforeDispose),
         ("Native host creates modern WorkerW before bounded legacy fallback", WorkerRequests),
         ("Native host loop ends a context that exited while it was constructed", ConstructorExit),
+        ("Native host attaches a newer surface above an older one in the same desktop host", AttachOrder),
     ];
+
+    // AUD-72. Attach used HWND_BOTTOM, so a newer wallpaper surface went under an older one in
+    // the same WorkerW and its new settings never showed. Test-owned hidden windows only.
+    private static void AttachOrder() => Require(ReturnsWithin(() =>
+    {
+        using var host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new System.Drawing.Point(-32000, -32000), Size = new System.Drawing.Size(320, 240) };
+        using var older = new Form { TopLevel = false, FormBorderStyle = FormBorderStyle.None };
+        using var newer = new Form { TopLevel = false, FormBorderStyle = FormBorderStyle.None };
+        var bounds = new System.Drawing.Rectangle(0, 0, 320, 240);
+        DesktopWindowHost.Attach(older.Handle, host.Handle, bounds);
+        DesktopWindowHost.Attach(newer.Handle, host.Handle, bounds);
+        Require(DesktopWindowHost.ParentOf(older.Handle) == host.Handle && DesktopWindowHost.ParentOf(newer.Handle) == host.Handle, "witness: both surfaces must be attached to the host");
+        Require(GetWindow(host.Handle, 5) == newer.Handle, "A newer surface must attach above an older one in the same desktop host.");
+        Require(GetWindow(newer.Handle, 2) == older.Handle, "The older surface must stay attached directly beneath the newer one.");
+    }, 10000), "The attach-order check must finish.");
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
 
     private static void Require(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }

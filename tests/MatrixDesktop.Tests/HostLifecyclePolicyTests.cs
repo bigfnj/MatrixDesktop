@@ -14,7 +14,96 @@ internal static class HostLifecyclePolicyTests
         ("Host priority reports a class Windows did not grant", PriorityReadBack),
         ("Host pause keeps the frozen frame visible unless lock, sleep or display-off took it away", PauseSuspension),
         ("Host wallpaper does not rebuild a renderer that failed to start", SurfaceClose),
+        ("Host wallpaper guard lets the newest launch take over and leaves other scopes alone", WallpaperTakeover),
+        ("Host wallpaper guard scope keeps isolated test launches away from the owner's wallpaper", WallpaperScope),
     ];
+
+    // AUD-72. A second --wallpaper stacked another renderer and tray icon under the first. Every
+    // scope here is a fresh GUID, so this never signals a real wallpaper ("default" scope).
+    private static void WallpaperTakeover()
+    {
+        var scope = "test-" + Guid.NewGuid().ToString("N");
+        using var takeoverRequested = new ManualResetEventSlim();
+        using var holding = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var staleRequest = new ManualResetEventSlim();
+        WallpaperInstanceGuard.Outcome firstResult = default, secondResult = default;
+        bool releasing = false, holderReleasedFirst = false;
+        // Each launch on its own thread: a mutex belongs to the thread that acquired it.
+        var holder = new Thread(() =>
+        {
+            using var first = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+            firstResult = first.Result;
+            first.ListenForTakeover(takeoverRequested.Set);
+            holding.Set();
+            release.Wait(TimeSpan.FromSeconds(20));
+            Volatile.Write(ref releasing, true);
+        }) { IsBackground = true };
+        holder.Start();
+        Check.True(holding.Wait(TimeSpan.FromSeconds(10)), "the first wallpaper must acquire");
+        Check.Equal(WallpaperInstanceGuard.Outcome.Acquired, firstResult, "the first launch in a scope acquires without waiting");
+
+        using (var other = WallpaperInstanceGuard.Acquire("test-" + Guid.NewGuid().ToString("N"), TimeSpan.FromSeconds(1)))
+            Check.Equal(WallpaperInstanceGuard.Outcome.Acquired, other.Result, "a launch in another scope (an isolated gate or test run) must acquire at once");
+        Check.False(takeoverRequested.Wait(300), "another scope must never ask this scope's wallpaper to exit");
+
+        var newcomer = new Thread(() =>
+        {
+            using var second = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(10));
+            secondResult = second.Result;
+            holderReleasedFirst = Volatile.Read(ref releasing);
+            second.ListenForTakeover(staleRequest.Set);
+            Thread.Sleep(400);
+        }) { IsBackground = true };
+        newcomer.Start();
+        Check.True(takeoverRequested.Wait(TimeSpan.FromSeconds(5)), "a second wallpaper launch in the same scope must ask the running one to exit");
+        // A holder takes a moment to tear down; the newcomer keeps waiting and asking meanwhile.
+        Thread.Sleep(600);
+        Check.True(newcomer.IsAlive, "the newcomer must wait for the holder instead of stacking a second wallpaper");
+        release.Set();
+        Check.True(newcomer.Join(TimeSpan.FromSeconds(10)) && holder.Join(TimeSpan.FromSeconds(10)), "both launches must finish");
+        Check.Equal(WallpaperInstanceGuard.Outcome.TookOver, secondResult, "the newest launch must take over once the holder released");
+        Check.True(holderReleasedFirst, "the newcomer must acquire only after the holder released");
+        Check.False(staleRequest.IsSet, "a request aimed at the previous holder must not end the new one");
+
+        // A holder that never hands over keeps the desktop; the newcomer gives up at its bound.
+        var stuckScope = "test-" + Guid.NewGuid().ToString("N");
+        using var stuckHolding = new ManualResetEventSlim();
+        using var stuckRelease = new ManualResetEventSlim();
+        var stuck = new Thread(() =>
+        {
+            using var held = WallpaperInstanceGuard.Acquire(stuckScope, TimeSpan.FromSeconds(1));
+            stuckHolding.Set();
+            stuckRelease.Wait(TimeSpan.FromSeconds(20));
+        }) { IsBackground = true };
+        stuck.Start();
+        Check.True(stuckHolding.Wait(TimeSpan.FromSeconds(10)), "the unresponsive holder must acquire");
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        using (var late = WallpaperInstanceGuard.Acquire(stuckScope, TimeSpan.FromMilliseconds(700)))
+        {
+            Check.Equal(WallpaperInstanceGuard.Outcome.TimedOut, late.Result, "a holder that does not hand over in time keeps the desktop");
+            Check.True(waited.ElapsedMilliseconds >= 600, $"the newcomer must wait out its bound before stopping (waited {waited.ElapsedMilliseconds} ms)");
+        }
+        stuckRelease.Set();
+        Check.True(stuck.Join(TimeSpan.FromSeconds(10)), "the unresponsive holder must finish");
+    }
+
+    private static void WallpaperScope()
+    {
+        Check.Equal("default", WallpaperInstanceGuard.Scope(_ => null), "an ordinary launch uses the owner's scope");
+        Check.Equal("default", WallpaperInstanceGuard.Scope(_ => ""), "empty isolation variables do not isolate");
+        Check.True(WallpaperInstanceGuard.IsolationVariables.Contains("WEBVIEW2_USER_DATA_FOLDER"), "the gate's and the smokes' profile variable must isolate");
+        var seen = new HashSet<string>();
+        foreach (var name in WallpaperInstanceGuard.IsolationVariables)
+        {
+            var scope = WallpaperInstanceGuard.Scope(variable => variable == name ? @"D:\gate run\artifacts\gate\webview-profile" : null);
+            Check.False(scope == "default", $"a launch that sets {name} must never share the owner's wallpaper scope");
+            Check.True(seen.Add(scope), $"{name} must give a scope of its own");
+        }
+        string Profile(string folder) => WallpaperInstanceGuard.Scope(variable => variable == "WEBVIEW2_USER_DATA_FOLDER" ? folder : null);
+        Check.Equal(Profile(@"D:\a"), Profile(@"D:\a"), "the same isolation must give the same scope, so test launches still replace each other");
+        Check.False(Profile(@"D:\a") == Profile(@"D:\b"), "different isolated profiles are different scopes");
+    }
 
     // AUD-05. The startup error dialog came back every 500 ms in wallpaper mode. The host side
     // (FailStartup sets the flag, OnSurfaceClosed asks this policy) is checked on the published

@@ -11,6 +11,7 @@ internal static class DesktopWindowHost
     private const long WsChild = 0x40000000, WsPopup = 0x80000000;
     private const long WsCaption = 0x00c00000, WsThickFrame = 0x00040000;
     private const long WsExAppWindow = 0x00040000, WsExToolWindow = 0x80, WsExNoActivate = 0x08000000;
+    private static readonly nint HwndTop = 0;
     private delegate bool EnumWindowsProc(nint window, nint parameter);
 
     internal static nint FindWorker()
@@ -80,7 +81,8 @@ internal static class DesktopWindowHost
         var origin = new Point();
         if (!ClientToScreen(parent, ref origin)) throw new Win32Exception();
         var bounds = preview ? ClientBounds(parent) : new Rectangle(screenBounds.X - origin.X, screenBounds.Y - origin.Y, screenBounds.Width, screenBounds.Height);
-        if (!SetWindowPos(child, new nint(1), bounds.X, bounds.Y, bounds.Width, bounds.Height, 0x0010 | 0x0020 | 0x0040))
+        // HWND_TOP within the host: a newer surface must never sit hidden under an older one.
+        if (!SetWindowPos(child, HwndTop, bounds.X, bounds.Y, bounds.Width, bounds.Height, 0x0010 | 0x0020 | 0x0040))
             throw new Win32Exception();
         _ = EnableWindow(child, false);
         if (GetParent(child) != parent) throw new InvalidOperationException("The desktop parent did not persist.");

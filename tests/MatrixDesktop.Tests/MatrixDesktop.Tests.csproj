@@ -91,5 +91,6 @@
   <ItemGroup>
     <!-- Host storage and lifecycle decisions, kept free of WinForms for this harness. -->
     <Compile Include="..\..\MatrixDesktop\HostStorage.cs" Link="Production\HostStorage.cs" />
+    <Compile Include="..\..\MatrixDesktop\WallpaperInstanceGuard.cs" Link="Production\WallpaperInstanceGuard.cs" />
   </ItemGroup>
 </Project>

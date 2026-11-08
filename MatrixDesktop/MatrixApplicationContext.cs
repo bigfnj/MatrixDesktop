@@ -22,6 +22,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
     private int _retryCount;
     private uint _screensaverInputTick;
     private readonly DesktopPointerBridge? _pointer;
+    private WallpaperInstanceGuard? _instance;
+    private static readonly TimeSpan TakeoverBound = TimeSpan.FromSeconds(10);
 
     // True once the context has ended, including inside its own constructor; HostLoop then
     // disposes it instead of starting a message loop nothing could end.
@@ -44,6 +46,7 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         // class), and after CreateTray so a refused class can show its balloon.
         if (_wallpaper)
         {
+            if (!TakeWallpaperOwnership()) return;
             CreateTray();
             ApplyPriority();
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
@@ -57,6 +60,31 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             if (plan.IsPreview || plan.IsScreensaver) { _timer.Interval = 100; _timer.Tick += OnTick; _timer.Start(); }
             TryCreateSurface();
         }
+    }
+
+    // The newest wallpaper launch wins: a running one in this session and scope is asked to exit
+    // and this launch continues once it has. If it does not hand over in time it keeps the
+    // desktop, and this launch says so and ends (HostLoop disposes a context ended here).
+    private bool TakeWallpaperOwnership()
+    {
+        var scope = WallpaperInstanceGuard.Scope(Environment.GetEnvironmentVariable);
+        _instance = WallpaperInstanceGuard.Acquire(scope, TakeoverBound);
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.TimedOut)
+        {
+            var message = $"Another MatrixDesktop wallpaper did not exit within {TakeoverBound.TotalSeconds:0} seconds, so this launch stopped. End the running MatrixDesktop in Task Manager, then launch it again.";
+            Shared.Logger.Warn(message);
+            try { MessageBox.Show(message, "MatrixDesktop", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            catch { /* the dialog itself may fail in degraded states */ }
+            ExitThread();
+            return false;
+        }
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.TookOver) Shared.Logger.Info($"Took over from the running wallpaper (scope {scope}).");
+        _instance.ListenForTakeover(() => _coordinator.Post(() =>
+        {
+            Shared.Logger.Info("A newer wallpaper launch took over; exiting.");
+            ExitThread();
+        }));
+        return true;
     }
 
     private void CreateTray()
@@ -81,6 +109,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             catch (Exception error) { Report(error.Message); }
         };
         menu.Items.Add(autostart);
+        // The shortcut can change outside this process (the configurator, Explorer, another launch).
+        menu.Opening += (_, _) => autostart.Checked = AutostartService.Enabled;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _tray = new NotifyIcon { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone(),
@@ -283,6 +313,8 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         {
             _tray.Visible = false; _tray.ContextMenuStrip?.Dispose(); _tray.Icon?.Dispose(); _tray.Dispose(); _tray = null;
         }
+        // After the surface and tray are gone, so a waiting newer launch takes an empty desktop.
+        _instance?.Dispose(); _instance = null;
         _coordinator.Dispose();
         base.ExitThreadCore();
     }

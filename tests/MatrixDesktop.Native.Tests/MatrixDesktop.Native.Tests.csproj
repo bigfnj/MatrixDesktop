@@ -16,6 +16,8 @@
     <Compile Include="..\..\MatrixDesktop\HostControlLifetime.cs" Link="Production\HostControlLifetime.cs" />
     <Compile Include="..\..\MatrixDesktop\DesktopHostDiscovery.cs" Link="Production\DesktopHostDiscovery.cs" />
     <Compile Include="..\..\MatrixDesktop\HostLoop.cs" Link="Production\HostLoop.cs" />
+    <Compile Include="..\..\MatrixDesktop\DesktopWindowHost.cs" Link="Production\DesktopWindowHost.cs" />
+    <Compile Include="..\..\MatrixDesktop\PlaybackPolicy.cs" Link="Production\PlaybackPolicy.cs" />
     <Compile Include="..\..\Shared\GdiGlyphAtlas.cs" Link="Production\GdiGlyphAtlas.cs" />
     <Compile Include="..\..\Shared\WallpaperBackground.cs" Link="Production\WallpaperBackground.cs" />
     <Compile Include="..\..\Shared\CrashDumpWriter.cs" Link="Production\CrashDumpWriter.cs" />

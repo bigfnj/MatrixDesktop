@@ -82,6 +82,23 @@ internal static class HostWiring
                     $"{subscribe} must have exactly one caller, the host context, which routes it through PlaybackPolicy");
             }
         });
+        // AUD-72. WallpaperInstanceGuard has its own tests; these prove the wallpaper context uses it.
+        failures += Run($"wallpaper launch takes the instance guard before its tray and releases it on exit: {path}", () =>
+        {
+            var ctor = calls.Where(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::.ctor").ToList();
+            var take = ctor.FirstOrDefault(call => call.Callee == "MatrixDesktop.MatrixApplicationContext::TakeWallpaperOwnership");
+            var tray = ctor.FirstOrDefault(call => call.Callee == "MatrixDesktop.MatrixApplicationContext::CreateTray");
+            Check.True(tray is not null, "witness: the scan must see the constructor create the tray");
+            Check.True(take is not null && take.Offset < tray!.Offset, "the wallpaper context must take the instance guard before it creates its tray");
+            var taking = calls.Where(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::TakeWallpaperOwnership").Select(call => call.Callee).ToList();
+            Check.True(taking.Contains("MatrixDesktop.WallpaperInstanceGuard::Acquire") && taking.Contains("MatrixDesktop.WallpaperInstanceGuard::ListenForTakeover"),
+                "taking ownership must acquire the guard and listen for a newer launch");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::ExitThreadCore" && call.Callee == "MatrixDesktop.WallpaperInstanceGuard::Dispose"),
+                "the context must release the guard when it exits, or a newer launch waits out its bound");
+        });
+        failures += Run($"the tray refreshes Start with Windows when its menu opens: {path}", () =>
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::CreateTray" && call.Callee == "System.Windows.Forms.ToolStripDropDown::add_Opening"),
+                "CreateTray must subscribe the menu's Opening, so another launch's or the configurator's shortcut change shows"));
         return failures;
     }
 
