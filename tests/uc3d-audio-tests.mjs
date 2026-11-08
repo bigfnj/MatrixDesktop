@@ -55,7 +55,7 @@ function fixture({ paused = false, preview = false, local = false, defer = false
     pause() { this.paused = true; } load() {} removeAttribute() {}
   }
   globalThis.window = { AudioContext: Context }; globalThis.document = document; globalThis.Audio = Element;
-  const audio = createAudio({ sound, soundVolume: .5 }, { preview, effectsUrl: local ? "fixture.wav" : null }, {}, {
+  const audio = createAudio({ sound, soundVolume: .5 }, { preview, effectsUrl: local ? "fixture.wav" : null }, {
     subscribe(listener) { listeners.add(listener); listener(paused); return () => listeners.delete(listener); }, gestureGraceMs: grace,
   });
   return { audio, contexts, elements, buttons, pending, listeners, activate() { activated = true; },

@@ -1,5 +1,5 @@
 import { createRuntime, startLoop } from "../zmatrix/runtime.js";
-import { createProgram } from "../zmatrix/gpu.js";
+import { createProgram } from "../webglProgram.js";
 
 // The persistent 2D scene is shared; this pass really presents it through WebGL.
 export default async function startZMatrix(canvas, config) {
@@ -23,7 +23,7 @@ export default async function startZMatrix(canvas, config) {
     if (dead) { runtime.dispose(); return cleanup; }
     program = createProgram(gl,
       "attribute vec2 position; varying vec2 uv; void main(){uv=(position+1.0)*0.5; gl_Position=vec4(position,0.0,1.0);}",
-      "precision highp float; varying vec2 uv; uniform sampler2D image; void main(){gl_FragColor=vec4(texture2D(image,uv).rgb,1.0);}");
+      "precision highp float; varying vec2 uv; uniform sampler2D image; void main(){gl_FragColor=vec4(texture2D(image,uv).rgb,1.0);}", "ZMatrix");
     texture = gl.createTexture(); geometry = gl.createBuffer();
     if (!texture || !geometry) throw new Error("ZMatrix could not allocate WebGL presentation resources");
     gl.bindTexture(gl.TEXTURE_2D, texture);

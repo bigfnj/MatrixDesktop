@@ -1,29 +1,5 @@
 import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig } from "../uc3d/runtime.js";
-
-export function createProgram(gl, vertex, fragment) {
-  const shaders = [];
-  let result = null, linked = false;
-  const compile = (type, code) => {
-    const shader = gl.createShader(type);
-    if (!shader) throw new Error("UC3D could not allocate a shader");
-    shaders.push(shader);
-    gl.shaderSource(shader, code); gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(`UC3D shader: ${gl.getShaderInfoLog(shader)}`);
-    return shader;
-  };
-  try {
-    result = gl.createProgram();
-    if (!result) throw new Error("UC3D could not allocate a program");
-    const vs = compile(gl.VERTEX_SHADER, vertex), fs = compile(gl.FRAGMENT_SHADER, fragment);
-    gl.attachShader(result, vs); gl.attachShader(result, fs); gl.linkProgram(result);
-    if (!gl.getProgramParameter(result, gl.LINK_STATUS)) throw new Error(`UC3D program: ${gl.getProgramInfoLog(result)}`);
-    linked = true;
-    return result;
-  } finally {
-    for (const shader of shaders) gl.deleteShader(shader);
-    if (!linked && result) gl.deleteProgram(result);
-  }
-}
+import { createProgram } from "../webglProgram.js";
 
 // A separate WebGL scene keeps the legacy REGL intensity-channel pipeline intact.
 // It uses the same WebGL API as that backend; no native donor renderer is loaded.
@@ -44,7 +20,7 @@ export default async function startUC3D(canvas, config) {
   };
   const contextLost = (event) => { event.preventDefault(); runtime?.diagnostics.errors.push("WebGL context was lost"); stop?.(); };
   const program = (vertex, fragment) => {
-    const result = createProgram(gl, vertex, fragment);
+    const result = createProgram(gl, vertex, fragment, "UC3D");
     programs.push(result); return result;
   };
   const texture = (image = null, flipped = false) => {

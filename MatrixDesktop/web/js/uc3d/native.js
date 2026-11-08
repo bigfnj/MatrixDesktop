@@ -115,7 +115,7 @@ export function createNativeScene(config, pictureCount = 0) {
   let manualUntil = -Infinity, pending = [0, 0, 0], manualVelocity = [0, 0, 0], manualTarget = identity(), manualCurrent = identity(), manualGain = 0, stopped = false;
   let pictureTimer = 20, pictureIndex = pictureCount ? 0 : -1, pictureWeight = 0, pictureMode = false;
   let picturePeriodX = 8, picturePeriodY = 10, pictureGrid = null;
-  let eye = [0, 0, 25], up = [0, 1, 0], viewMatrix = nativeLookAt(eye, up), state;
+  let eye = [0, 0, 25], up = [0, 1, 0], viewMatrix = nativeLookAt(eye, up);
   const activeCount = () => Math.max(0, Math.ceil(active-1e-9));
   const delay = Math.max(0, finite(config.pictureDelay, 60)), duration = Math.max(1, finite(config.pictureDuration, 30));
   const speed = clamp(finite(config.animationSpeed, 1), 0, 4);
@@ -250,13 +250,13 @@ export function createNativeScene(config, pictureCount = 0) {
       if (gone) spawn(stream);
     }
   };
-  const snapshot = () => state = {
+  const snapshot = () => ({
     elapsed, time: elapsed*finite(config.animationSpeed, 1), forwardPhase: forwardDistance/50, sidewaysOffset: sidewaysDistance,
     yaw: angles[1], pitch: angles[0], roll: angles[2], eye: [...eye], up: [...up], viewMatrix,
     mouseActive: Boolean(config.volumetric && config.mouseRotation && simulated < manualUntil), pictureWeight, pictureIndex,
     activeStreams: activeCount(), forwardVelocity: forwardVelocity*.1, sidewaysVelocity, phaseMoving, phaseTimer,
     nativeMode: true,
-  };
+  });
   const interact = (seconds) => {
     api.update(seconds); manualUntil = simulated+20;
   };
@@ -337,5 +337,5 @@ export function createNativeScene(config, pictureCount = 0) {
     inspect() { return streams.slice(0, activeCount()).map(s => ({ id: s.id, x: s.x, y: s.y, z: s.z, speed: s.speed, length: s.length, visible: s.visible, remainder: s.remainder, renderY: s.y+s.remainder, picture: s.picture })); },
     dispose() { dead = true; ordered.length = 0; streams.length = 0; geometry = new Float32Array(0); },
   };
-  snapshot(); return api;
+  return api;
 }

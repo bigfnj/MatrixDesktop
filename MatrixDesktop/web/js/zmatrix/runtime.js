@@ -53,7 +53,8 @@ async function loadResources(config, bootstrap, signal) {
   } catch (error) { fonts.normal.dispose(); fonts.special.dispose(); wallpaper?.close(); throw error; }
 }
 export async function createRuntime(canvas, options, backend, maximumDimension = 8192) {
-  const warnings = [], config = { ...options, ...normalizeZMatrixSettings(options, warnings) };
+  // config.js already replaced every rejected value with its default, silently as documented.
+  const config = { ...options, ...normalizeZMatrixSettings(options) };
   let bootstrap = window.matrixHostBootstrap ?? {}, resources = null, surface = null, imageData = null, upload = null, uploadContext = null, pendingRefresh = null;
   let dead = false, lastTime = null, cssWidth = 0, cssHeight = 0, backgroundDirty = true, lastRatio = 0;
   const slot = createResourceSlot();
@@ -73,7 +74,6 @@ export async function createRuntime(canvas, options, backend, maximumDimension =
     console.warn(`ZMatrix: ${message}`);
     if (!config.suppressWarnings && !dead) { warningBox.textContent = diagnostics.warnings.join("\n"); warningBox.style.display = "block"; }
   };
-  warnings.forEach(warn);
   const refresh = next => pendingRefresh = slot.replace(signal => loadResources(config, next, signal), value => {
     resources = value; backgroundDirty = true; lastRatio = 0;
     diagnostics.resourceGeneration = value.generation;

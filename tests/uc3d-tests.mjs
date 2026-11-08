@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import resolveConfig from "../MatrixDesktop/web/js/config.js";
 import { createScene as createConfiguredScene, createGrid, projection, viewProjection, attachMouse } from "../MatrixDesktop/web/js/uc3d/scene.js";
 import { createNativeRandom, nativeSettings, nativeFallSpeed, nativePictureGrid, wrapNative } from "../MatrixDesktop/web/js/uc3d/native.js";
@@ -7,7 +7,8 @@ import { selectImages, createMedia } from "../MatrixDesktop/web/js/uc3d/media.js
 import { formatClock, createOverlays } from "../MatrixDesktop/web/js/uc3d/overlays.js";
 import { createAudio } from "../MatrixDesktop/web/js/uc3d/audio.js";
 import { startLoop, createRuntime } from "../MatrixDesktop/web/js/uc3d/runtime.js";
-import startREGL, { createProgram } from "../MatrixDesktop/web/js/regl/uc3dPass.js";
+import startREGL from "../MatrixDesktop/web/js/regl/uc3dPass.js";
+import { createProgram } from "../MatrixDesktop/web/js/webglProgram.js";
 import startWebGPU from "../MatrixDesktop/web/js/webgpu/uc3dPass.js";
 import "./uc3d-config-tests.mjs";
 
@@ -227,10 +228,10 @@ test("WebGL program initialization releases shaders and failed programs on every
       deleteProgram(program) { assert.ok(!deletedPrograms.has(program)); deletedPrograms.add(program); },
     };
     if (outcome === "success") {
-      const result = createProgram(gl, "vertex source", "fragment source");
+      const result = createProgram(gl, "vertex source", "fragment source", "UC3D");
       assert.ok(programs.has(result)); assert.equal(deletedPrograms.size, 0);
     } else {
-      assert.throws(() => createProgram(gl, "vertex source", "fragment source"), new RegExp(`UC3D (?:shader|program): ${outcome}`));
+      assert.throws(() => createProgram(gl, "vertex source", "fragment source", "UC3D"), new RegExp(`UC3D (?:shader|program): ${outcome}`));
       assert.deepEqual(deletedPrograms, programs, `${outcome} leaked a program`);
     }
     assert.deepEqual(deletedShaders, shaders, `${outcome} leaked a shader`);
@@ -373,11 +374,11 @@ globalThis.document = {
 try {
   test("sound off creates no visibility callback or media element", () => {
     globalThis.Audio = class { constructor() { throw new Error("off mode opened audio"); } };
-    const audio = createAudio({ sound: "off" }, {}, {});
+    const audio = createAudio({ sound: "off" }, {});
     assert.equal(listeners.size, 0); audio.dispose(); assert.equal(audio.state.status, "disposed");
   });
   globalThis.Audio = class { async play() { throw new DOMException("Unsupported test source", "NotSupportedError"); } pause() {} removeAttribute() {} load() {} };
-  const failedAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:invalid" }, {});
+  const failedAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:invalid" });
   await new Promise(resolve => setImmediate(resolve));
   test("bad local audio reports a failed source instead of asking for a gesture", () => {
     assert.equal(failedAudio.state.status, "failed"); assert.equal(buttons.at(-1).textContent, "Retry sound");
@@ -385,7 +386,7 @@ try {
   });
   let completePlay, pauses = 0;
   globalThis.Audio = class { play() { return new Promise(resolve => { completePlay = resolve; }); } pause() { pauses++; } removeAttribute() {} load() {} };
-  const lateAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:late" }, {});
+  const lateAudio = createAudio({ sound: "music" }, { audioUrl: "synthetic:late" });
   lateAudio.dispose(); completePlay(); await new Promise(resolve => setImmediate(resolve));
   test("late play completion cannot reactivate audio after preview disposal", () => {
     assert.equal(lateAudio.state.status, "disposed"); assert.ok(pauses >= 2); assert.equal(listeners.size, 0);
@@ -877,6 +878,18 @@ await asyncTest("legacy forward travel depth stays exact after days of active ti
     }
     assert.ok(worst <= 0.05, `${days} days: a forward depth is ${worst.toFixed(3)} world units from exact math (limit 0.05)`);
   }
+});
+await asyncTest("REGL UC3D builds its programs only through the shared createProgram", async () => {
+  // A second builder, renamed or not, has to call createShader itself.
+  const js = new URL("../MatrixDesktop/web/js/", import.meta.url);
+  for (const file of ["regl/uc3dPass.js", ...readdirSync(new URL("uc3d/", js)).map(name => `uc3d/${name}`)])
+    assert.doesNotMatch(readFileSync(new URL(file, js), "utf8"), /createShader\s*\(/, `${file} builds WebGL programs itself`);
+  await withPassEnvironment({}, async () => {
+    const gl = fakeGL(4096), released = [];
+    gl.getShaderParameter = () => false; gl.getShaderInfoLog = () => "sentinel compile log"; gl.deleteShader = shader => released.push(shader);
+    await assert.rejects(startREGL(passCanvas(gl, 200, 100), resolveConfig({ scene: "uc3d", resolution: "1" })), /UC3D shader: sentinel compile log/);
+    assert.equal(released.length, 1, "the live path must release the failed shader");
+  });
 });
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;

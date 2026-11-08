@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 const root = process.env.ZMATRIX_TEST_ROOT ? pathToFileURL(path.resolve(process.env.ZMATRIX_TEST_ROOT) + path.sep)
   : new URL("../MatrixDesktop/web/js/zmatrix/", import.meta.url);
@@ -10,11 +10,11 @@ const { createRandom, createScene, streamColor, cleanupCell } = await import(new
 const { createSurface, fitSurface, rasterOperation } = await import(new URL("surface.js", root));
 const { validateNativeFont, decodeImage, loadNativeFont } = await import(new URL("fonts.js", root));
 const { createResourceSlot, createRuntime, startLoop } = await import(new URL("runtime.js", root));
-const { createProgram } = await import(new URL("gpu.js", root));
+const { createProgram } = await import(new URL("../webglProgram.js", root));
 const { default: startZMatrixREGL } = await import(new URL("../regl/zmatrixPass.js", root));
 const { default: startZMatrixWebGPU } = await import(new URL("../webgpu/zmatrixPass.js", root));
 console.log(`SOURCE ${new URL("scene.js", root).pathname}`);
-for (const file of ["settings.js", "scene.js", "surface.js", "fonts.js", "runtime.js", "gpu.js", "../regl/zmatrixPass.js", "../webgpu/zmatrixPass.js", "../renderFailure.js"])
+for (const file of ["settings.js", "scene.js", "surface.js", "fonts.js", "runtime.js", "../webglProgram.js", "../regl/zmatrixPass.js", "../webgpu/zmatrixPass.js", "../renderFailure.js"])
   console.log(`WITNESS ${file} ${createHash("sha256").update(readFileSync(new URL(file, root))).digest("hex")}`);
 const only = process.argv.indexOf("--only");
 const filter = only >= 0 ? new RegExp(process.argv[only + 1]) : null;
@@ -436,10 +436,30 @@ await test("WebGL shader compile link and allocation failures release owned obje
       getShaderParameter: shader => !(fault === "vertex" && shader.type === 1 || fault === "fragment" && shader.type === 2),
       getShaderInfoLog: () => "synthetic shader fault", attachShader() {}, linkProgram() {}, getProgramParameter: () => fault !== "link",
       getProgramInfoLog: () => "synthetic link fault", deleteShader: shader => deletedShaders.push(shader), deleteProgram: program => deletedPrograms.push(program) };
-    if (fault) assert.throws(() => createProgram(gl, "vertex", "fragment"), /ZMatrix/); else assert.ok(createProgram(gl, "vertex", "fragment"));
+    if (fault) assert.throws(() => createProgram(gl, "vertex", "fragment", "ZMatrix"), /ZMatrix/); else assert.ok(createProgram(gl, "vertex", "fragment", "ZMatrix"));
     assert.equal(deletedShaders.length, fault === "allocation" ? 0 : fault === "vertex" ? 1 : 2);
     assert.equal(deletedPrograms.length, !fault || fault === "allocation" ? 0 : 1);
   }
+});
+await test("rejected ZMatrix settings reach the runtime as defaults, so its re-normalization has nothing to warn about", async () => {
+  const { default: resolveConfig } = await import(new URL("../config.js", root));
+  const raw = { scene: "zmatrix", zmMaxStream: "Infinity", zmCharacters: "[]", zmRedGain: "NaN", zmPhrases: JSON.stringify(["a" + String.fromCharCode(7) + "b"]) };
+  const direct = [], resolved = [];
+  normalizeZMatrixSettings(raw, direct);
+  assert.equal(direct.length, 4, `witness: every raw value must be rejected, got ${JSON.stringify(direct)}`);
+  normalizeZMatrixSettings(resolveConfig(raw), resolved);
+  assert.deepEqual(resolved, [], "config.js must hand the runtime only accepted values");
+});
+await test("REGL ZMatrix builds its program only through the shared createProgram", async () => {
+  // A second builder, renamed or not, has to call createShader itself.
+  for (const file of [...readdirSync(root).filter(name => name.endsWith(".js")), "../regl/zmatrixPass.js"])
+    assert.doesNotMatch(readFileSync(new URL(file, root), "utf8"), /createShader\s*\(/, `${file} builds WebGL programs itself`);
+  await withZMatrixPage(async () => {
+    const gl = fakeGL(), released = [];
+    gl.getShaderParameter = () => false; gl.getShaderInfoLog = () => "sentinel compile log"; gl.deleteShader = shader => released.push(shader);
+    await assert.rejects(startZMatrixREGL(passCanvas(gl), passConfig), /ZMatrix shader: sentinel compile log/);
+    assert.equal(released.length, 1, "the live path must release the failed shader");
+  });
 });
 if (!passed && !failures) { console.error("No matching ZMatrix tests ran"); failures++; }
 console.log(`ZMatrix tests: ${passed} passed, ${failures} failed`);

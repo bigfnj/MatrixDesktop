@@ -38,7 +38,7 @@ export async function createRuntime(canvas, options, backend) {
   const media = createMedia(images, { original: config.uc3dControls !== "legacy" });
   const scene = createScene(config, images.length);
   const overlays = createOverlays(config, warnings);
-  const audio = createAudio(config, bootstrap, canvas);
+  const audio = createAudio(config, bootstrap);
   let currentTime = 0, currentIndex = -1, photo = null, grid = null, dirty = true, dead = false;
   let aspect = 1;
   const detachMouse = attachMouse(canvas, scene, () => currentTime);
@@ -116,7 +116,6 @@ export async function createRuntime(canvas, options, backend) {
       uniforms[52] = config.bitmapGlyphs ? 1 : 0;
       uniforms[53] = grid.nativeMode ? 1 : 0;
       uniforms[54] = grid.glyphHalfSize ?? 0;
-      uniforms[55] = grid.worldWidth ?? grid.baseColumns * (grid.glyphHalfSize ?? 0) * 2;
       overlays.update(state, photo);
       diagnostics.frames++; diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
       diagnostics.controls = config.uc3dControls ?? "legacy";

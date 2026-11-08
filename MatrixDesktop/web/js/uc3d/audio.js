@@ -1,7 +1,7 @@
 import { subscribeHostPlayback } from "../hostPlayback.js";
 
 // Original synthesized sounds. No music or sound effects from the donor are bundled.
-export function createAudio(config, bootstrap, canvas, { subscribe = subscribeHostPlayback, gestureGraceMs = 1500 } = {}) {
+export function createAudio(config, bootstrap, { subscribe = subscribeHostPlayback, gestureGraceMs = 1500 } = {}) {
   let context = null, element = null, disposed = false, button = null, master = null, hostPaused = false, operation = 0;
   let requested = !bootstrap.preview, unsubscribe = () => {};
   const nodes = [];
