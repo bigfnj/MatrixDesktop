@@ -8,6 +8,8 @@ import { wantsWebGPU } from "../MatrixDesktop/web/js/rendererChoice.js";
 import makeConfig from "../MatrixDesktop/web/js/config.js";
 import getLKG from "../MatrixDesktop/web/js/regl/lkgHelper.js";
 import { makePipeline, loadTexture } from "../MatrixDesktop/web/js/webgpu/utils.js";
+import { createShaderTime, rebaseLimits } from "../MatrixDesktop/web/js/shaderTime.js";
+import createClickRipples from "../MatrixDesktop/web/js/clickRipples.js";
 
 const root = new URL("../MatrixDesktop/web/", import.meta.url);
 runInThisContext(await readFile(new URL("lib/gl-matrix.min.js", root), "utf8"));
@@ -205,13 +207,97 @@ for (const name of ["rain", "bloom", "palette", "stripe", "image", "mirror", "qu
 	});
 }
 
+const near = (actual, expected, message, tolerance = 1e-6) => assert(Math.abs(actual - expected) <= tolerance, `${message}: ${actual} is not ${expected}`);
+
+await test("shader time stays small over days and moves its origin only when the last frame went unseen", () => {
+	const { gapMs, briefGapMs, softSeconds, hardSeconds, restartSeconds } = rebaseLimits;
+	const time = createShaderTime(), shifts = [];
+	time.onRebase((shift) => shifts.push(shift));
+	let wall = 1000;
+	const frame = (seconds, gap = 16) => time.frame(seconds, (wall += gap));
+	assert.equal(frame(0), 0);
+	assert.equal(frame(500, 2 * gapMs), 500, "time below the restart point must not move");
+	assert.equal(frame(1800, gapMs - 1000), 1800, "a pause under a minute must keep time continuous");
+	assert.deepEqual(shifts, []);
+	near(frame(1800.016, gapMs), restartSeconds, "a minute without frames (lock, display off, suspend) must restart shader time");
+	near(frame(1800.032), restartSeconds + 0.016, "time must stay continuous after a move", 1e-9);
+	near(shifts[0], 1200.016, "the shift must be the distance moved");
+	// Four days of active time with no pause: the hard bound keeps every value under six hours.
+	let seconds = 1800.032, previous = restartSeconds + 0.016, max = 0, moves = shifts.length;
+	for (let step = 0; step < 4 * 24 * 60; step++) {
+		seconds += 60;
+		const value = frame(seconds);
+		if (shifts.length === moves) near(value, previous + 60, "time must stay continuous between moves", 1e-6);
+		max = Math.max(max, value); previous = value; moves = shifts.length;
+	}
+	assert(max < hardSeconds + 60, `shader time reached ${max} s during a 4-day run`);
+	assert(shifts.length >= 15, `a 4-day run without pauses moved the origin ${shifts.length} time(s)`);
+	near(frame(seconds, 5 * gapMs), restartSeconds, "a long pause after four days must restart shader time");
+	// Past an hour, any pause of a second or more is unseen enough; frame jitter is not.
+	const soft = createShaderTime();
+	soft.frame(softSeconds - 10, (wall += 16));
+	near(soft.frame(softSeconds - 9, (wall += briefGapMs)), softSeconds - 9, "a brief pause before an hour must keep time continuous");
+	near(soft.frame(softSeconds + 1, (wall += briefGapMs - 1)), softSeconds + 1, "jitter under a second must keep time continuous");
+	near(soft.frame(softSeconds + 2, (wall += briefGapMs)), restartSeconds, "a brief pause past an hour must restart shader time");
+	// Click stamps move with the origin: a ripple in flight keeps its age, unused slots stay unused.
+	const canvas = new Events(); canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 });
+	const ripples = createClickRipples(canvas, true), stamped = createShaderTime();
+	stamped.onRebase((shift) => ripples.shiftTime(shift));
+	ripples.syncTime(stamped.frame(5000, (wall += 16)));
+	for (const fn of canvas.listeners.get("click")) fn({ clientX: 50, clientY: 50 });
+	ripples.markClean();
+	const now = stamped.frame(5000.5, (wall += gapMs));
+	near(now, restartSeconds, "the stamped clock must have moved");
+	near(now - ripples.clicks[2], 0.5, "a ripple in flight must keep its age across a move");
+	near(now - ripples.touches[0][2], 0.5, "a ripple in flight must keep its age across a move (WebGPU layout)");
+	assert(ripples.clicks[5] < -1e8 && ripples.touches[1][2] < -1e8, "unused ripple slots must stay inactive");
+	assert.equal(ripples.changed, true, "moved stamps must be uploaded again");
+	ripples.cleanup();
+});
+
+await test("rain and mirror passes move their click stamps with the shader time origin", async () => {
+	const borrowed = { createView: () => ({}), destroy() { throw new Error("borrowed resource destroyed"); } };
+	for (const [backend, name] of [["regl", "rain"], ["regl", "mirror"], ["webgpu", "rain"], ["webgpu", "mirror"]]) {
+		const label = `${backend} ${name} pass`, listeners = [];
+		let now = 5.5, stamps, pass;
+		const canvas = new Events(); canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 200 });
+		const config = makeConfig({ numColumns: "4", camera: "false", clickRipples: "true", effect: name === "mirror" ? "mirror" : "palette" });
+		const context = { config, canvas, cameraTex: borrowed, cameraAspectRatio: 1, elapsedSeconds: () => now,
+			onTimeRebase: (fn) => { listeners.push(fn); return () => {}; } };
+		const { default: make } = await import(`../MatrixDesktop/web/js/${backend}/${name}Pass.js`);
+		if (backend === "regl") {
+			const specs = [], regl = Object.assign((spec) => { specs.push(spec); return () => {}; }, makeRegl());
+			pass = make({ ...context, regl, lkg: { enabled: false, tileX: 1, tileY: 1 } }, { primary: borrowed, bloom: borrowed });
+			await pass.ready;
+			const clicks = specs.find((spec) => spec.uniforms?.clicks).uniforms.clicks;
+			stamps = () => clicks({ time: now });
+		} else {
+			const device = makeDevice(), writes = [];
+			device.queue = { ...device.queue, writeBuffer: (buffer, offset, data) => writes.push(new Float32Array(data)) };
+			pass = make({ ...context, device, timeBuffer: {} });
+			await pass.loaded;
+			pass.build([320, 200], { primary: borrowed, bloom: borrowed, highPass: borrowed });
+			stamps = () => { pass.run(encoder, true); return writes.at(-1); };
+		}
+		stamps();
+		for (const target of [canvas, window]) for (const fn of [...(target.listeners.get("click") ?? [])]) fn({ clientX: 160, clientY: 100 });
+		assert([...stamps()].includes(5.5), `${label} must stamp a click at the shader time`);
+		assert.equal(listeners.length, 1, `${label} must follow the shader time origin`);
+		listeners[0](4.25); now = 1.25;
+		const moved = [...stamps()];
+		assert(moved.includes(1.25) && !moved.includes(5.5), `${label} must move its click stamp with the origin: ${moved}`);
+		pass.cleanup();
+	}
+});
+
 // A fake page for webgpu/main.js: the device records texture sizes and can raise GPU events.
 // These stubs are installed last so they cannot change any earlier case.
 const makeMatrixDevice = (maxTextureDimension2D) => {
-	const device = makeDevice(), events = new Events(), createTexture = device.createTexture;
+	const device = makeDevice(), events = new Events(), createTexture = device.createTexture, createBuffer = device.createBuffer;
 	let lose;
 	return Object.assign(device, {
-		limits: { maxTextureDimension2D }, sizes: [],
+		limits: { maxTextureDimension2D }, sizes: [], buffers: [], writes: [],
+		createBuffer(config) { const buffer = createBuffer.call(device, config); device.buffers.push(buffer); return buffer; },
 		lost: new Promise((resolve) => { lose = resolve; }),
 		lose: (reason, message) => lose({ reason, message }),
 		addEventListener: (type, fn) => events.addEventListener(type, fn),
@@ -219,7 +305,7 @@ const makeMatrixDevice = (maxTextureDimension2D) => {
 		emit: (type, event) => { for (const fn of [...(events.listeners.get(type) ?? [])]) fn(event); },
 		createTexture(config) { device.sizes.push(config.size); return createTexture.call(device, config); },
 		createCommandEncoder: () => ({ ...encoder, finish: () => ({}) }),
-		queue: { ...device.queue, submit() {} },
+		queue: { ...device.queue, submit() {}, writeBuffer(buffer, offset, data) { device.writes.push([buffer, data]); } },
 		destroy() { device.destroyed = true; },
 	});
 };
@@ -349,6 +435,25 @@ await test("WebGPU Matrix renderer reports a lost device to the page once and st
 	await settle();
 	assert.deepEqual([bare.diagnostics.ready, bare.diagnostics.errors], [false, ["WebGPU device lost (unknown): driver reset"]]);
 	bare.dispose();
+});
+
+await test("WebGPU Matrix renderer feeds the shaders a small time after four days", async () => {
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	try {
+		// webgpu/main.js creates the Time uniform buffer first: { seconds : f32, frames : i32 }.
+		const written = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0])
+			.map(([, data]) => ({ seconds: new Float32Array(data)[0], frames: new Int32Array(data)[1] }));
+		const day = 86_400_000;
+		run.frame(16); run.frame(33);
+		run.frame(4 * day); run.frame(4 * day + 17);
+		const [first, second, moved, next] = written();
+		// The fake page mixes synthetic frame times with real performance.now() reads, so only
+		// the order of magnitude before the move is meaningful.
+		assert(second.seconds < 60, `time before the move was ${second.seconds} s`);
+		near(moved.seconds, rebaseLimits.restartSeconds, `the time uniform after four days was ${moved.seconds} s`, 1);
+		near(next.seconds - moved.seconds, 0.017, "time must stay continuous after the move", 1e-3);
+		assert.deepEqual([first, second, moved, next].map(({ frames }) => frames), [0, 1, 2, 3], "the frame counter must keep counting through a move");
+	} finally { run.dispose(); }
 });
 
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);

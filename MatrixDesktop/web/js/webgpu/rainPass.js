@@ -30,12 +30,13 @@ const makeConfigBuffer = (device, configUniforms, config, density, gridSize, gly
 	return makeUniformBuffer(device, configUniforms, configData);
 };
 
-export default ({ config, device: nativeDevice, timeBuffer, canvas, elapsedSeconds }) => {
+export default ({ config, device: nativeDevice, timeBuffer, canvas, elapsedSeconds, onTimeRebase }) => {
 	const owner = createResourceOwner();
 	const device = ownDevice(owner, nativeDevice);
 
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
 	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
+	onTimeRebase?.((shift) => clickRipples.shiftTime(shift));
 
 	const assets = [
 		loadTexture(device, config.glyphMSDFURL),

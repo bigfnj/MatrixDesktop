@@ -34,11 +34,12 @@ const blVert = [1, 0];
 const brVert = [1, 1];
 const quadVertices = [tlVert, trVert, brVert, tlVert, brVert, blVert];
 
-export default ({ regl: nativeRegl, config, lkg, canvas }) => {
+export default ({ regl: nativeRegl, config, lkg, canvas, onTimeRebase }) => {
 	const owner = createResourceOwner();
 	const regl = ownRegl(owner, nativeRegl);
 	const { mat2, mat4, vec2, vec3 } = glMatrix;
 	const clickRipples = createClickRipples(canvas, config.clickRipples && config.effect !== "mirror");
+	onTimeRebase?.((shift) => clickRipples.shiftTime(shift));
 
 	// The volumetric mode multiplies the number of columns
 	// to reach the desired density, and then overlaps them

@@ -1,5 +1,6 @@
 import createCanvasSize from "../canvasSize.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { createShaderTime } from "../shaderTime.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
 
@@ -175,8 +176,10 @@ export default async (canvas, config) => {
 	// goes into the time buffer each frame AND is handed to the rain pass, so a click stamp
 	// and the shader clock cannot come from different origins. `start` is set on the first
 	// rAF frame, so before then this reads 0 rather than NaN.
+	// AUD-64: the f32 seconds count from an origin that moves forward (js/shaderTime.js).
 	let start = NaN;
-	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : clock.seconds() - start / 1000);
+	const shaderTime = createShaderTime();
+	const elapsedSeconds = () => (Number.isNaN(start) ? 0 : shaderTime.seconds(clock.seconds() - start / 1000));
 
 	const context = {
 		config,
@@ -190,6 +193,7 @@ export default async (canvas, config) => {
 		cameraSize,
 		canvas,
 		elapsedSeconds,
+		onTimeRebase: shaderTime.onRebase,
 	};
 
 	const effectName = config.effect in effects ? config.effect : "palette";
@@ -206,6 +210,7 @@ export default async (canvas, config) => {
 
 	const renderLoop = (now) => {
 		if (cleanedUp || deviceLost) return;
+		const wall = now;
 		now = clock.seconds(now) * 1000;
 		if (clock.paused) { frameRequest = requestAnimationFrame(renderLoop); return; }
 		if (isNaN(start)) {
@@ -237,7 +242,7 @@ export default async (canvas, config) => {
 			device.queue.copyExternalImageToTexture({ source: cameraCanvas }, { texture: cameraTex }, cameraSize);
 		}
 
-		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: (now - start) / 1000, frames }));
+		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: shaderTime.frame((now - start) / 1000, wall), frames }));
 		frames++;
 
 		const encoder = device.createCommandEncoder();

@@ -48,6 +48,29 @@ LOSS_HOOK = """(() => {
 })();"""
 
 
+TIME_HOOK = """(() => {
+  // Move the page clock on demand and record what the shaders receive as time and tick.
+  const now = performance.now.bind(performance);
+  window.__clockOffset = 0;
+  performance.now = () => now() + window.__clockOffset;
+  window.__shaderUniforms = { time: [], tick: [] };
+  for (const Context of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+    if (!Context) continue;
+    const names = new WeakMap(), get = Context.prototype.getUniformLocation, set = Context.prototype.uniform1f;
+    Context.prototype.getUniformLocation = function(program, name) {
+      const location = get.call(this, program, name);
+      if ((name === 'time' || name === 'tick') && location) names.set(location, name);
+      return location;
+    };
+    Context.prototype.uniform1f = function(location, value) {
+      const name = location && names.get(location);
+      if (name) { const list = window.__shaderUniforms[name]; list.push(value); if (list.length > 256) list.shift(); }
+      return set.call(this, location, value);
+    };
+  }
+})();"""
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     regl_main_override = None
     def log_message(self, *args):
@@ -100,6 +123,35 @@ def check_regl_context_loss(context, port):
         assert not restored["ready"], "ready came back after restore although the restored context draws black"
         assert restored["frames"] == lost["frames"], f"frames advanced after the loss: {lost['frames']} -> {restored['frames']}"
         assert restored["calls"] == ["WebGL context lost"], f"page hook calls after the restore: {restored['calls']}"
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+    finally:
+        page.close()
+
+
+def check_regl_time_rebase(context, port):
+    """Four days of page time must not reach the float32 time uniform (AUD-64).
+
+    The jump arrives as one long gap between frames, which is how a hidden or suspended
+    page looks; tick must keep counting, or every glyph would re-seed as a first frame.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(TIME_HOOK)
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 8", timeout=30000)
+        before = page.evaluate("window.__shaderUniforms.time.slice()")
+        assert before and max(before) < 60, f"time uniform before the jump: {before[-4:]}"
+        frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+        page.evaluate("window.__clockOffset = 4 * 86400 * 1000; window.__shaderUniforms.time.length = 0; window.__shaderUniforms.tick.length = 0")
+        page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 8", arg=frames)
+        after = page.evaluate("({ ...window.__shaderUniforms, clock: matrixRuntimeDiagnostics.simulationTime })")
+        assert after["clock"] > 4 * 86400 - 60, f"the page clock did not jump, so the check proved nothing: {after['clock']}"
+        assert after["time"] and max(after["time"]) < 700, f"time uniform after four days of page time: {after['time'][:4]}"
+        assert after["tick"] and min(after["tick"]) > 1, f"tick fell back to a first-frame value: {after['tick'][:8]}"
         page.evaluate("matrixRuntimeDiagnostics.dispose()")
         page.wait_for_timeout(100)
         assert not errors, errors
@@ -176,6 +228,8 @@ def main():
                         print("PASS native bootstrap failure remains visible as text and prevents renderer initialization", flush=True)
                         check_regl_context_loss(context, server.server_port)
                         print("PASS original Matrix regl context loss clears ready, reports once to the page and stays not ready after restore", flush=True)
+                        check_regl_time_rebase(context, server.server_port)
+                        print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
                 finally:
                     context.close()
             browser.close()

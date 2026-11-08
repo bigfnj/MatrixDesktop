@@ -10,6 +10,7 @@ import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
 import { createPlaybackClock } from "../hostPlayback.js";
+import { createShaderTime } from "../shaderTime.js";
 
 const effects = {
 	none: null,
@@ -146,9 +147,13 @@ export default async (canvas, config) => {
 	// All this takes place in a full screen quad.
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	let activeFrames = 0;
-	const withClock = regl({ context: { time: () => clock.seconds(), tick: () => activeFrames } });
+	// AUD-64: shaders get float32 time measured from an origin that moves forward (js/shaderTime.js).
+	const shaderTime = createShaderTime();
+	let shaderSeconds = 0;
+	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => activeFrames } });
 	const effectName = config.effect in effects ? config.effect : "palette";
-	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas, elapsedSeconds: () => clock.seconds() };
+	const context = { regl, config, lkg, cameraTex, cameraAspectRatio, canvas,
+		elapsedSeconds: () => shaderTime.seconds(clock.seconds()), onTimeRebase: shaderTime.onRebase };
 	pipeline = makePipeline(context, [makeRain, makeBloomPass, effects[effectName], makeQuiltPass]);
 	const screenUniforms = { tex: pipeline[pipeline.length - 1].outputs.primary };
 	const drawToScreen = regl({ uniforms: screenUniforms });
@@ -190,6 +195,7 @@ export default async (canvas, config) => {
 				step.setSize(viewportWidth, viewportHeight);
 			}
 		}
+		shaderSeconds = shaderTime.frame(clock.seconds(), performance.now());
 		withClock(() => fullScreenQuad(() => {
 			for (const step of pipeline) {
 				step.execute(shouldRender);
