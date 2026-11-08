@@ -139,6 +139,62 @@ try {
         $present = Get-GateCaseVerdict -ExitCode 0 -Log $log -Witness '(?m)^SELF-TEST PASSED'
         Assert-Equal 'ok' $present.Outcome 'exit 0 with the witness is a pass'
     }
+
+    # ------------------------------------------------------------ AUD-27 crash dumps
+
+    function New-DumpFolder {
+        param([string]$Name, [datetime]$LaunchedAt, [int]$OldCount)
+        $dir = Join-Path $scratch $Name
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        # Old dumps from other processes, written well before the case launched.
+        for ($i = 0; $i -lt $OldCount; $i++) {
+            $old = Join-Path $dir ("MatrixDesktop-20261101-0000{0:D2}-pid{1}.dmp" -f $i, (7000 + $i))
+            [IO.File]::WriteAllBytes($old, [byte[]](1, 2, 3))
+            (Get-Item -LiteralPath $old).LastWriteTime = $LaunchedAt.AddHours(-1).AddMinutes($i)
+        }
+        return $dir
+    }
+
+    function Add-Dump {
+        param([string]$Dir, [string]$Name, [datetime]$WrittenAt)
+        $path = Join-Path $Dir $Name
+        [IO.File]::WriteAllBytes($path, [byte[]](1, 2, 3))
+        (Get-Item -LiteralPath $path).LastWriteTime = $WrittenAt
+        return $path
+    }
+
+    Invoke-TestCase 'AUD-27 (A) the smoke pid''s dump is found when the retention cap keeps the folder count at 10' {
+        $launchedAt = Get-Date
+        $dir = New-DumpFolder 'dumps-a' $launchedAt 10
+        # The writer prunes the oldest before writing, so the folder-wide count stays at 10.
+        Get-ChildItem -LiteralPath $dir -Filter *.dmp | Sort-Object LastWriteTime | Select-Object -First 1 | Remove-Item
+        $written = Add-Dump $dir 'MatrixDesktop-20261108-120000-pid4242.dmp' $launchedAt.AddSeconds(4)
+        Assert-Equal 10 @(Get-ChildItem -LiteralPath $dir -Filter *.dmp).Count 'the simulated writer keeps the folder at the cap'
+        $found = @(Get-DumpsForPid -DumpDir $dir -ProcessId 4242 -Since $launchedAt)
+        Assert-Equal 1 $found.Count 'exactly the smoke pid''s new dump is attributed'
+        Assert-Equal $written $found[0].FullName 'the attributed dump is the one the smoke pid wrote'
+    }
+
+    Invoke-TestCase 'AUD-27 (B) a new dump from another pid, or a longer pid with the same digits, is not the smoke pid''s' {
+        $launchedAt = Get-Date
+        $dir = New-DumpFolder 'dumps-b' $launchedAt 3
+        [void](Add-Dump $dir 'MatrixDesktop-20261108-120000-pid9999.dmp' $launchedAt.AddSeconds(2))
+        [void](Add-Dump $dir 'MatrixDesktopConfigurator-20261108-120001-pid42420.dmp' $launchedAt.AddSeconds(3))
+        Assert-Equal 0 @(Get-DumpsForPid -DumpDir $dir -ProcessId 4242 -Since $launchedAt).Count 'another process''s crash must not fail this case'
+    }
+
+    Invoke-TestCase 'AUD-27 (C) an old dump that a previous process with the same pid wrote is ignored' {
+        $launchedAt = Get-Date
+        $dir = New-DumpFolder 'dumps-c' $launchedAt 2
+        [void](Add-Dump $dir 'MatrixDesktop-20261101-090000-pid4242.dmp' $launchedAt.AddHours(-2))
+        Assert-Equal 0 @(Get-DumpsForPid -DumpDir $dir -ProcessId 4242 -Since $launchedAt).Count 'a dump older than the launch belongs to an earlier process'
+        $suffixed = Add-Dump $dir 'MatrixDesktop-20261108-120000-pid4242-2.dmp' $launchedAt.AddSeconds(-1)
+        Assert-Equal $suffixed (@(Get-DumpsForPid -DumpDir $dir -ProcessId 4242 -Since $launchedAt))[0].FullName 'a uniqueness suffix after the pid stamp, inside the 3 s clock allowance, still counts'
+    }
+
+    Invoke-TestCase 'AUD-27 (D) a missing dump folder means no dump' {
+        Assert-Equal 0 @(Get-DumpsForPid -DumpDir (Join-Path $scratch 'no-dumps-here') -ProcessId 4242 -Since (Get-Date)).Count 'no folder, no dump'
+    }
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }

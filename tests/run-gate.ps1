@@ -399,11 +399,6 @@ function Get-LogRecordsForPid {
     return @($out | Where-Object { $_.Pid -eq $ProcessId -and $_.Ts -ge $Since.AddSeconds(-3) })
 }
 
-function Get-DumpCount {
-    if (-not (Test-Path -LiteralPath $DumpDir)) { return 0 }
-    return @(Get-ChildItem -LiteralPath $DumpDir -Filter *.dmp -ErrorAction SilentlyContinue).Count
-}
-
 # ---------------------------------------------------------------- run
 
 Push-Location $RepoRoot
@@ -1104,7 +1099,6 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
                 foreach ($caseName in $cases.Keys) {
                     $launchedAt = Get-Date
-                    $dumpsBefore = Get-DumpCount
                     # -1 means "not observed". Initialised out here because it is assigned at
                     # the end of the try below, and under StrictMode an early throw would
                     # otherwise make the reaped check blow up instead of reporting UNCHECKED.
@@ -1217,8 +1211,11 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         Test-Ok "smoke [$caseName] webview children reaped ($webviewKids before close, 0 after)"
                     }
 
-                    if ((Get-DumpCount) -gt $dumpsBefore) {
-                        Test-Fail "smoke [$caseName] wrote no crash dump" "new dump in $DumpDir"
+                    # Attributed by pid and launch time (gate-lib.ps1): a folder-wide count
+                    # cannot rise once CrashDumpWriter's retention cap is reached.
+                    $caseDumps = @(Get-DumpsForPid -DumpDir $DumpDir -ProcessId $proc.Id -Since $launchedAt)
+                    if ($caseDumps.Count -gt 0) {
+                        Test-Fail "smoke [$caseName] wrote no crash dump" "pid $($proc.Id) wrote $($caseDumps[0].FullName)"
                     } else {
                         Test-Ok "smoke [$caseName] wrote no crash dump"
                     }

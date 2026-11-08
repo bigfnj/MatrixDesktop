@@ -46,6 +46,27 @@ function Get-GateCaseVerdict {
     return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "exit $ExitCode; $where" }
 }
 
+# ---------------------------------------------------------------- crash dumps
+
+# CrashDumpWriter names each dump '<label>-<stamp>-pid<ProcessId>.dmp' and prunes the shared
+# folder to its newest files before every write, so a folder-wide count stops rising once the
+# retention cap is reached: the old "count grew" check could never fail again after ten
+# crashes, and it blamed a healthy case for any other MatrixDesktop process crashing
+# meanwhile. Dumps are attributed by pid and time instead. Text after the pid stamp (a
+# uniqueness suffix) is tolerated; a longer pid with the same prefix is not.
+function Get-DumpsForPid {
+    param(
+        [Parameter(Mandatory = $true)][string]$DumpDir,
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][datetime]$Since
+    )
+    if (-not (Test-Path -LiteralPath $DumpDir -PathType Container)) { return @() }
+    $pattern = '-pid' + $ProcessId + '(?!\d)[^\\/]*\.dmp$'
+    $cutoff = $Since.AddSeconds(-3)
+    return @(Get-ChildItem -LiteralPath $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $pattern -and $_.LastWriteTime -ge $cutoff })
+}
+
 # Runs one child harness with stdout and stderr redirected to $Log and "$Log.err", the way
 # every gate case runs, and classifies it. The self-tests call this same function with stub
 # scripts, so they exercise the gate's real redirection and verdict path.
