@@ -3,6 +3,7 @@ import argparse
 import functools
 import http.server
 import io
+import json
 import threading
 from pathlib import Path
 
@@ -79,6 +80,34 @@ TIME_HOOK = """(() => {
     };
   }
 })();"""
+
+
+PLUG_START = "?renderer=regl&numColumns=40"
+PLUG_CHANGED = "?renderer=regl&numColumns=41"
+PLUG_HOST = """(() => {
+  // The native bootstrap of an interactive host (windowed, fullscreen, configurator preview)
+  // belongs to one configuration, and the page may use it only while location.search equals
+  // it (Shared/NativeMediaBridge.cs, PublishBootstrapAsync). This host knows two of them.
+  const configurations = %s;
+  const configuration = configurations.includes(location.search) ? location.search : configurations[0];
+  const bootstrap = { nativeGeneration: 1, configuration, interactive: true, images: [], warnings: [] };
+  const matches = b => b?.configuration === location.search;
+  if (matches(bootstrap)) window.matrixHostBootstrap = bootstrap;
+  window.matrixHostBootstrapReady = Promise.resolve(bootstrap).then(b => {
+    if (!matches(b)) throw new Error('Native resources belong to another configuration');
+    return b;
+  });
+  window.matrixHostBootstrapReady.catch(() => {});
+  // js/main.js shows the software rendering notice when the WebGL renderer string names
+  // SwiftShader; report that on any adapter, so the check runs the same on a real GPU.
+  for (const Context of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+    if (!Context) continue;
+    const get = Context.prototype.getParameter;
+    Context.prototype.getParameter = function(name) {
+      return name === 0x9246 ? 'Google SwiftShader (reported by the test)' : get.call(this, name);
+    };
+  }
+})();""" % json.dumps([PLUG_START, PLUG_CHANGED])
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -375,6 +404,65 @@ def check_regl_single_frame(context, port):
         page.close()
 
 
+def check_regl_plug_me_in_reload(context, port):
+    """Plug me in must survive a recovery reload and the host's renderer reload (R2-23).
+
+    Both return to the startup query, which the native bootstrap requires (js/main.js undoes
+    Plug me in's query rewrite before a recovery reload), so the consent cannot ride in the
+    query. Before the fix the reloaded page showed the notice again over a hidden canvas and
+    started no renderer. The consent covers one configuration: a changed one still warns.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(PLUG_HOST)
+    url = f"http://127.0.0.1:{port}/index.html"
+    state = ("({ search: location.search, pill: document.querySelector('.blue.pill') !== null, "
+             "canvas: getComputedStyle(document.querySelector('canvas')).display, "
+             "notices: [...document.querySelectorAll('.notice')].map(n => n.textContent.trim().replace(/\\s+/g, ' ').slice(0, 120)), "
+             "renderer: window.matrixRuntimeDiagnostics ? { ready: matrixRuntimeDiagnostics.ready, frames: matrixRuntimeDiagnostics.frames } : null })")
+    settled = "document.querySelector('.notice') !== null || (window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 2)"
+
+    def warns(where):
+        page.wait_for_function(settled, timeout=60000)
+        page.wait_for_timeout(300)
+        shown = page.evaluate(state)
+        assert shown["pill"], f"{where} showed no software rendering notice: {shown}"
+        assert shown["canvas"] == "none" and shown["renderer"] is None, f"{where} started a renderer under the notice: {shown}"
+
+    def renders(where):
+        page.wait_for_function(settled, timeout=60000)
+        shown = page.evaluate(state)
+        assert not shown["notices"] and shown["renderer"], f"{where} did not start a renderer: {shown}"
+        assert shown["search"] == PLUG_START, f"{where} left the page at {shown['search']!r}, not the startup query"
+        page.wait_for_timeout(1000)
+        assert page.evaluate("matrixRuntimeDiagnostics.frames") > shown["renderer"]["frames"], f"{where} stopped drawing: {page.evaluate(state)}"
+
+    try:
+        page.goto(url + PLUG_START, wait_until="load")
+        warns("the first visit")
+        page.click(".blue.pill")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 2", timeout=60000)
+        clicked = page.evaluate("location.search")
+        assert clicked != PLUG_START, "Plug me in left the query alone, so the reload had nothing to undo and the check proved nothing"
+        page.evaluate("window.__beforeLoss = true; window.__lose = document.querySelector('canvas').getContext('webgl').getExtension('WEBGL_lose_context'); window.__lose.loseContext()")
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.__beforeLoss === true"), "the page reloaded before the context was restored"
+        try:
+            with page.expect_navigation(wait_until="commit", timeout=10000):
+                page.evaluate("window.__lose.restoreContext()")
+        except Exception:
+            raise AssertionError("the page did not reload within 10 s of restoreContext()") from None
+        renders(f"the recovery reload after Plug me in (query {clicked!r})")
+        page.goto(url + PLUG_START, wait_until="load")  # the host's renderer reload navigates to the startup target
+        renders("a navigation to the startup query after Plug me in")
+        page.goto(url + PLUG_CHANGED, wait_until="load")
+        warns("a changed configuration in the same session")
+        assert not errors, errors
+    finally:
+        page.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--renderer", choices=["regl", "webgpu", "both"], default="both")
@@ -455,6 +543,8 @@ def main():
                             intro["before"], intro["after"], intro["brightBefore"], intro["brightAfter"]), flush=True)
                         check_regl_single_frame(context, server.server_port)
                         print("PASS original Matrix regl fps=0 and once draw one still frame that survives a window resize, and an fps=30 control keeps animating", flush=True)
+                        check_regl_plug_me_in_reload(context, server.server_port)
+                        print("PASS Plug me in survives a recovery reload and a navigation to the startup query; a changed configuration still shows the software rendering notice", flush=True)
                 finally:
                     context.close()
             browser.close()
