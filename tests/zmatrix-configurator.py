@@ -80,6 +80,10 @@ STUB = """
       else if (msg.type === 'browseConfig') payload = {text:window.__selectedCfgText??null};
       else if (msg.type === 'useScreensaver') payload = {saved:true,message:'Synthetic screensaver action recorded.'};
       else if (msg.type === 'restoreScreensaver') payload = {restored:true,message:'Synthetic restore action recorded.'};
+      else if (msg.type === 'exportPowerShell') {  // {script, copied}, or {error} for a failed export, set by the check
+        if (window.__exportReply?.error) throw new Error(window.__exportReply.error);
+        payload = window.__exportReply;
+      }
       window.__smokeReplies.push({type:msg.type,payload:structuredClone(payload)});
       if(msg.type==='buildWebQuery' && window.__holdPreviewReplies) {
         window.__heldPreviewReplies.push({id:msg.id,ok:true,payload});return;
@@ -576,6 +580,112 @@ def check_test_exited(page, _fixture):
     assert status.inner_text() == "Test process stopped.", "a notice for a stopped test replaced its status: " + status.inner_text()
 
 
+def apply_import(page, text):
+    # One import through the real C# importer: the status line it left and the host's reply.
+    replies = "window.__smokeReplies.filter(r=>r.type==='importCommand')"
+    count = page.evaluate(replies + ".length")
+    page.locator("#importButton").click()
+    page.locator("#importInput").fill(text)
+    page.locator("#applyImportButton").click()
+    page.wait_for_function("n=>" + replies + ".length>n && document.querySelector('#importPanel').hidden", arg=count)
+    return page.locator("#statusLine").inner_text(), page.evaluate(replies + ".at(-1).payload")
+
+
+def check_import_status(page, _fixture):
+    status, reply = apply_import(page, "MatrixDesktop.exe --numColumns 80 --bogusFlag 1")
+    assert reply["applied"] == ["numColumns"] and reply["ignored"] == ["bogusFlag"], "importer witness: " + json.dumps([reply["applied"], reply["ignored"]])
+    assert status == "Imported 1 setting. Ignored 1 unknown or invalid setting: bogusFlag.", "a command import misreported its ignored setting: " + status
+    status, reply = apply_import(page, "MatrixDesktop.exe --numColumns 80 " + " ".join("--bogus" + str(index) + " 1" for index in range(1, 8)))
+    names = reply["ignored"]
+    assert len(names) == 7, "importer witness: " + json.dumps(names)
+    expected = "Imported 1 setting. Ignored 7 unknown or invalid settings: " + ", ".join(names[:5]) + " and 2 more."
+    assert status == expected, "seven ignored settings were not reported as five names and a count: " + status
+    # A .cfg keeps an unknown key for the import report, but a line without '=' is dropped.
+    cfg = """[General]
+MaxStream=777
+OwnerExtension=retained
+not a setting
+"""
+    status, reply = apply_import(page, cfg)
+    assert reply["applied"] == ["scene", "zmMaxStream"] and reply["ignored"] == ["General.OwnerExtension", "General: not a setting"], \
+        "importer witness: " + json.dumps([reply["applied"], reply["ignored"]])
+    expected = ("Imported 2 settings. Retained 1 unknown, unused or invalid setting for review in the ZMatrix import report."
+                " Ignored 1 unknown or invalid setting: General: not a setting.")
+    assert status == expected, "a .cfg import misreported its retained and unreadable settings: " + status
+    report = page.locator(".import-report")
+    assert report.count() == 1, "the status points to an import report that is not shown"
+    report.locator("summary").first.click()
+    assert "General.OwnerExtension retained" in report.inner_text(), "the import report does not list the retained setting"
+
+
+CRLF, LF = chr(13) + chr(10), chr(10)
+EXPORT_SCRIPT = CRLF.join(["# synthetic-ps1-marker", "$matrixStartInfo.Arguments = '--numColumns 80'",
+                           "[void][System.Diagnostics.Process]::Start($matrixStartInfo)"]) + CRLF
+
+
+def check_export_fallback(page, _fixture):
+    panel, script, status = page.locator("#exportPanel"), page.locator("#exportScript"), page.locator("#statusLine")
+
+    def export(reply):
+        # The status line is cleared first, so a new status marks the reply as handled.
+        page.evaluate("reply=>{window.__exportReply=reply;document.querySelector('#statusLine').textContent='';}", reply)
+        page.locator("#exportPsButton").click()
+        page.wait_for_function("document.querySelector('#statusLine').textContent!==''")
+        if "error" not in reply:
+            sent = page.evaluate("window.__smokeReplies.filter(r=>r.type==='exportPowerShell').at(-1).payload")
+            assert sent == reply, "stub witness: " + json.dumps(sent)
+
+    busy, copied = {"script": EXPORT_SCRIPT, "copied": False}, {"script": EXPORT_SCRIPT, "copied": True}
+    assert panel.is_hidden(), "the export panel showed before any export"
+    export(busy)
+    shown = script.input_value().replace(CRLF, LF) if panel.is_visible() else None
+    assert shown == EXPORT_SCRIPT.replace(CRLF, LF), "the clipboard fallback did not show the exported script: " + status.inner_text()
+    assert script.get_attribute("readonly") is not None, "the shown script is editable"
+    selected = page.evaluate("() => { const box = document.activeElement; return box?.id === 'exportScript' && box.selectionStart === 0 && box.selectionEnd === box.value.length; }")
+    assert selected, "the shown script was not focused and selected for copying"
+    assert status.inner_text() == "The clipboard is in use by another program. Copy the script shown above.", status.inner_text()
+    export(copied)
+    assert status.inner_text() == "PowerShell script copied to clipboard.", status.inner_text()
+    assert panel.is_hidden(), "an export that reached the clipboard left the earlier fallback script on screen"
+    export(busy)
+    assert panel.is_visible(), "the second clipboard fallback did not show the script"
+    export({"error": "The launch arguments exceed Windows' 32,767-character limit."})
+    assert status.inner_text().startswith("PowerShell export failed:"), "failure witness: " + status.inner_text()
+    assert panel.is_hidden(), "a failed export left the earlier fallback script on screen"
+    export(busy)
+    assert panel.is_visible(), "the third clipboard fallback did not show the script"
+    page.locator("#closeExportButton").click()
+    assert panel.is_hidden(), "Close did not hide the exported script"
+    assert page.evaluate("document.activeElement?.id") == "exportPsButton", "Close did not return focus to Export .ps1"
+
+
+def check_test_status(page, _fixture):
+    status = page.locator("#statusLine")
+    replies = "window.__smokeReplies.filter(r=>r.type==='testCommand')"
+
+    def launch():
+        count = page.evaluate(replies + ".length")
+        page.locator("#testButton").click()
+        page.wait_for_function("n=>" + replies + ".length>n && !document.querySelector('#stopButton').disabled", arg=count)
+        return page.evaluate(replies + ".at(-1).payload")["command"]
+
+    command = launch()
+    assert command.startswith("MatrixDesktop.exe --windowed") and len(command) <= 160, "short launch witness: " + command
+    assert status.inner_text() == "Launched test process 123: " + command, "the Test status did not show the launched command: " + status.inner_text()
+    assert status.get_attribute("title") == command, "the Test status tooltip does not hold the launched command"
+    page.locator("#stopButton").click()
+    page.wait_for_function("document.querySelector('#statusLine').textContent==='Test process stopped.'")
+    assert status.get_attribute("title") == "", "a later status kept the launched command's tooltip"
+    choose_zmatrix(page)
+    phrase = "a" * 200
+    field(page, "zmPhrases").locator('input[type="text"]').fill(phrase)
+    command = launch()
+    assert "--zmPhrases" in command and len(command) > 160, "long launch witness: " + command[:80]
+    expected = "Launched test process 123: " + command[:159] + "…"
+    assert status.inner_text() == expected, "a long launched command was not shortened in the status: " + str(len(status.inner_text())) + " characters"
+    assert status.get_attribute("title") == command, "the shortened Test status lost the whole command from its tooltip"
+
+
 def check_limits(page, fixture):
     choose_zmatrix(page)
     original = fixture["defaultDraft"]["zmCharacters"]
@@ -629,6 +739,9 @@ CHECKS = [
     ("A draft save pending at Delete lands before the delete", check_pending_save_delete),
     ("A draft save pending at Save As lands before the new preset", check_pending_save_save_as),
     ("Delete with no pending draft save posts no save of its own", check_settled_save),
+    ("Import status names dropped settings and points only retained ones to the report", check_import_status),
+    ("Export .ps1 shows the script for manual copy when the clipboard is busy", check_export_fallback),
+    ("Test status shows the command the host launched", check_test_status),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 

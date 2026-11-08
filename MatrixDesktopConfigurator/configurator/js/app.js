@@ -62,6 +62,9 @@ const el = {
 	saveState: document.querySelector("#saveState"),
 	// v1.0 additions
 	exportPsButton: document.querySelector("#exportPsButton"),
+	exportPanel: document.querySelector("#exportPanel"),
+	exportScript: document.querySelector("#exportScript"),
+	closeExportButton: document.querySelector("#closeExportButton"),
 	themeButton: document.querySelector("#themeButton"),
 	previewButton: document.querySelector("#previewButton"),
 	previewPane: document.querySelector("#previewPane"),
@@ -184,8 +187,10 @@ const normalizeDraft = (draft) => {
 	return { ...clone(state.defaultDraft), ...clone(state.metadata?.sceneDefaults?.[saved.scene] || {}), ...saved };
 };
 
-const setStatus = (message, tone = "normal") => {
+// detail is the status line's tooltip, for text too long to show whole; any other status clears it.
+const setStatus = (message, tone = "normal", detail = "") => {
 	el.statusLine.textContent = message || "";
+	el.statusLine.title = detail;
 	el.statusLine.style.color = tone === "error" ? "var(--danger)" : tone === "ok" ? "var(--green)" : "var(--muted)";
 };
 
@@ -1239,10 +1244,21 @@ const importCommand = async () => {
 		showImportPanel(false);
 		setDirty(true);
 		refreshAll();
-		const applied = result.applied?.length || 0;
-		const ignored = result.ignored?.length || 0;
-		const suffix = ignored ? " Retained " + ignored + " unknown, unused or invalid settings for review." : "";
-		setStatus(`Imported ${applied} setting${applied === 1 ? "" : "s"}.${suffix}`, ignored ? "normal" : "ok");
+		// The host names every setting it did not apply. A ZMatrix .cfg import keeps an unknown or
+		// unused key in zmImportedSettings, which the import report lists; anything else (every
+		// command or query setting, or a .cfg line it could not read) is dropped, so it is named here.
+		const plural = (count, noun) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+		const ignored = result.ignored || [];
+		const kept = result.draft?.zmImportedSettings || {};
+		const retained = ignored.filter((name) => Object.hasOwn(kept, name)).length;
+		const dropped = ignored.filter((name) => !Object.hasOwn(kept, name));
+		let message = `Imported ${plural(result.applied?.length || 0, "setting")}.`;
+		if (retained) message += ` Retained ${plural(retained, "unknown, unused or invalid setting")} for review in the ZMatrix import report.`;
+		if (dropped.length) {
+			const more = dropped.length > 5 ? ` and ${dropped.length - 5} more` : "";
+			message += ` Ignored ${plural(dropped.length, "unknown or invalid setting")}: ${dropped.slice(0, 5).join(", ")}${more}.`;
+		}
+		setStatus(message, ignored.length ? "normal" : "ok");
 	} catch (error) {
 		setStatus(error.message, "error");
 	}
@@ -1350,7 +1366,12 @@ const bindEvents = () => {
 			const result = await requestHost("testCommand", { draft: state.draft });
 			el.stopButton.dataset.pid = String(result.processId);
 			el.stopButton.disabled = false;
-			setStatus(`Launched test process ${result.processId}.`, "ok");
+			// The host describes what it launched: the generated command run windowed, or a note that
+			// a configuration too long for one command line went over direct arguments. A long
+			// description is shortened here and kept whole in the tooltip.
+			const command = String(result.command ?? "");
+			const shown = command.length > 160 ? command.slice(0, 159) + "…" : command;
+			setStatus(`Launched test process ${result.processId}: ${shown}`, "ok", command);
 		} catch (error) {
 			setStatus(error.message, "error");
 		}
@@ -1373,14 +1394,26 @@ const bindEvents = () => {
 		el.exportPsButton.addEventListener("click", async () => {
 			try {
 				const result = await requestHost("exportPowerShell", { draft: state.draft });
+				// The host returns the script either way. When the clipboard is busy it is shown,
+				// selected, for copying by hand; a later export that reaches the clipboard, or fails,
+				// hides it, so the panel only ever holds the latest export.
+				el.exportPanel.hidden = Boolean(result?.copied);
 				if (result?.copied) {
 					setStatus("PowerShell script copied to clipboard.", "ok");
 				} else {
-					setStatus("Script generated, but the clipboard is in use by another program.", "error");
+					el.exportScript.value = result?.script ?? "";
+					el.exportScript.focus();
+					el.exportScript.select();
+					setStatus("The clipboard is in use by another program. Copy the script shown above.", "error");
 				}
 			} catch (error) {
+				el.exportPanel.hidden = true;
 				setStatus(`PowerShell export failed: ${error.message}`, "error");
 			}
+		});
+		el.closeExportButton.addEventListener("click", () => {
+			el.exportPanel.hidden = true;
+			el.exportPsButton.focus();
 		});
 	}
 
