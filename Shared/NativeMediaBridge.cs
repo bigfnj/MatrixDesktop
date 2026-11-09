@@ -537,35 +537,73 @@ internal sealed class NativeMediaBridge : IDisposable
         warnings = _warnings,
     });
 
-    private void OnResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
+    // 2026-11-08 (R2-53): WebView2 raises this on the UI thread, which also services the wallpaper's
+    // low-level mouse hook and the fullscreen keyboard-exit hook. Reading a granted file of up to
+    // 32 MiB from a disk that is spinning up, or from a remote folder, can hold that thread past the
+    // hook timeout, and Windows then removes the hook without telling the app. A file is therefore
+    // answered off the UI thread while a deferral holds the request; in-memory resources are still
+    // answered before the handler returns.
+    // This is async void, so nothing may escape it to Application.ThreadException and the crash dialog.
+    private async void OnResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
-        if (_core is null || _disposed) return;
-        var uri = new Uri(e.Request.Uri);
+        var core = _core;
+        if (core is null || _disposed) return;
+        try
+        {
+            var pending = AnswerAsync(e.Request.Uri, e.Request.Method);
+            using var deferral = pending.IsCompleted ? null : e.GetDeferral();
+            var (bytes, type) = await pending;
+            // The surface may have closed, or moved to a new WebView, during the read.
+            if (_disposed || !ReferenceEquals(core, _core)) return;
+            var found = bytes is not null;
+            // In-memory responses retain no file handles. WebView2 retains the response
+            // stream for consumption; old image data is collected after that response ends.
+            var content = new MemoryStream(bytes ?? Encoding.UTF8.GetBytes("Media resource unavailable."), writable: false);
+            e.Response = core.Environment.CreateWebResourceResponse(content, found ? 200 : 404, found ? "OK" : "Not Found",
+                $"Content-Type: {type}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: {_origin}\r\n");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"UC3D media request could not be answered: {ex.Message}");
+        }
+    }
+
+    // What a request is answered with; null bytes answer 404.
+    internal readonly record struct ResourceAnswer(byte[]? Bytes, string ContentType);
+
+    // Seams for the native harness: the recheck of a media grant and the read of its file.
+    internal Func<MediaEntry, bool> AccessCheck { get; init; } = MediaCatalog.StillAllowed;
+    internal Func<string, byte[]> FileReader { get; init; } = File.ReadAllBytes;
+
+    // The answer to one request, internal so the native harness can drive it without a WebView.
+    // Only a granted file leaves the calling thread: the recheck is a metadata query that a remote
+    // folder can hold for the SMB timeout, and the read can wait for a disk to spin up.
+    internal async Task<ResourceAnswer> AnswerAsync(string url, string method)
+    {
+        var uri = new Uri(url);
         var id = uri.AbsolutePath.StartsWith("/__uc3d/", StringComparison.Ordinal) ? uri.AbsolutePath["/__uc3d/".Length..] : "";
         byte[]? bytes = null;
         string type = "text/plain; charset=utf-8";
-        try
+        if (uri.GetLeftPart(UriPartial.Authority) != ResourceOrigin || method != "GET") { }
+        else if (id == "bootstrap" && _bootstrapJson is not null) { bytes = _bootstrapJson; type = "application/json; charset=utf-8"; }
+        else if (id == "desktop" && _desktop is not null) { bytes = _desktop; type = "image/png"; }
+        else if (_nativeResources.TryGetValue(id, out var native)) { bytes = native; type = "image/png"; }
+        else if (_files.TryGetValue(id, out var file))
         {
-            if (uri.GetLeftPart(UriPartial.Authority) != ResourceOrigin || e.Request.Method != "GET") { }
-            else if (id == "bootstrap" && _bootstrapJson is not null) { bytes = _bootstrapJson; type = "application/json; charset=utf-8"; }
-            else if (id == "desktop" && _desktop is not null) { bytes = _desktop; type = "image/png"; }
-            else if (_nativeResources.TryGetValue(id, out var native)) { bytes = native; type = "image/png"; }
-            else if (_files.TryGetValue(id, out var file) && MediaCatalog.StillAllowed(file))
-            {
-                bytes = File.ReadAllBytes(file.Path);
-                type = file.ContentType;
-            }
+            bytes = await Task.Run(() => ReadGranted(file)).ConfigureAwait(false);
+            if (bytes is not null) type = file.ContentType;
         }
+        return new(bytes, type);
+    }
+
+    private byte[]? ReadGranted(MediaEntry file)
+    {
+        try { return AccessCheck(file) ? FileReader(file.Path) : null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Logger.Warn($"UC3D media resource could not be read: {ex.Message}");
+            return null;
         }
-        var found = bytes is not null;
-        // In-memory responses retain no file handles. WebView2 retains the response
-        // stream for consumption; old image data is collected after that response ends.
-        var content = new MemoryStream(bytes ?? Encoding.UTF8.GetBytes("Media resource unavailable."), writable: false);
-        e.Response = _core.Environment.CreateWebResourceResponse(content, found ? 200 : 404, found ? "OK" : "Not Found",
-            $"Content-Type: {type}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: {_origin}\r\n");
     }
 
     private static bool Enabled(Dictionary<string, string> options, string key) =>
