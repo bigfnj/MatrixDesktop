@@ -319,8 +319,38 @@ public sealed class MainForm : Form
         base.OnHandleDestroyed(e);
     }
 
+    // Set only while WM_QUERYENDSESSION is dispatched; HostClosePolicy explains why.
+    private bool _sessionEndQuery;
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg != 0x0011) // WM_QUERYENDSESSION
+        {
+            base.WndProc(ref m);
+            return;
+        }
+
+        _sessionEndQuery = true;
+        try
+        {
+            base.WndProc(ref m);
+        }
+        finally
+        {
+            _sessionEndQuery = false;
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        // A session-end query is answered yes (e.Cancel stays false) and the page keeps running,
+        // because the shutdown can still be cancelled.
+        if (!HostClosePolicy.TearsDownOnClosing(_sessionEndQuery))
+        {
+            base.OnFormClosing(e);
+            return;
+        }
+
         // Stop any startup foreground retry timer before handles start tearing down.
         StopForegroundEnforcer();
 

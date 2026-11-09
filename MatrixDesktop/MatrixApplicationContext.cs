@@ -45,8 +45,11 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             }));
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
-        // Priority before TryCreateSurface in both branches (WebView2 children inherit the
-        // class), and after CreateTray so a refused class can show its balloon.
+        // Priority before TryCreateSurface in both branches: the WebView2 browser process this host
+        // starts, and its utility processes, inherit an Idle or Below-normal class (the wallpaper
+        // default is Idle). Windows passes no higher class to a child, and WebView2 runs renderers
+        // at Normal and the GPU process at AboveNormal whatever the host runs at. After CreateTray,
+        // so a refused class can show its balloon.
         if (_wallpaper)
         {
             if (!TakeWallpaperOwnership()) return;
@@ -82,18 +85,36 @@ internal sealed class MatrixApplicationContext : ApplicationContext
             ExitThread();
             return false;
         }
+        if (_instance.Result == WallpaperInstanceGuard.Outcome.Superseded)
+        {
+            // A newer launch asked for the desktop while this one waited; it shows its own settings.
+            Shared.Logger.Info("A newer wallpaper launch superseded this one before it took over; stopping.");
+            ExitThread();
+            return false;
+        }
         if (_instance.Result == WallpaperInstanceGuard.Outcome.Unavailable)
         {
             Shared.Logger.Warn($"The wallpaper single-instance guard is unavailable ({_instance.Problem}); this launch cannot replace another running wallpaper.");
             return true;
         }
         if (_instance.Result == WallpaperInstanceGuard.Outcome.TookOver) Shared.Logger.Info($"Took over from the running wallpaper (scope {scope}).");
-        _instance.ListenForTakeover(() => _coordinator.Post(() =>
-        {
-            Shared.Logger.Info("A newer wallpaper launch took over; exiting.");
-            ExitThread();
-        }));
+        _instance.ListenForTakeover(() => _coordinator.Post(OnTakeoverRequested));
         return true;
+    }
+
+    // R2-04: the request is claimed here, on the UI thread, before the exit. A newcomer that gave
+    // up at its bound has withdrawn it, so this wallpaper keeps the desktop and listens again.
+    private void OnTakeoverRequested()
+    {
+        if (_exiting || _instance is null) return;
+        if (!_instance.ClaimTakeover())
+        {
+            Shared.Logger.Info("A wallpaper takeover request was withdrawn before this launch claimed it; keeping the desktop.");
+            _instance.ListenForTakeover(() => _coordinator.Post(OnTakeoverRequested));
+            return;
+        }
+        Shared.Logger.Info("A newer wallpaper launch took over; exiting.");
+        ExitThread();
     }
 
     private void CreateTray()
@@ -114,15 +135,24 @@ internal sealed class MatrixApplicationContext : ApplicationContext
         menu.Items.Add(refresh);
         // Only a scene that applies native resources while it runs can be refreshed (AUD-09).
         menu.Opening += (_, _) => refresh.Visible = _form?.NativeResourcesRefreshable == true;
-        var autostart = new ToolStripMenuItem("Start with Windows") { Checked = AutostartService.Enabled };
+        var autostart = new ToolStripMenuItem("Start with Windows");
+        // R2-03: ticked only when the shortcut starts this launch's settings. A shortcut another
+        // launch stored says so, and one click replaces it with these settings.
+        void ShowAutostart()
+        {
+            var state = AutostartService.State(_plan.Arguments);
+            autostart.Checked = state == AutostartState.ThisLaunch;
+            autostart.Text = state == AutostartState.OtherSettings ? "Start with Windows (other settings)" : "Start with Windows";
+        }
+        ShowAutostart();
         autostart.Click += (_, _) =>
         {
-            try { AutostartService.SetEnabled(!AutostartService.Enabled, _plan.Arguments); autostart.Checked = AutostartService.Enabled; }
+            try { AutostartService.SetEnabled(AutostartService.ClickEnables(AutostartService.State(_plan.Arguments)), _plan.Arguments); ShowAutostart(); }
             catch (Exception error) { Report(error.Message); }
         };
         menu.Items.Add(autostart);
-        // The shortcut can change outside this process (the configurator, Explorer, another launch).
-        menu.Opening += (_, _) => autostart.Checked = AutostartService.Enabled;
+        // The shortcut can change outside this process (Explorer, another launch's tray).
+        menu.Opening += (_, _) => ShowAutostart();
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _tray = new NotifyIcon { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone(),

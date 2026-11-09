@@ -97,8 +97,11 @@ internal static class SurfaceClosePolicy
 // renderer left a long-running wallpaper blank until an unrelated shell event. Per WebView2's
 // guidance: a lost browser process needs a new WebView, a lost main-frame renderer can be
 // reloaded, an unresponsive renderer is reported again about every 15 s until it answers, and
-// WebView2 restarts every other process itself. These kinds are this file's own, so the core
-// harness can test the table without WebView2.
+// WebView2 restarts every other process itself. WebView2 reports a renderer unresponsive only
+// when input or a navigation goes unanswered, so only fullscreen and windowed hosts get that
+// report: the wallpaper and preview windows are disabled and never navigate while hung, so a
+// hung page there stays frozen until a display change, an Explorer restart or a relaunch.
+// These kinds are this file's own, so the core harness can test the table without WebView2.
 internal enum RendererFailureKind { Other, BrowserProcessExited, RenderProcessExited, RenderProcessUnresponsive }
 
 internal enum RendererFailureAction { LogOnly, Reload, Recreate, Exit }
@@ -153,4 +156,14 @@ internal sealed class RendererFailurePolicy
         _unresponsive = 0;
         return wallpaper ? RendererFailureAction.Recreate : RendererFailureAction.Exit;
     }
+}
+
+// R2-01. WinForms raises FormClosing for WM_QUERYENDSESSION as well as WM_CLOSE, and the
+// shutdown that query asks about can still be cancelled. A top-level surface that tore down its
+// WebView there stayed black after WM_ENDSESSION(FALSE), because nothing rebuilds it. MainForm
+// marks the query's dispatch itself: e.CloseReason stays WindowsShutDown after a cancel.
+// WM_ENDSESSION(TRUE) raises FormClosed and reaches Dispose, which tear down.
+internal static class HostClosePolicy
+{
+    internal static bool TearsDownOnClosing(bool sessionEndQuery) => !sessionEndQuery;
 }

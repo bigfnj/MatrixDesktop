@@ -9,15 +9,58 @@ internal static class AutostartTests
 {
     internal static IEnumerable<(string, Action)> All =>
     [
-        ("Native startup shortcut preserves target and exact wallpaper arguments", OnStaThread),
+        ("Native startup shortcut preserves target and exact wallpaper arguments", () => OnStaThread(ShortcutRoundtrip)),
+        ("Native startup shortcut state tells this launch's settings from another launch's", () => OnStaThread(ShortcutState)),
+        ("Native startup tray click stores this launch's settings over another launch's", ClickDecision),
     ];
 
-    private static void OnStaThread()
+    // R2-03. The tray ticked Start with Windows whenever a shortcut existed, so a shortcut another
+    // launch stored read as this launch's and the first click deleted it.
+    private static void ShortcutState()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "matrixdesktop-autostart-state-" + Guid.NewGuid().ToString("N"));
+        var executable = Path.Combine(root, "state target 漢字.exe");
+        var shortcut = Path.Combine(root, "owned wallpaper 漢字.lnk");
+        var unreadable = Path.Combine(root, "unreadable.lnk");
+        Directory.CreateDirectory(root);
+        File.Copy(Environment.ProcessPath!, executable);
+        File.WriteAllBytes(unreadable, [77, 68, 45, 116, 101, 115, 116]);
+        try
+        {
+            string[] thisLaunch = ["--scene", "zmatrix", "--zmPhrases", JsonSerializer.Serialize(new[] { "a \"quoted\" phrase" }), "--windowed", ""];
+            string[] otherLaunch = ["--scene", "zmatrix", "--zmPhrases", JsonSerializer.Serialize(new[] { "a \"quoted\" phrasf" }), "--windowed", ""];
+            Require(AutostartService.StateAt(shortcut, executable, thisLaunch) == AutostartState.Off, "No shortcut must read as off.");
+            AutostartService.SetEnabledAt(true, thisLaunch, shortcut, executable, root);
+            Require(AutostartService.StateAt(shortcut, executable, thisLaunch) == AutostartState.ThisLaunch, "A shortcut holding exactly this launch's arguments must read as this launch.");
+            Require(AutostartService.StateAt(shortcut, executable, otherLaunch) == AutostartState.OtherSettings,
+                "A shortcut another launch stored, differing only inside a quoted JSON value, must read as other settings, not as this launch.");
+            Require(AutostartService.StateAt(shortcut, Path.Combine(root, "another target.exe"), thisLaunch) == AutostartState.OtherSettings, "A shortcut that starts another executable must read as other settings.");
+            Require(AutostartService.StateAt(unreadable, executable, thisLaunch) == AutostartState.OtherSettings, "A shortcut that cannot be read must read as other settings.");
+            AutostartService.SetEnabledAt(false, [], shortcut, executable, root);
+            Require(AutostartService.StateAt(shortcut, executable, thisLaunch) == AutostartState.Off, "A deleted shortcut must read as off.");
+        }
+        finally
+        {
+            File.Delete(shortcut);
+            File.Delete(unreadable);
+            File.Delete(executable);
+            Directory.Delete(root);
+        }
+    }
+
+    private static void ClickDecision()
+    {
+        Require(AutostartService.ClickEnables(AutostartState.OtherSettings), "A click on a shortcut holding another launch's settings must store this launch's, never delete it.");
+        Require(AutostartService.ClickEnables(AutostartState.Off), "A click with no shortcut must create one.");
+        Require(!AutostartService.ClickEnables(AutostartState.ThisLaunch), "A click on this launch's own shortcut must remove it.");
+    }
+
+    private static void OnStaThread(Action body)
     {
         Exception? failure = null;
         var thread = new Thread(() =>
         {
-            try { ShortcutRoundtrip(); }
+            try { body(); }
             catch (Exception error) { failure = error; }
         }) { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);

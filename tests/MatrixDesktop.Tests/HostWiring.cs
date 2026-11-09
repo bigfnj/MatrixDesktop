@@ -10,7 +10,11 @@ namespace MatrixDesktop.Tests;
 // which neither harness can link (MainForm needs WebView2).
 internal static class HostWiring
 {
-    private sealed record Call(string Caller, int Offset, string Callee, int PreviousOpcode);
+    private sealed record Call(string Caller, int Offset, string Callee, int PreviousOpcode)
+    {
+        // The opcode right after the call, so a check can see what the result feeds.
+        internal int NextOpcode { get; init; } = -1;
+    }
 
     private const string MessageBoxShow = "System.Windows.Forms.MessageBox::Show";
     private const string FormClose = "System.Windows.Forms.Form::Close";
@@ -21,12 +25,13 @@ internal static class HostWiring
     internal static int Verify(string path)
     {
         List<Call> calls;
+        List<Call> functionLoads = [];
         List<string> mainFormConstructors;
         try
         {
             using var stream = File.OpenRead(path);
             using var pe = new PEReader(stream);
-            calls = ReadCalls(pe, pe.GetMetadataReader());
+            calls = ReadCalls(pe, pe.GetMetadataReader(), functionLoads);
             mainFormConstructors = InstanceConstructorAccess(pe.GetMetadataReader(), "MatrixDesktop.MainForm");
         }
         catch (Exception error)
@@ -96,9 +101,18 @@ internal static class HostWiring
             Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::ExitThreadCore" && call.Callee == "MatrixDesktop.WallpaperInstanceGuard::Dispose"),
                 "the context must release the guard when it exits, or a newer launch waits out its bound");
         });
+        // R2-02. CreateTray subscribes Opening twice (Refresh desktop visibility, AUD-09, and this
+        // refresh), so "CreateTray calls add_Opening" passed with this refresh deleted. Resolve the
+        // method each Opening delegate is built from and require one to read AutostartService.
         failures += Run($"the tray refreshes Start with Windows when its menu opens: {path}", () =>
-            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::CreateTray" && call.Callee == "System.Windows.Forms.ToolStripDropDown::add_Opening"),
-                "CreateTray must subscribe the menu's Opening, so another launch's or the configurator's shortcut change shows"));
+        {
+            var handlers = DelegateTargets(calls, functionLoads, "MatrixDesktop.MatrixApplicationContext::CreateTray",
+                "System.ComponentModel.CancelEventHandler::.ctor", "System.Windows.Forms.ToolStripDropDown::add_Opening");
+            Check.True(handlers.Count > 0, "witness: the scan must resolve the handler of each Opening subscription in CreateTray");
+            Check.True(handlers.Any(handler => Reaches(calls, handler, ReadsAutostart, depth: 2)),
+                "an Opening handler in CreateTray must read AutostartService, so a shortcut that another launch or Explorer changed shows when the menu opens: "
+                + string.Join("; ", handlers));
+        });
         // AUD-07. RendererFailurePolicy has its own tests; these prove WebView2 failures reach it.
         failures += Run($"WebView2 process failures reach RendererFailurePolicy: {path}", () =>
         {
@@ -116,6 +130,39 @@ internal static class HostWiring
             Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::OnTick" && call.Callee == "MatrixDesktop.RendererFailurePolicy::StayedHealthy"),
                 "the wallpaper tick must reset the rebuild backoff only once a renderer stayed ready");
         });
+        // R2-01. HostClosePolicy has its own test; this proves OnFormClosing branches on it, with
+        // the flag WndProc sets, before any teardown. The cancelled-shutdown leg itself is native.
+        failures += Run($"a session-end query reaches HostClosePolicy before MainForm tears down: {path}", () =>
+        {
+            var body = calls.Where(call => call.Caller == "MatrixDesktop.MainForm::OnFormClosing").ToList();
+            var decide = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.HostClosePolicy::TearsDownOnClosing");
+            var teardown = body.Where(call => call.Callee is "MatrixDesktop.MainForm::TryCleanupWebView" or "MatrixDesktop.Shared.NativeMediaBridge::Dispose"
+                or "MatrixDesktop.MainForm::StopForegroundEnforcer").ToList();
+            Check.True(teardown.Any(call => call.Callee == "MatrixDesktop.MainForm::TryCleanupWebView"), "witness: the scan must see OnFormClosing clean up the WebView at all");
+            Check.True(decide is not null, "OnFormClosing must ask HostClosePolicy whether this close tears down");
+            Check.True(teardown.All(call => call.Offset > decide!.Offset), "OnFormClosing must ask HostClosePolicy before it stops anything: "
+                + string.Join("; ", teardown.Where(call => call.Offset < decide!.Offset).Select(call => call.Callee)));
+            Check.True(decide!.PreviousOpcode == OpCodes.Ldfld.Value, "HostClosePolicy must be given the field WndProc sets, not a constant");
+            Check.True(decide.NextOpcode is 0x2C or 0x2D or 0x39 or 0x3A, $"OnFormClosing must branch on HostClosePolicy's answer (next opcode 0x{decide.NextOpcode:X2})");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::WndProc" && call.Callee == "System.Windows.Forms.Form::WndProc"),
+                "MainForm must mark the WM_QUERYENDSESSION dispatch in its own WndProc");
+        });
+        // R2-04. The guard's claim has its own tests; this proves the action the takeover listener
+        // posts claims the request, and branches on the claim, before it ends the context.
+        failures += Run($"the wallpaper claims a takeover request before it exits: {path}", () =>
+        {
+            var listeners = DelegateTargets(calls, functionLoads, "MatrixDesktop.MatrixApplicationContext::TakeWallpaperOwnership",
+                "System.Action::.ctor", "MatrixDesktop.WallpaperInstanceGuard::ListenForTakeover");
+            Check.Equal(1, listeners.Count, "witness: the scan must resolve the takeover listener TakeWallpaperOwnership registers");
+            var posted = DelegateTargets(calls, functionLoads, listeners[0], "System.Action::.ctor", "MatrixDesktop.MatrixApplicationContext/CoordinatorWindow::Post");
+            Check.Equal(1, posted.Count, "the takeover listener must post one action to the UI thread: " + listeners[0]);
+            var body = calls.Where(call => call.Caller == posted[0]).ToList();
+            var exit = body.FirstOrDefault(call => call.Callee.EndsWith("::ExitThread", StringComparison.Ordinal));
+            var claim = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.WallpaperInstanceGuard::ClaimTakeover");
+            Check.True(exit is not null, "witness: the posted takeover action must be able to end the context: " + posted[0]);
+            Check.True(claim is not null && claim.Offset < exit!.Offset, "the posted takeover action must claim the request before ExitThread: " + posted[0]);
+            Check.True(claim!.NextOpcode is 0x2C or 0x2D or 0x39 or 0x3A, $"the posted takeover action must branch on the claim (next opcode 0x{claim.NextOpcode:X2})");
+        });
         return failures;
     }
 
@@ -126,13 +173,35 @@ internal static class HostWiring
             .Where(method => reader.GetString(method.Name) == ".ctor")
             .Select(method => (method.Attributes & System.Reflection.MethodAttributes.MemberAccessMask).ToString()).ToList();
 
+    // The method each delegate passed to subscribe in caller is built from: the nearest ldftn
+    // before the subscribe call, with the delegate's constructor between them.
+    private static List<string> DelegateTargets(List<Call> calls, List<Call> functionLoads, string caller, string delegateConstructor, string subscribe) =>
+        calls.Where(call => call.Caller == caller && call.Callee == subscribe).Select(call =>
+        {
+            var constructed = calls.LastOrDefault(made => made.Caller == caller && made.Callee == delegateConstructor && made.Offset < call.Offset);
+            var loaded = constructed is null ? null : functionLoads.LastOrDefault(load => load.Caller == caller && load.Offset < constructed.Offset);
+            return loaded?.Callee;
+        }).OfType<string>().ToList();
+
+    // True when method, or a MatrixDesktop method it calls within depth steps, calls a matching callee.
+    private static bool Reaches(List<Call> calls, string method, Func<string, bool> matches, int depth)
+    {
+        var callees = calls.Where(call => call.Caller == method).Select(call => call.Callee).Distinct().ToList();
+        return callees.Any(matches) || depth > 1 && callees.Where(callee => callee.StartsWith("MatrixDesktop.", StringComparison.Ordinal) && callee != method)
+            .Any(callee => Reaches(calls, callee, matches, depth - 1));
+    }
+
+    // Reads, never writes: Enabled, or the State family that compares the shortcut with this launch.
+    private static bool ReadsAutostart(string callee) =>
+        callee == "MatrixDesktop.AutostartService::get_Enabled" || callee.StartsWith("MatrixDesktop.AutostartService::State", StringComparison.Ordinal);
+
     private static int Run(string name, Action check)
     {
         try { check(); Console.WriteLine($"PASS  {name}"); return 0; }
         catch (Exception error) { Console.WriteLine($"FAIL  {name}: {error.Message}"); return 1; }
     }
 
-    private static List<Call> ReadCalls(PEReader pe, MetadataReader reader)
+    private static List<Call> ReadCalls(PEReader pe, MetadataReader reader, List<Call> functionLoads)
     {
         var calls = new List<Call>();
         foreach (var typeHandle in reader.TypeDefinitions)
@@ -146,11 +215,13 @@ internal static class HostWiring
                 var caller = typeName + "::" + reader.GetString(method.Name);
                 var il = pe.GetMethodBody(method.RelativeVirtualAddress).GetILReader();
                 var previous = -1;
+                var awaitingNext = -1;
                 while (il.RemainingBytes > 0)
                 {
                     var offset = il.Offset;
                     int value = il.ReadByte();
                     if (value == 0xFE) value = 0xFE00 | il.ReadByte();
+                    if (awaitingNext >= 0) { calls[awaitingNext] = calls[awaitingNext] with { NextOpcode = unchecked((short)value) }; awaitingNext = -1; }
                     var code = OpCodesByValue[unchecked((short)value)];
                     switch (code.OperandType)
                     {
@@ -162,7 +233,12 @@ internal static class HostWiring
                         case OperandType.InlineMethod:
                             var token = il.ReadInt32();
                             if (code == OpCodes.Call || code == OpCodes.Callvirt || code == OpCodes.Newobj)
+                            {
                                 calls.Add(new Call(caller, offset, MethodName(reader, MetadataTokens.EntityHandle(token)), previous));
+                                awaitingNext = calls.Count - 1;
+                            }
+                            else if (code == OpCodes.Ldftn || code == OpCodes.Ldvirtftn)
+                                functionLoads.Add(new Call(caller, offset, MethodName(reader, MetadataTokens.EntityHandle(token)), previous));
                             break;
                         default: il.ReadInt32(); break;
                     }
