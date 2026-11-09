@@ -67,7 +67,6 @@ const el = {
 	closeExportButton: document.querySelector("#closeExportButton"),
 	themeButton: document.querySelector("#themeButton"),
 	previewButton: document.querySelector("#previewButton"),
-	previewPane: document.querySelector("#previewPane"),
 	previewFrame: document.querySelector("#previewFrame"),
 	helpButton: document.querySelector("#helpButton"),
 	helpModal: document.querySelector("#helpModal"),
@@ -156,17 +155,26 @@ const effectiveDefaultsFor = (draft) => {
 	return defaults;
 };
 const defaultValueFor = (field) => effectiveDefaultsFor(state.draft)[field.id] ?? field.defaultValue;
+// Equal values whatever their objects' key order. A store reopened after a close holds colours as
+// {b, g, r} (R2-44), which a JSON string comparison counted as an edit of the default (R2-45).
+const sameValue = (a, b) => {
+	if (a === b) return true;
+	if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+	const keys = Object.keys(a);
+	return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameValue(a[key], b[key]));
+};
 const editedSceneFields = new Set();
 const rememberDraftEdits = (explicitKeys = []) => {
 	editedSceneFields.clear();
 	const defaults = effectiveDefaultsFor(state.draft);
 	for (const key of Object.keys(state.draft))
-		if (key !== "scene" && JSON.stringify(state.draft[key]) !== JSON.stringify(defaults[key])) editedSceneFields.add(key);
+		if (key !== "scene" && !sameValue(state.draft[key], defaults[key])) editedSceneFields.add(key);
 	for (const key of explicitKeys) if (key !== "scene") editedSceneFields.add(key);
 };
 const stripeEffects = new Set(["stripes", "customStripes", "pride", "trans", "transPride"]);
-// The choices effectiveDefaultsFor reads; switching one re-targets untouched fields.
-const defaultContextFields = new Set(["scene", "version", "effect"]);
+// The choices effectiveDefaultsFor reads; switching one re-targets untouched fields. uc3dControls
+// is one: legacy UC3D draws the catalog bloom (R2-15).
+const defaultContextFields = new Set(["scene", "version", "effect", "uc3dControls"]);
 
 // Fields whose value changes which *other* fields are gated (see
 // getDisabledReason). Editing one of these must re-render the whole group so
@@ -262,13 +270,13 @@ const updateCommand = async () => {
 const updateDraftValue = (field, value) => {
 	// A picker opened before a scene change can finish after its field is disabled.
 	if (getDisabledReason(field)) return;
-	// A scene, version or effect switch moves each untouched field from what the old choice
+	// A scene, version, effect or controls switch moves each untouched field from what the old choice
 	// draws to what the new one draws (AUD-13), so the editors keep showing the render.
 	if (defaultContextFields.has(field.id) && value !== state.draft[field.id]) {
 		const previous = effectiveDefaultsFor(state.draft);
 		const next = effectiveDefaultsFor({ ...state.draft, [field.id]: value });
 		for (const key of Object.keys(next)) {
-			if (!defaultContextFields.has(key) && !editedSceneFields.has(key) && JSON.stringify(state.draft[key]) === JSON.stringify(previous[key]))
+			if (!defaultContextFields.has(key) && !editedSceneFields.has(key) && sameValue(state.draft[key], previous[key]))
 				state.draft[key] = clone(next[key]);
 		}
 	}
@@ -474,6 +482,31 @@ const restoreFocus = (shell, focus) => {
 	}
 };
 
+// R2-14: Chromium keeps a select's type-ahead text on the element, and a gating select's change
+// re-renders the surface. The rebuilt select took each keystroke afresh, so "mo" in Version
+// picked Mega City, then Operator. The focused select is held beside the surface with moveBefore,
+// which keeps its focus and that text (removing and re-inserting it loses both), and then takes
+// its rebuilt copy's place with that copy's value and disabled state. Without moveBefore
+// (Chromium before 133) it is rebuilt like the rest.
+const holdFocusedSelect = (focus) => {
+	const surface = el.fieldSurface;
+	if (!(focus?.node instanceof HTMLSelectElement) || !focus.field || typeof surface.moveBefore !== "function") return null;
+	surface.parentNode.moveBefore(focus.node, surface);
+	return focus.node;
+};
+const placeHeldSelect = (held, focus) => {
+	if (!held) return;
+	const fresh = el.fieldSurface.querySelector(`[data-field="${CSS.escape(focus.field)}"] > select`);
+	if (!fresh) {
+		held.remove();
+		return;
+	}
+	fresh.parentNode.moveBefore(held, fresh);
+	held.disabled = fresh.disabled;
+	if (held.value !== fresh.value) held.value = fresh.value;
+	fresh.remove();
+};
+
 // Render every group as a section (sticky header + field grid) into one
 // scrollable surface. A non-empty filter keeps only fields whose visible label,
 // catalog label or either section title matches, and drops emptied sections, so a
@@ -487,6 +520,7 @@ const renderFields = () => {
 	const surface = el.fieldSurface;
 	const prevScroll = surface.scrollTop;
 	const focus = captureFocus(surface);
+	const held = holdFocusedSelect(focus);
 	surface.replaceChildren();
 
 	const filter = state.filter.trim().toLowerCase();
@@ -555,6 +589,7 @@ const renderFields = () => {
 		surface.append(empty);
 	}
 
+	placeHeldSelect(held, focus);
 	restoreFocus(focus?.field ? surface.querySelector(`[data-field="${CSS.escape(focus.field)}"]`) : null, focus);
 	surface.scrollTop = prevScroll;
 };

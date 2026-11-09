@@ -797,6 +797,14 @@ h1 {
 	background: transparent;
 }
 
+/* The sliders take keyboard focus. The UA ring (outline: auto, near black) is about 1.2:1 on the
+   dark popover; --focus is 11:1 there and 3.07:1 on the light one (R2-42). */
+.cp-square:focus-visible,
+.cp-hue:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: 2px;
+}
+
 .cp-inputs {
 	display: grid;
 	gap: 8px;
@@ -818,9 +826,11 @@ h1 {
 	text-transform: none;
 }
 
+/* minmax(0, ...): a bare 1fr track is at least its label's min-content, the number input's own
+   width (81 px), and three of them widened the whole popover past its 236 px box (R2-43). */
 .cp-rgb {
 	display: grid;
-	grid-template-columns: repeat(3, 1fr);
+	grid-template-columns: repeat(3, minmax(0, 1fr));
 	gap: 6px;
 }
 

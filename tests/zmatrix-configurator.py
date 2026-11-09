@@ -1192,6 +1192,215 @@ def check_host_reply_order(page, _fixture):
     assert "--effect pride" in command, "a slow earlier command reply replaced the latest edit's command: " + command
 
 
+EL_LITERAL = re.compile(r"^const el = \{(.*?)^\};", re.M | re.S)
+EL_KEY = re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*:", re.M)
+EL_USE = re.compile(r"(?<![\w$.])el\b(?:\??\.([A-Za-z_$][\w$]*))?")
+
+
+def check_el_lookups(page, _fixture):
+    # R2-16: each element app.js looks up in its el literal has a reader, so a lookup left behind
+    # when its last reader goes (AUD-45 dropped el.groupNav and missed el.previewPane) fails here.
+    # el is module scoped and read as el.KEY; any other use (el[name], a spread, el passed on)
+    # reads keys this scan cannot see, so it fails too. The served app.js is scanned, so an
+    # --app-js mutant is what is read.
+    source = page.evaluate("fetch('js/app.js').then(response => response.text())")
+    literal = EL_LITERAL.search(source)
+    assert literal, "witness: app.js has no 'const el = {' literal to scan"
+    keys = EL_KEY.findall(literal.group(1))
+    assert len(keys) >= 30 and len(set(keys)) == len(keys), "witness: the el literal scan found " + str(len(keys)) + " keys: " + str(keys)
+    reads, dynamic = set(), []
+    for match in EL_USE.finditer(source):
+        if literal.start() <= match.start() < literal.end():
+            continue
+        if match.group(1):
+            reads.add(match.group(1))
+        else:
+            dynamic.append(source.count("\n", 0, match.start()) + 1)
+    assert not dynamic, "app.js uses el other than as el.KEY at line(s) " + str(dynamic) + ", so its reads cannot be counted"
+    unread = [key for key in keys if key not in reads]
+    assert not unread, "el looks up elements nothing reads: " + ", ".join(unread)
+    unknown = sorted(reads - set(keys))
+    assert not unknown, "app.js reads el keys the literal does not look up: " + ", ".join(unknown)
+
+
+def check_controls_switch_bloom(page, _fixture):
+    # R2-15: legacy UC3D draws the catalog bloom (0.7) and Original draws 0 (effectiveDefaultsFor,
+    # EffectiveDefault), so a Control units switch moves an untouched Bloom strength as a scene,
+    # version or effect switch does, and the real C# builder leaves it out in both modes.
+    bloom = field(page, "bloomStrength").locator('input[type="number"]')
+    controls = field(page, "uc3dControls").locator("select")
+
+    def now():
+        page.wait_for_timeout(400)  # past the save debounce, so the snapshot cancels no pending save
+        draft = page.evaluate("configHost.snapshotDraft().draft")
+        command = run_host({"type": "buildCommand", "payload": {"draft": draft, "includeDefaults": False, "forTest": False}})["command"]
+        return {"bloom": draft["bloomStrength"], "editor": bloom.input_value(), "command": command}
+
+    def expect(label, value, sent=None):
+        state = now()
+        token = "--bloomStrength" in state["command"]
+        assert state["bloom"] == value and state["editor"] == str(value) and token == (sent is not None), \
+            label + ": Bloom strength should be " + str(value) + (", sent" if sent else ", left out") + ": " + str(state)
+        if sent:
+            assert "--bloomStrength " + sent in state["command"], label + ": " + state["command"]
+
+    apply_import(page, "MatrixDesktop.exe --scene uc3d --uc3dControls legacy")
+    expect("witness: the legacy UC3D import", 0.7)
+    for mode, value in (("original", 0), ("legacy", 0.7)):
+        controls.select_option(mode)
+        expect("an imported legacy draft switched to " + mode, value)
+    page.locator("#newPresetButton").click()
+    field(page, "scene").locator("select").select_option("uc3d")
+    expect("witness: a new Matrix draft switched to UC3D", 0)
+    controls.select_option("legacy")
+    expect("a new draft on UC3D switched to legacy", 0.7)
+    # Control: a Bloom strength the user chose stays chosen across the switch, and is sent.
+    bloom.fill("0.3")
+    bloom.blur()
+    controls.select_option("original")
+    expect("control: a chosen Bloom strength switched to original", 0.3, sent="0.3")
+
+
+def check_select_typeahead(page, _fixture):
+    # R2-14: Chromium keeps a select's type-ahead text on the element, and a gating select's change
+    # re-renders the field surface. A rebuilt select took each keystroke afresh, so "mo" in Version
+    # picked Mega City, then Operator, and moved every untouched editor to Operator's values.
+    assert page.evaluate("typeof Element.prototype.moveBefore") == "function", \
+        "witness: this Chromium has no Node.moveBefore, which app.js needs to keep a focused select across a re-render"
+    columns = field(page, "numColumns").locator('input[type="number"]')
+
+    def type_into(key, start, text):
+        select = field(page, key).locator("select")
+        select.select_option(start)
+        select.focus()
+        page.keyboard.type(text, delay=60)
+        now = focused(page)
+        page.wait_for_timeout(1200)  # past Chromium's one-second type-ahead window, so the next case starts clean
+        return now["value"] if (now["field"], now["tag"]) == (key, "SELECT") else "focus elsewhere: " + str(now)
+
+    # Control: a repeated letter cycles from the selection, which a fresh buffer does as well, so a
+    # failure below is the buffer and not keystrokes missing the select.
+    now = type_into("version", "classic", "mm")
+    assert now == "morpheus", "control: 'mm' in Version gave " + now
+    now = type_into("version", "classic", "mo")
+    assert now == "morpheus", "typing 'mo' in Version picked " + now + ", not morpheus"
+    assert columns.input_value() == "60" and saved(page)["version"] == "morpheus", \
+        "Version morpheus shows Columns " + columns.input_value() + ", the renderer draws 60"
+    now = type_into("effect", "palette", "im")
+    assert now == "image", "typing 'im' in Effect picked " + now + ", not image"
+
+
+def css_color(text):
+    # "rgb(r, g, b)" or "rgba(r, g, b, a)" as computed by Chromium: ([r, g, b], a).
+    numbers = [float(part) for part in re.findall(r"[\d.]+", text)]
+    return numbers[:3], numbers[3] if len(numbers) > 3 else 1.0
+
+
+def contrast(first, second):
+    def luminance(rgb):
+        linear = [value / 255 / 12.92 if value / 255 <= 0.04045 else ((value / 255 + 0.055) / 1.055) ** 2.4 for value in rgb]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+SLIDER_FOCUS = """selector => { const node = document.querySelector('.color-popover ' + selector), style = getComputedStyle(node);
+    return {focused: document.activeElement === node && node.matches(':focus-visible'), outlineStyle: style.outlineStyle,
+            outlineWidth: parseFloat(style.outlineWidth), outlineColor: style.outlineColor, boxShadow: style.boxShadow,
+            background: getComputedStyle(node.closest('.color-popover')).backgroundColor}; }"""
+
+
+def check_slider_focus_ring(page, _fixture):
+    # R2-42: the popover's square and hue bar take keyboard focus. With no rule of their own they
+    # drew the UA ring (outline: auto, rgb(16, 16, 16)), about 1.2:1 on the dark popover, so a
+    # keyboard user could not see which one had focus. The ring must be the page's own (an outline
+    # other than auto, or a zero-offset spread box-shadow) and reach 3:1 on the popover in both themes.
+    swatch = field(page, "cursorColor").locator(".color-swatch")
+    for theme in ("dark", "light"):
+        if theme == "light":
+            page.locator("#themeButton").click()
+        assert page.evaluate("document.documentElement.dataset.theme") == theme, "witness: the page is not on the " + theme + " theme"
+        swatch.evaluate("node => node.scrollIntoView({block: 'center'})")
+        swatch.focus()
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)  # the popover focuses its hex box on the next frame
+        for selector in (".cp-hue", ".cp-square"):  # Shift+Tab from the hex box, then from the hue bar
+            page.keyboard.press("Shift+Tab")
+            style = page.evaluate(SLIDER_FOCUS, selector)
+            assert style["focused"], "witness: Shift+Tab did not give " + selector + " keyboard focus: " + str(style)
+            background = css_color(style["background"])[0]
+            shadow = re.match(r"(rgba?\([^)]*\)) 0px 0px 0px [1-9]", style["boxShadow"])
+            if style["outlineStyle"] not in ("none", "auto") and style["outlineWidth"] > 0:
+                ring = style["outlineColor"]
+            elif shadow:
+                ring = shadow.group(1)
+            else:
+                raise AssertionError(theme + " theme: " + selector + " has no focus ring of the page's own: " + str(style))
+            rgb, alpha = css_color(ring)
+            seen = [channel * alpha + under * (1 - alpha) for channel, under in zip(rgb, background)]
+            ratio = contrast(seen, background)
+            assert ratio >= 3, theme + " theme: the " + selector + " focus ring " + ring + " is " + str(round(ratio, 2)) + ":1 on the popover " + style["background"] + ", under 3:1"
+        page.keyboard.press("Escape")
+
+
+POPOVER_BOXES = """() => { const box = document.querySelector('.color-popover').getBoundingClientRect();
+    let worst = {over: 0, node: ''}, measured = 0;
+    for (const node of document.querySelectorAll('.color-popover *')) {
+        const r = node.getBoundingClientRect();
+        if (!r.width && !r.height) continue;
+        measured++;
+        const over = Math.max(box.left - r.left, box.top - r.top, r.right - box.right, r.bottom - box.bottom);
+        if (over > worst.over) worst = {over: Math.round(over * 10) / 10, node: node.tagName + '.' + node.className};
+    }
+    return {width: box.width, measured, ...worst}; }"""
+
+
+def check_popover_fits(page, _fixture):
+    # R2-43: every part of the colour popover lies inside its box (1 px allowed), at the
+    # configurator's default window (ConfiguratorForm ClientSize 1240x820) and at 150% zoom.
+    swatch = field(page, "cursorColor").locator(".color-swatch")
+    for width, height in ((1240, 820), (827, 547)):
+        page.set_viewport_size({"width": width, "height": height})
+        swatch.evaluate("node => node.scrollIntoView({block: 'center'})")
+        swatch.focus()  # opened by keyboard: at 827x547 the sticky section title covers a centred swatch
+        page.keyboard.press("Enter")
+        page.wait_for_function("!document.querySelector('.color-popover').hidden")
+        now = page.evaluate(POPOVER_BOXES)
+        assert now["measured"] >= 8 and now["width"] > 100, "witness: the open popover has too little to measure: " + str(now)
+        assert now["over"] <= 1, "at " + str(width) + "x" + str(height) + " the popover's " + now["node"] + " overflows its box by " + str(now["over"]) + " px"
+        page.keyboard.press("Escape")
+
+
+def sorted_keys(value):
+    # A store after a close and reopen (R2-44): every object's keys sorted, so a colour is {b, g, r}
+    # and a palette stop {at, b, g, r}.
+    if isinstance(value, dict):
+        return {key: sorted_keys(value[key]) for key in sorted(value)}
+    return [sorted_keys(item) for item in value] if isinstance(value, list) else value
+
+
+def check_sorted_store_retarget(page, fixture):
+    # R2-45: rememberDraftEdits and the switch re-target compared values as JSON strings, so a
+    # default colour or palette whose keys came back in another order counted as an edit and kept
+    # the old version's value on a version switch.
+    operator = fixture["metadata"]["versionDefaults"]["operator"]
+    stored = dict(fixture["state"], selectedPresetId=None, lastDraft=sorted_keys(fixture["defaultDraft"]))
+    fresh, errors = relaunch(page, fixture, stored)
+    try:
+        keys = fresh.evaluate("(({cursorColor, palette}) => [Object.keys(cursorColor), Object.keys(palette[0])])(configHost.snapshotDraft().draft)")
+        assert keys == [["b", "g", "r"], ["at", "b", "g", "r"]], "witness: the reopened draft does not hold sorted keys: " + str(keys)
+        field(fresh, "version").locator("select").select_option("operator")
+        draft = saved(fresh)
+        assert draft["numColumns"] == operator["numColumns"], "control: Version operator did not move untouched Columns: " + str(draft["numColumns"])
+        kept = [key + "=" + json.dumps(draft[key])[:60] for key in ("cursorColor", "palette") if draft[key] != operator[key]]
+        assert not kept, "untouched editors stored with sorted keys kept the classic values on operator: " + "; ".join(kept)
+        shown = field(fresh, "cursorColor").locator('input[type="number"]').evaluate_all("nodes => nodes.map(node => Number(node.value))")
+        assert shown == [operator["cursorColor"][channel] for channel in "rgb"], "the cursor editor shows " + str(shown)
+        assert not errors, "; ".join(errors)
+    finally:
+        fresh.close()
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1224,6 +1433,12 @@ CHECKS = [
     ("Export .ps1 shows the script for manual copy when the clipboard is busy", check_export_fallback),
     ("Test status shows the command the host launched", check_test_status),
     ("Preview button says why it is disabled without web assets", check_preview_unavailable),
+    ("Every element app.js looks up has a reader", check_el_lookups),
+    ("A Control units switch keeps an untouched Bloom strength on what renders", check_controls_switch_bloom),
+    ("Typing a name in a gating select picks the option it spells", check_select_typeahead),
+    ("Colour popover sliders show a visible keyboard focus ring in both themes", check_slider_focus_ring),
+    ("Colour popover content stays inside its box", check_popover_fits),
+    ("A reopened store's sorted colour keys still follow a version switch", check_sorted_store_retarget),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
 
@@ -1248,6 +1463,8 @@ def main():
     print("PICKER", picker_source, "sha256=" + hashlib.sha256(picker_source.read_bytes()).hexdigest(), flush=True)
     page_source = CONFIGURATOR / "index.html"
     print("PAGE", page_source, "sha256=" + hashlib.sha256(page_source.read_bytes()).hexdigest(), flush=True)
+    styles_source = CONFIGURATOR / "styles.css"
+    print("STYLES", styles_source, "sha256=" + hashlib.sha256(styles_source.read_bytes()).hexdigest(), flush=True)
     print("HARNESS", HARNESS, "sha256=" + hashlib.sha256(HARNESS.with_suffix(".dll").read_bytes()).hexdigest(), flush=True)
     try:
         from playwright.sync_api import sync_playwright
@@ -1281,6 +1498,7 @@ def main():
                     assert page.request.get(origin + "/js/app.js").body() == source.read_bytes(), "served source witness mismatch"
                     assert page.request.get(origin + "/js/colorPicker.js").body() == picker_source.read_bytes(), "served colorPicker witness mismatch"
                     assert page.request.get(origin + "/index.html").body() == page_source.read_bytes(), "served index.html witness mismatch"
+                    assert page.request.get(origin + "/styles.css").body() == styles_source.read_bytes(), "served styles.css witness mismatch"
                     function(page, fixture)
                     assert not errors, "; ".join(errors)
                     print("PASS", name, flush=True)
