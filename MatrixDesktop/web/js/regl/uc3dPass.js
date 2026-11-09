@@ -1,4 +1,5 @@
 import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig } from "../uc3d/runtime.js";
+import { createErrorCheck } from "../glErrorCheck.js";
 import { createProgram } from "../webglProgram.js";
 
 // A separate WebGL scene keeps the legacy REGL intensity-channel pipeline intact.
@@ -65,10 +66,13 @@ export default async function startUC3D(canvas, config) {
     const limit = Math.min(...[gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), viewport[0], viewport[1]]
       .map(value => Number(value) > 0 ? Number(value) : Infinity));
     canvas.addEventListener("webglcontextlost", contextLost);
+    const checkErrors = createErrorCheck(gl, "UC3D", { everyFrames: runtime.config.fps });
     stop = startLoop(canvas, runtime, (frame, w, h) => {
       // The lost event is queued after isContextLost() turns true; a frame between them draws
       // nothing and must not fail, so the event can still preventDefault for the page's restore.
       if (gl.isContextLost()) return false;
+      // A frame that reallocates the render target or the geometry buffer reads its errors at once.
+      const allocates = w !== width || h !== height || frame.changed && (!native || geometrySize !== frame.grid.capacityBytes);
       if (w !== width || h !== height) {
         width = w; height = h; canvas.width = w; canvas.height = h;
         gl.bindTexture(gl.TEXTURE_2D, output); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -115,7 +119,7 @@ export default async function startUC3D(canvas, config) {
       gl.uniform4fv(compositeLocations.composition, [blur / w, blur / h, blur ? runtime.config.bloomStrength ?? 0.7 : 0, runtime.config.highPassThreshold ?? 0.1]);
       gl.uniform4fv(compositeLocations.background, [...runtime.background, runtime.desktop ? 0.72 : 0]);
       gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disableVertexAttribArray(screenPosition);
-      const error = gl.getError(); if (error !== gl.NO_ERROR) throw new Error(`UC3D WebGL error ${error}`);
+      checkErrors(allocates);
     }, cleanup, limit);
     return stop;
   } catch (error) { runtime?.diagnostics.errors.push(error.message); cleanup(); throw error; }

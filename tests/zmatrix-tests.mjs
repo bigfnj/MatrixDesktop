@@ -461,6 +461,37 @@ await test("REGL ZMatrix builds its program only through the shared createProgra
     assert.equal(released.length, 1, "the live path must release the failed shader");
   });
 });
+// AUD-52: as in uc3d-tests.mjs, the REGL pass reads getError on its first frames, on a resized
+// frame and then about once a second (glErrorCheck.js), and a recorded error still fails visibly.
+await test("REGL ZMatrix reads WebGL errors about once a second and still fails visibly on one", async () => {
+  console.log(`WITNESS ../glErrorCheck.js ${createHash("sha256").update(readFileSync(new URL("../glErrorCheck.js", root))).digest("hex")}`);
+  await withZMatrixPage(async ({ tick, diagnostics, visible }) => {
+    // 120 frames, one per 17 ms tick at fps 60. fault() records an error before frame `at`; with
+    // resize that frame also widens the canvas, so it reallocates the presented texture.
+    const run = async (at = 0, resize = false) => {
+      const gl = fakeGL(), canvas = passCanvas(gl), read = gl.getError;
+      let reads = 0;
+      gl.getError = () => { reads++; return read(); };
+      const stop = await startZMatrixREGL(canvas, { ...passConfig, fps: 60 });
+      try {
+        for (let frame = 1; frame <= 120; frame++) {
+          if (frame === at) { gl.fault(1282); if (resize) canvas.clientWidth = 60; }
+          tick(frame * 17);
+          if (diagnostics().errors.length) return { reads, frame, errors: diagnostics().errors, disposed: diagnostics().disposed, visible: visible() };
+        }
+        return { reads, frame: 0, errors: diagnostics().errors, drawn: diagnostics().frames };
+      } finally { stop(); }
+    };
+    const problems = [], quiet = await run(), late = await run(10), resized = await run(10, true);
+    assert.equal(quiet.drawn, 120, `witness: 120 ticks drew ${quiet.drawn} frames (${quiet.errors.join("; ")})`);
+    if (quiet.reads > 5) problems.push(`120 frames read getError ${quiet.reads} times, expected at most 5`);
+    if (late.frame < 10 || late.frame > 60 || late.errors[0] !== "ZMatrix WebGL error 1282" || !late.disposed)
+      problems.push(`an error recorded at frame 10 failed the scene at frame ${late.frame} (${late.errors.join("; ") || "never"}), expected by frame 60`);
+    else if (!late.visible.includes("ZMatrix rendering failed: ZMatrix WebGL error 1282")) problems.push(`no visible failure; the page shows ${JSON.stringify(late.visible)}`);
+    if (resized.frame !== 10) problems.push(`a frame that reallocates its presented texture must read errors at once; an error there failed the scene at frame ${resized.frame}`);
+    assert.ok(!problems.length, problems.join("; "));
+  });
+});
 if (!passed && !failures) { console.error("No matching ZMatrix tests ran"); failures++; }
 console.log(`ZMatrix tests: ${passed} passed, ${failures} failed`);
 if (failures) process.exitCode = 1;
