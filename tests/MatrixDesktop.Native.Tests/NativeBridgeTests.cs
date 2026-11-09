@@ -14,7 +14,8 @@ internal static class NativeBridgeTests
         ("Native bridge replaces an invalid ZMatrix phrase list with the page's default", InvalidPhrasesUseDefault),
         ("Native bridge replaces an invalid ZMatrix character list with the page's default", InvalidCharactersUseDefault),
         ("Native bridge takes the UC3D desktop from the wallpaper for wallpaper and preview hosts", DesktopSourceFollowsHostKind),
-        ("Native bridge refresh re-reads a wallpaper-sourced UC3D desktop only", RefreshRereadsWallpaperDesktop),
+        ("Native bridge refresh never re-reads a UC3D desktop", RefreshKeepsUc3dDesktop),
+        ("Native bridge is refreshable only for ZMatrix", OnlyZMatrixIsRefreshable),
         ("Native bridge bootstrap marks only wallpaper, /s and /p hosts non-interactive", InteractiveFollowsHostKind),
         ("Native bridge ZMatrix startup prepares once", ZMatrixStartupPreparesOnce),
         ("Native bridge UC3D snapshot precedes show and survives startup", Uc3dSnapshotPrecedesShow),
@@ -25,6 +26,11 @@ internal static class NativeBridgeTests
         ("Native bridge refresh rebuilds the atlases when font smoothing changes", SmoothingRefreshRebuildsAtlases),
         ("Native bridge builds edit and refresh work off the UI thread", NativeWorkRunsOffTheUiThread),
         ("Native bridge keeps atlas roles apart when their inputs match", BuiltAtlasRolesStayApart),
+        ("Native bridge same-query update follows a wallpaper change", SameQueryUpdateFollowsWallpaper),
+        ("Native bridge keeps native work off the UI thread when the environment changes mid-build", MidBuildChangesStayOffTheUiThread),
+        ("Native bridge refresh and same-query update re-resolve the atlases after a font install", FontInstallReResolvesAtlases),
+        ("Native bridge same-query update follows a font-smoothing change", SameQueryUpdateFollowsSmoothing),
+        ("Native bridge refresh republishes nothing when real GDI atlases draw the same", RealAtlasRefreshKeepsGeneration),
     ];
 
     // MainForm's startup order: the constructor runs the before-show step, then
@@ -135,24 +141,33 @@ internal static class NativeBridgeTests
         }
     }
 
-    private static void RefreshRereadsWallpaperDesktop()
+    // Production refreshes only a Refreshable (ZMatrix) bridge, and the UC3D desktop is a still
+    // snapshot, so a refresh that does reach a UC3D bridge reads nothing again and publishes nothing.
+    private static void RefreshKeepsUc3dDesktop()
     {
         const string query = "scene=uc3d&desktopBackground=true";
-        var wallpaper = new Captures();
-        using (var bridge = Bridge(NativeHostKind.Wallpaper, wallpaper))
+        foreach (var (name, kind) in new[] { ("wallpaper", NativeHostKind.Wallpaper), ("interactive", NativeHostKind.Interactive) })
         {
+            var captures = new Captures();
+            using var bridge = Bridge(kind, captures);
             bridge.Prepare(query, Virtual);
-            Refresh(bridge, query);
-            Require(wallpaper.Wallpaper + wallpaper.Screen == 2, $"A wallpaper host's refresh must re-read its desktop: {wallpaper.Wallpaper + wallpaper.Screen} reads.");
+            var before = bridge.BootstrapJson();
+            var published = Refresh(bridge, query);
+            Require(captures.Wallpaper + captures.Screen == 1 && !published && bridge.BootstrapJson() == before,
+                $"A refresh must not re-read the {name} host's UC3D desktop or republish it: {captures.Wallpaper + captures.Screen} reads, published={published}, bootstrap identical={bridge.BootstrapJson() == before}.");
         }
-        // Control: a screen copy is only clean before this window covers the screen, so it is kept.
-        var screen = new Captures();
-        using (var bridge = Bridge(NativeHostKind.Interactive, screen))
-        {
-            bridge.Prepare(query, Virtual);
-            Refresh(bridge, query);
-            Require(screen.Screen + screen.Wallpaper == 1, $"A refresh must keep a screen snapshot: {screen.Screen + screen.Wallpaper} reads.");
-        }
+    }
+
+    // The tray item and the broadcast timer refresh only while the bridge is Refreshable.
+    private static void OnlyZMatrixIsRefreshable()
+    {
+        foreach (var kind in Enum.GetValues<NativeHostKind>())
+            foreach (var (scene, refreshable) in new[] { ("zmatrix", true), ("uc3d", false), ("matrix", false) })
+            {
+                using var bridge = ZMatrixBridge(new Work(), kind);
+                bridge.Prepare("scene=" + scene, Small);
+                Require(bridge.Refreshable == refreshable, $"A {scene} bridge on a {kind} host must report Refreshable={refreshable}, got {bridge.Refreshable}.");
+            }
     }
 
     private static void InteractiveFollowsHostKind()
@@ -212,27 +227,39 @@ internal static class NativeBridgeTests
         internal int Wallpaper, Normal, Special;
         internal byte Fill = 4;
         internal string Raster = "smoothing-a";
+        // The face GDI resolves for the requested name: a substitute until a font install provides it.
+        internal string Face = "Arial";
         internal int Atlases => Normal + Special;
         // The thread each builder and each raster-settings read ran on.
         internal readonly ConcurrentQueue<(string Step, int Thread)> Threads = new();
         internal void Ran(string step) => Threads.Enqueue((step, Environment.CurrentManagedThreadId));
+        // A broadcast that lands while a build runs: Race runs inside the next Races builds of
+        // RaceStep, each after that build has made its result.
+        internal string RaceStep = "";
+        internal int Races;
+        internal Action? Race;
+        internal T Raced<T>(string step, T result)
+        {
+            if (step == RaceStep && Race is { } race && Interlocked.Decrement(ref Races) >= 0) race();
+            return result;
+        }
     }
 
-    private static NativeMediaBridge ZMatrixBridge(Work work) => new(false, NativeHostKind.Wallpaper)
+    private static NativeMediaBridge ZMatrixBridge(Work work, NativeHostKind kind = NativeHostKind.Wallpaper) => new(false, kind)
     {
         WallpaperCapture = bounds =>
         {
             work.Ran("wallpaper capture");
             Interlocked.Increment(ref work.Wallpaper);
-            return new WallpaperBackground.Capture([work.Fill, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]);
+            return work.Raced("wallpaper capture", new WallpaperBackground.Capture([work.Fill, 5, 6], bounds.Width, bounds.Height, bounds.X, bounds.Y, [0, 0, 0]));
         },
         AtlasFactory = (font, repertoire, special, dpi, path, prefix, url) =>
         {
             work.Ran(special ? "special atlas" : "normal atlas");
             if (special) Interlocked.Increment(ref work.Special); else Interlocked.Increment(ref work.Normal);
             var id = prefix + "-0";
-            return new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi },
-                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{font}|{string.Concat(repertoire)}") });
+            return work.Raced(special ? "special atlas" : "normal atlas", new GdiGlyphAtlas.Atlas(new { pages = new[] { new { url = url(id) } }, font, dpi, resolvedFace = work.Face },
+                new Dictionary<string, byte[]> { [id] = Encoding.UTF8.GetBytes($"{work.Raster}|{work.Face}|{font}|{string.Concat(repertoire)}") }));
         },
         RasterEnvironment = () => { work.Ran("raster settings read"); return work.Raster; },
     };
@@ -378,5 +405,133 @@ internal static class NativeBridgeTests
             : $"none published (warnings: {bootstrap.GetProperty("warnings")})";
         Require(work.Normal == 1 && work.Special == 1 && special.Contains("-special", StringComparison.Ordinal),
             $"Each role must publish its own atlas: normal={work.Normal}, special={work.Special}, special page {special}.");
+    }
+
+    // R2-09: the configurator re-sends the same query when its preview is shown again, so a
+    // wallpaper change in between must reach that update; one that changed nothing republishes nothing.
+    private static void SameQueryUpdateFollowsWallpaper()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        string Url() => Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!;
+        void Broadcast() => bridge.OnUserPreferenceChanged(null, new Microsoft.Win32.UserPreferenceChangedEventArgs(Microsoft.Win32.UserPreferenceCategory.Desktop));
+        Update(bridge, "scene=zmatrix");
+        var first = Url();
+        Broadcast();
+        Update(bridge, "scene=zmatrix");
+        Require(work.Wallpaper == 2 && Url() == first && Generation(bridge) == 1,
+            $"A same-query update after a broadcast must re-read the wallpaper, and an unchanged one keeps its id and generation 1: {work.Wallpaper} reads, {Url()} at generation {Generation(bridge)}.");
+        work.Fill = 9;
+        Broadcast();
+        Update(bridge, "scene=zmatrix");
+        Require(Url() != first && Served(bridge, Url()) is [9, ..] && Generation(bridge) == 2,
+            $"A same-query update after a wallpaper change must serve the new wallpaper under a new id as generation 2: {Url()} serves [{string.Join(",", Served(bridge, Url()) ?? [])}] at generation {Generation(bridge)}.");
+    }
+
+    // R2-08: a preference, display or smoothing broadcast reaches the UI thread while an edit or a
+    // refresh awaits its pool build. Whatever it expired is rebuilt on the pool, never by Prepare.
+    private static void MidBuildChangesStayOffTheUiThread()
+    {
+        var ui = Environment.CurrentManagedThreadId;
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        void Broadcast() => bridge.OnUserPreferenceChanged(null, new Microsoft.Win32.UserPreferenceChangedEventArgs(Microsoft.Win32.UserPreferenceCategory.Desktop));
+        string Wallpaper() => string.Join(",", Served(bridge, Bootstrap(bridge).GetProperty("wallpaper").GetProperty("url").GetString()!) ?? []);
+        void Leg(string name, string step, int races, Action race, Action run)
+        {
+            (work.RaceStep, work.Races, work.Race) = (step, races, race);
+            var start = work.Threads.Count;
+            run();
+            work.Race = null;
+            var inline = work.Threads.Skip(start).Where(entry => entry.Step != "raster settings read" && entry.Thread == ui).Select(entry => entry.Step).ToArray();
+            Require(inline.Length == 0, $"{name} must keep its native work off the UI thread: on it [{string.Join(", ", inline)}].");
+        }
+        var query = "scene=zmatrix&zmFont=" + Uri.EscapeDataString("{\"height\":-12}");
+        Update(bridge, "scene=zmatrix");
+        Leg("A refresh whose wallpaper changes during its pool capture", "wallpaper capture", 1, () => { work.Fill = 7; Broadcast(); }, () => Refresh(bridge, "scene=zmatrix"));
+        Require(Wallpaper().StartsWith("7,", StringComparison.Ordinal), $"That refresh must serve the wallpaper captured after the change: [{Wallpaper()}].");
+        Leg("A regular-font edit whose wallpaper changes during its pool atlas build", "normal atlas", 1, () => { work.Fill = 8; Broadcast(); }, () => Update(bridge, query));
+        Require(Wallpaper().StartsWith("8,", StringComparison.Ordinal), $"That edit must serve the wallpaper captured after the change: [{Wallpaper()}].");
+        Leg("A refresh whose font smoothing changes during its pool capture", "wallpaper capture", 1, () => work.Raster = "smoothing-b", () => Refresh(bridge, query));
+        var fonts = Served(bridge).Where(pair => pair.Key.Contains("/font-", StringComparison.Ordinal)).Select(pair => pair.Value is null ? "" : Encoding.UTF8.GetString(pair.Value)).ToArray();
+        Require(fonts.Length == 2 && fonts.All(text => text.StartsWith("smoothing-b|", StringComparison.Ordinal)),
+            $"That refresh must serve atlases built under the new smoothing: [{string.Join(", ", fonts)}].");
+        // Inputs that move on every pass: three passes, then the last one applies under its own epoch.
+        var captures = work.Wallpaper;
+        var published = false;
+        Leg("A refresh whose wallpaper changes during every pool capture", "wallpaper capture", 5, () => { work.Fill++; Broadcast(); }, () => published = Refresh(bridge, query));
+        Require(work.Wallpaper - captures == 3 && published && Wallpaper().StartsWith($"{work.Fill - 1},", StringComparison.Ordinal),
+            $"That refresh must stop after three pool captures and publish the last: {work.Wallpaper - captures} captures, published={published}, serves [{Wallpaper()}] with fill {work.Fill} current.");
+        Leg("The same-query update after it", "", 0, () => { }, () => Update(bridge, query));
+        Require(Wallpaper().StartsWith($"{work.Fill},", StringComparison.Ordinal), $"The next update must catch up with the wallpaper that changed after the last pass: [{Wallpaper()}], fill {work.Fill}.");
+    }
+
+    // The served atlas pages, as the text the stand-in wrote into them.
+    private static string[] AtlasTexts(NativeMediaBridge bridge) => Served(bridge).Where(pair => pair.Key.Contains("/font-", StringComparison.Ordinal))
+        .Select(pair => pair.Value is null ? "" : Encoding.UTF8.GetString(pair.Value)).ToArray();
+
+    // R2-07: GDI resolves a requested face through the live font table, so a font installed after
+    // an atlas was built changes what a rebuild draws. A refresh re-reads the font table, the
+    // configurator rebuilds on the install broadcast, and a rebuild that draws the same keeps its ids.
+    private static void FontInstallReResolvesAtlases()
+    {
+        var query = "scene=zmatrix&zmFont=" + Uri.EscapeDataString("{\"name\":\"Late Font\"}");
+        var work = new Work();
+        using (var bridge = ZMatrixBridge(work))
+        {
+            bridge.Prepare(query, Virtual);
+            work.Face = "Late Font";
+            var published = Refresh(bridge, query);
+            var texts = AtlasTexts(bridge);
+            Require(work.Atlases == 4 && published && Generation(bridge) == 2 && texts.Length == 2 && texts.All(text => text.Contains("|Late Font|", StringComparison.Ordinal)),
+                $"A refresh after a font install must re-resolve and publish both atlases: atlases={work.Atlases}, published={published}, generation={Generation(bridge)}, serves [{string.Join(", ", texts)}].");
+        }
+        var preview = new Work();
+        using (var bridge = ZMatrixBridge(preview))
+        {
+            void Installed() => bridge.OnInstalledFontsChanged(null, EventArgs.Empty);
+            string Ids() => string.Join(",", Served(bridge).Keys);
+            Update(bridge, query);
+            var ids = Ids();
+            Installed();
+            Update(bridge, query);
+            Update(bridge, query);
+            Require(preview.Atlases == 4 && Ids() == ids && Generation(bridge) == 1,
+                $"After an install that left the face alone, the same-query update must rebuild both atlases once and keep their ids at generation 1: atlases={preview.Atlases}, ids [{Ids()}] were [{ids}], generation {Generation(bridge)}.");
+            preview.Face = "Late Font";
+            Installed();
+            Update(bridge, query);
+            var texts = AtlasTexts(bridge);
+            Require(texts.Length == 2 && texts.All(text => text.Contains("|Late Font|", StringComparison.Ordinal)) && Generation(bridge) == 2,
+                $"After an install that provides the face, the same-query update must serve atlases drawn with it as generation 2: [{string.Join(", ", texts)}] at generation {Generation(bridge)}.");
+        }
+    }
+
+    // A smoothing change need not come with a broadcast the bridge listens to, and colour mode has
+    // no wallpaper to expire, so the same-query update compares the smoothing its atlases used.
+    private static void SameQueryUpdateFollowsSmoothing()
+    {
+        var work = new Work();
+        using var bridge = ZMatrixBridge(work);
+        Update(bridge, "scene=zmatrix");
+        work.Raster = "smoothing-b";
+        Update(bridge, "scene=zmatrix");
+        var texts = AtlasTexts(bridge);
+        Require(work.Atlases == 4 && texts.Length == 2 && texts.All(text => text.StartsWith("smoothing-b|", StringComparison.Ordinal)),
+            $"A same-query update after a smoothing change must serve atlases built under it: atlases={work.Atlases}, serves [{string.Join(", ", texts)}].");
+    }
+
+    // Every refresh rebuilds the atlases for the font table, so the identical-output reuse must
+    // hold for the real GDI atlas and its metadata, or each refresh would republish and the
+    // ZMatrix page would discard its raster.
+    private static void RealAtlasRefreshKeepsGeneration()
+    {
+        const string query = "scene=zmatrix";
+        using var bridge = Bridge(NativeHostKind.Wallpaper, new Captures());
+        bridge.Prepare(query, Virtual);
+        var before = bridge.BootstrapJson();
+        var published = Refresh(bridge, query);
+        Require(Bootstrap(bridge).GetProperty("zmatrixFonts").ValueKind == JsonValueKind.Object && !published && bridge.BootstrapJson() == before,
+            $"A refresh over unchanged real GDI atlases must keep generation 1 and not publish: published={published}, generation={Generation(bridge)}, warnings {Bootstrap(bridge).GetProperty("warnings")}.");
     }
 }
