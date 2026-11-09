@@ -10,6 +10,11 @@
 // after a WebGPU device loss. Past the budget it shows a persistent notice instead.
 export const RECOVERY_KEY = "matrixRendererRecoveries";
 
+// The notice for a renderer the page cannot bring back: the budget below is spent, or the browser
+// refuses the page a new WebGL context, which no reload can change (rendererLoader.js, R2-55).
+export const unrecoverable = (reason, options) =>
+	new Error(`the GPU renderer was lost (${reason}) and could not be recovered automatically. Restart MatrixDesktop to try again.`, options);
+
 export default ({
 	target, // window: capture listeners see context events from any canvas in the page
 	storage, // () => sessionStorage; may throw
@@ -42,7 +47,7 @@ export default ({
 		} catch {
 			// No storage: an unbounded reload loop would be worse than the notice.
 		}
-		showError(new Error(`the GPU renderer was lost (${reason}) and could not be recovered automatically. Restart MatrixDesktop to try again.`));
+		showError(unrecoverable(reason));
 	};
 	// preventDefault asks the browser to restore the context; restoration then reloads.
 	target.addEventListener("webglcontextlost", (event) => {

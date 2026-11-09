@@ -1185,12 +1185,133 @@ def check_image_effect_offline(browser, origin):
             page.close()
 
 
+# Every WebGL context request returns null and WebGPU is absent, as in a page Chromium blocks
+# from 3D APIs for the rest of the session after repeated GPU resets.
+REFUSE_3D = """(() => {
+  const getContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+    return /webgl/i.test(String(type)) ? null : getContext.call(this, type, ...rest);
+  };
+  Object.defineProperty(Navigator.prototype, 'gpu', { configurable: true, get: () => undefined });
+})();"""
+
+
+def check_refused_webgl_context(browser, origin):
+    """A page refused every 3D context gets the restart notice, not a TypeError (R2-55).
+
+    The AUD-19 recovery reload after a second GPU reset lands in such a page; REGL then failed
+    on its null context and the page said "Cannot read properties of null (reading 'on')"
+    instead of asking for the restart that a new browser process needs.
+    """
+    name = "a page refused every WebGL context shows the restart notice"
+    problems, seen = [], []
+    for scene, extra in (("matrix", ""), ("matrix", "&renderer=webgpu"), ("uc3d", ""), ("zmatrix", "")):
+        leg = f"{scene}{extra}"
+        page = browser.new_page(viewport={"width": 480, "height": 360})
+        errors, navigations = [], []
+        page.on("pageerror", lambda e, errors=errors: errors.append(f"page error: {e}"))
+        page.on("console", lambda m, errors=errors: errors.append(m.text) if "Cannot read properties" in m.text else None)
+        page.on("framenavigated", lambda f, page=page, navigations=navigations: navigations.append(f.url) if f == page.main_frame else None)
+        try:
+            page.add_init_script(REFUSE_3D)
+            page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&scene={scene}{extra}", wait_until="load")
+            try:
+                page.wait_for_function("document.querySelector('.notice') != null", timeout=20000)
+            except Exception:
+                problems.append(f"{leg}: no notice within 20 s")
+                continue
+            page.wait_for_timeout(500)
+            state = page.evaluate("""() => ({
+                refused: document.createElement('canvas').getContext('webgl') === null,
+                notice: [...document.querySelectorAll('.notice')].map(n => n.textContent.trim()).join(' | '),
+                diagnostics: window.matrixRuntimeDiagnostics?.errors ?? null,
+                stamps: sessionStorage.getItem('matrixRendererRecoveries') })""")
+            if not state["refused"]:
+                problems.append(f"{leg}: witness failed, the page still gets a WebGL context")
+                continue
+            restart = "could not be recovered automatically" in state["notice"] and "Restart MatrixDesktop" in state["notice"]
+            if not restart:
+                problems.append(f"{leg}: the notice says '{state['notice']}'")
+            if scene == "matrix" and len(state["diagnostics"] or []) != 1:
+                problems.append(f"{leg}: diagnostics recorded {state['diagnostics']}, expected one error")
+            leaked = [text for text in [state["notice"], *(state["diagnostics"] or []), *errors]
+                      if "Cannot read properties" in text or text.startswith("page error:")]
+            if leaked:
+                problems.append(f"{leg}: {leaked[0]}")
+            if len(navigations) != 1 or state["stamps"] is not None:
+                problems.append(f"{leg}: {len(navigations)} navigation(s) and recovery stamps {state['stamps']}; expected no reload")
+            if restart and not page.evaluate(NOTICE_IN_VIEW, "Restart MatrixDesktop")["inView"]:
+                problems.append(f"{leg}: the notice is outside the viewport")
+            seen.append(leg)
+        finally:
+            page.close()
+    if problems:
+        fail(name, " | ".join(problems))
+    else:
+        ok(name, ", ".join(seen))
+
+
+def check_no_favicon_request(browser, origin):
+    """index.html declares an empty icon, so the browser never asks for /favicon.ico (R2-56).
+
+    web/ ships no favicon, so every app launch logged net::ERR_FILE_NOT_FOUND for it beside the
+    errors that matter. The headless shell never fetches favicons and Playwright's request events
+    miss the browser's own fetch, so this check runs the full Chromium build headless and reads
+    CDP. The same page with its icon link stripped must make the request, or a pass means nothing.
+    """
+    import re
+
+    name = "index.html makes no /favicon.ico request"
+    try:
+        full = browser.browser_type.launch(channel="chromium", args=["--use-gl=angle", "--use-angle=swiftshader",
+                                                                     "--enable-unsafe-swiftshader"])
+    except Exception as exc:
+        fail(name, f"the full Chromium build would not start ({type(exc).__name__}), and the headless shell never "
+                   "requests a favicon; install it with: python -m playwright install chromium")
+        return
+
+    def strip_icon(route):
+        response = route.fetch()
+        route.fulfill(response=response, body=re.sub(r'\s*<link rel="icon"[^>]*>', "", response.text()))
+
+    requested = {}
+    try:
+        # The shipped page first: a favicon that failed once may not be fetched again.
+        for label in ("as shipped", "icon link stripped"):
+            page = full.new_page(viewport={"width": 480, "height": 360})
+            seen = requested[label] = []
+            try:
+                if label != "as shipped":
+                    page.route("**/index.html*", strip_icon)
+                cdp = page.context.new_cdp_session(page)
+                cdp.on("Network.requestWillBeSent", lambda e, seen=seen: seen.append(e["request"]["url"])
+                       if e["request"]["url"].split("?")[0].endswith("/favicon.ico") else None)
+                cdp.send("Network.enable")
+                page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+                for _ in range(12):  # the fetch follows the load event within milliseconds
+                    if seen:
+                        break
+                    page.wait_for_timeout(250)
+            finally:
+                page.close()
+    finally:
+        full.close()
+    if requested["as shipped"]:
+        fail(name, f"the shipped page requested {requested['as shipped'][0]}")
+    elif not requested["icon link stripped"]:
+        fail(name, "witness failed: without its icon link the page made no /favicon.ico request either")
+    else:
+        ok(name, f"the stripped page requested it {len(requested['icon link stripped'])}x")
+
+
 def check_startup_paths(browser, origin):
     check_config_error_boundary(browser, origin)
     check_plug_me_in(browser, origin)
     check_noninteractive_software_start(browser, origin)
     check_context_loss_recovery(browser, origin)
     check_image_effect_offline(browser, origin)
+    check_refused_webgl_context(browser, origin)
+    check_no_favicon_request(browser, origin)
 
 
 def main():

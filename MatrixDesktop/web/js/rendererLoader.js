@@ -1,3 +1,12 @@
+import { unrecoverable } from "./rendererRecovery.js";
+
+// R2-55: after repeated GPU resets Chromium refuses the page every new 3D context for the rest of
+// the browser session, so a recovery reload starts a renderer that has nothing to draw with and
+// only a restart (a new browser process) helps. A detached canvas asks without touching the page.
+const webglRefused = (doc) => {
+	try { return doc.createElement("canvas").getContext("webgl") == null; } catch { return false; }
+};
+
 // Chooses the renderer backend for main.js and owns the WebGPU-to-REGL fallback.
 // A canvas WebGPU has claimed answers getContext("webgl") with null for good, even
 // after unconfigure(), and createREGL then returns null without throwing, so the
@@ -33,8 +42,9 @@ export default async (canvas, config, useWebGPU, {
 		const reglModule = await importRegl();
 		await reglModule.default(canvas, config);
 	} catch (err) {
-		if (webgpuError == null) throw err;
-		throw new Error(`${reason(err)} (after WebGPU failed: ${reason(webgpuError)})`, { cause: err });
+		const failure = webglRefused(canvas.ownerDocument) ? unrecoverable("the browser refused a new WebGL context", { cause: err }) : err;
+		if (webgpuError == null) throw failure;
+		throw new Error(`${reason(failure)} (after WebGPU failed: ${reason(webgpuError)})`, { cause: failure });
 	} finally {
 		// regl/main.js replaces the diagnostics object; keep why WebGPU was abandoned.
 		if (webgpuError != null && globalThis.matrixRuntimeDiagnostics) {
