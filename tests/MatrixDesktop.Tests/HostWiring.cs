@@ -72,6 +72,62 @@ internal static class HostWiring
             Check.True(mainFormConstructors.Count > 0, "witness: the scan must see MainForm's constructors at all");
             Check.False(mainFormConstructors.Contains("Public"), "only MatrixApplicationContext may construct MainForm: " + string.Join(", ", mainFormConstructors));
         });
+        // R2-54. OnRendererFailed releases the wallpaper mouse hook before its surface goes;
+        // RecoverSurface did not, so the rebuild's synchronous desktop capture ran with the hook
+        // installed and every mouse event waited on the blocked UI thread. The ldc.i4.0 right
+        // before the call is the false argument.
+        failures += Run($"a surface rebuild releases the wallpaper mouse hook first: {path}", () =>
+        {
+            const string setEnabled = "MatrixDesktop.DesktopPointerBridge::SetEnabled";
+            static bool Releases(Call call) => call.Callee == setEnabled && call.PreviousOpcode == OpCodes.Ldc_I4_0.Value;
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::OnRendererFailed" && Releases(call)),
+                "witness: the scan must see OnRendererFailed release the hook with SetEnabled(false)");
+            var body = calls.Where(call => call.Caller == "MatrixDesktop.MatrixApplicationContext::RecoverSurface").ToList();
+            var close = body.FirstOrDefault(call => call.Callee == FormClose);
+            var rebuild = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.MatrixApplicationContext::TryCreateSurface");
+            Check.True(close is not null && rebuild is not null, "witness: the scan must see RecoverSurface close the old surface and build the new one");
+            var release = body.FirstOrDefault(Releases);
+            Check.True(release is not null, "RecoverSurface must release the wallpaper mouse hook with SetEnabled(false)");
+            Check.True(release!.Offset < close!.Offset && release.Offset < rebuild!.Offset,
+                "RecoverSurface must release the hook before it closes the old surface and builds the new one");
+        });
+        // R2-51. HostPermissionPolicy has its own native test; this proves MainForm asks it about
+        // every permission request and applies the answer it gives.
+        failures += Run($"MainForm answers permission requests through HostPermissionPolicy: {path}", () =>
+        {
+            const string core = "Microsoft.Web.WebView2.Core.CoreWebView2::";
+            const string request = "Microsoft.Web.WebView2.Core.CoreWebView2PermissionRequestedEventArgs::";
+            const string decide = "MatrixDesktop.HostPermissionPolicy::Decide";
+            Check.True(calls.Any(call => call.Caller.StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal) && call.Callee == core + "add_PermissionRequested"),
+                "MainForm must subscribe CoreWebView2.PermissionRequested");
+            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::DetachWebViewHandlers" && call.Callee == core + "remove_PermissionRequested"),
+                "MainForm must detach its PermissionRequested handler with the others");
+            var handlers = calls.Where(call => call.Callee == decide).Select(call => call.Caller).Distinct().ToArray();
+            Check.True(handlers.Length == 1 && handlers[0].StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal),
+                "exactly one MainForm handler must ask HostPermissionPolicy.Decide: " + string.Join("; ", handlers));
+            var body = calls.Where(call => call.Caller == handlers[0]).ToList();
+            var asked = body.First(call => call.Callee == decide);
+            foreach (var setter in new[] { "set_State", "set_SavesInProfile", "set_Handled" })
+                Check.True(body.Any(call => call.Callee == request + setter && call.Offset > asked.Offset), $"the handler must apply the policy's answer through {setter}");
+        });
+        // R2-52. HostPermissionPolicy.ForgetsSavedState has its own native test; this proves each
+        // WebView2 initialisation clears what it picks, to the Default state, before navigating.
+        failures += Run($"MainForm clears a saved camera denial before it navigates: {path}", () =>
+        {
+            const string profile = "Microsoft.Web.WebView2.Core.CoreWebView2Profile::";
+            const string forget = "MatrixDesktop.MainForm::ForgetSavedCameraDenialAsync";
+            var init = calls.Where(call => call.Caller.StartsWith("MatrixDesktop.MainForm/<InitializeCurrentWebViewAsync>", StringComparison.Ordinal)).ToList();
+            var navigate = init.FirstOrDefault(call => call.Callee == "Microsoft.Web.WebView2.Core.CoreWebView2::Navigate");
+            Check.True(navigate is not null, "witness: the scan must see InitializeCurrentWebViewAsync navigate");
+            var cleared = init.FirstOrDefault(call => call.Callee == forget);
+            Check.True(cleared is not null && cleared.Offset < navigate!.Offset, "InitializeCurrentWebViewAsync must clear a saved camera denial before it navigates");
+            var helper = calls.Where(call => call.Caller.StartsWith("MatrixDesktop.MainForm/<ForgetSavedCameraDenialAsync>", StringComparison.Ordinal)).ToList();
+            var read = helper.FirstOrDefault(call => call.Callee == profile + "GetNonDefaultPermissionSettingsAsync");
+            var decided = helper.FirstOrDefault(call => call.Callee == "MatrixDesktop.HostPermissionPolicy::ForgetsSavedState");
+            Check.True(read is not null && decided is not null && decided.Offset > read.Offset, "the helper must read the saved settings and ask HostPermissionPolicy which to clear");
+            Check.True(helper.Any(call => call.Callee == profile + "SetPermissionStateAsync" && call.PreviousOpcode == OpCodes.Ldc_I4_0.Value && call.Offset > decided!.Offset),
+                "the helper must reset what the policy picks to CoreWebView2PermissionState.Default (0), which erases the saved state");
+        });
         failures += Run($"SystemEvents session and power subscriptions have one owner: {path}", () =>
         {
             foreach (var subscribe in new[] { "Microsoft.Win32.SystemEvents::add_SessionSwitch", "Microsoft.Win32.SystemEvents::add_PowerModeChanged" })

@@ -41,6 +41,7 @@ public sealed class MainForm : Form
     private EventHandler<CoreWebView2NewWindowRequestedEventArgs>? _newWindowRequestedHandler;
     private EventHandler<CoreWebView2NavigationStartingEventArgs>? _navigationStartingHandler;
     private EventHandler<CoreWebView2ProcessFailedEventArgs>? _processFailedHandler;
+    private EventHandler<CoreWebView2PermissionRequestedEventArgs>? _permissionRequestedHandler;
     // The page this surface navigated to, so a lost renderer can be sent back to it.
     private string? _rendererTarget;
 
@@ -50,6 +51,8 @@ public sealed class MainForm : Form
     private Shared.AppWindowIcon? _windowIcon;
 
     private readonly Shared.NativeMediaBridge _mediaBridge;
+    // The bridge's host kind, also what decides the permission prompts this host answers itself.
+    private readonly Shared.NativeHostKind _hostKind;
 
     private static string? _cachedUserDataFolder;
 
@@ -63,7 +66,8 @@ public sealed class MainForm : Form
 
         var effectiveArgs = ScreensaverWindowPolicy.EffectiveArguments(launchPlan);
         _appOptions = AppCli.Parse(effectiveArgs, out var passthroughArgs);
-        _mediaBridge = new(preview: false, MediaHostKind.For(launchPlan, _appOptions.WindowMode == WindowMode.Wallpaper));
+        _hostKind = MediaHostKind.For(launchPlan, _appOptions.WindowMode == WindowMode.Wallpaper);
+        _mediaBridge = new(preview: false, _hostKind);
         if (IsWallpaper || launchPlan.IsPreview)
         {
             TopLevel = false;
@@ -787,6 +791,26 @@ public sealed class MainForm : Form
         };
         _webView.CoreWebView2.ProcessFailed += _processFailedHandler;
 
+        // R2-51: a wallpaper, /s or /p host cannot show WebView2's camera prompt, and the renderer
+        // awaits getUserMedia, which never settles while that prompt is pending. Those hosts answer
+        // through HostPermissionPolicy without UI; interactive hosts keep the prompt.
+        _permissionRequestedHandler = (_, request) =>
+        {
+            var answer = HostPermissionPolicy.Decide(_hostKind, request.PermissionKind);
+            if (!answer.Handled) return;
+            try
+            {
+                request.State = answer.State;
+                request.SavesInProfile = answer.SavesInProfile;
+                request.Handled = true;
+                Shared.Logger.Info($"Answered a {request.PermissionKind} request with {answer.State} and no prompt: this host cannot show one.");
+            }
+            catch (Exception error) { Shared.Logger.Warn($"Could not answer a {request.PermissionKind} request: {error.Message}"); }
+        };
+        _webView.CoreWebView2.PermissionRequested += _permissionRequestedHandler;
+        await ForgetSavedCameraDenialAsync(_webView.CoreWebView2);
+        if (_isShuttingDown || IsDisposed) return;
+
         string webRoot;
         try
         {
@@ -844,6 +868,29 @@ public sealed class MainForm : Form
         if (_rendererTarget is null) return true;
         try { _webView.CoreWebView2.Navigate(_rendererTarget); return true; }
         catch (Exception error) { Shared.Logger.Warn($"Could not reload the renderer: {error.Message}"); return false; }
+    }
+
+    // R2-52: one Block on WebView2's camera prompt was saved in the profile every host shares and
+    // switched the Mirror camera off for good. Before each navigation, a saved camera denial for
+    // this app is cleared (HostPermissionPolicy decides which), so the Camera setting decides again
+    // and the next interactive launch that asks shows the prompt. A saved Allow is kept.
+    private static async Task ForgetSavedCameraDenialAsync(CoreWebView2 core)
+    {
+        try
+        {
+            var profile = core.Profile;
+            foreach (var setting in await profile.GetNonDefaultPermissionSettingsAsync())
+            {
+                if (!HostPermissionPolicy.ForgetsSavedState(setting.PermissionKind, setting.PermissionState, setting.PermissionOrigin, HostOriginPrefix)) continue;
+                await profile.SetPermissionStateAsync(setting.PermissionKind, setting.PermissionOrigin, CoreWebView2PermissionState.Default);
+                Shared.Logger.Info($"Cleared a saved {setting.PermissionKind} denial for {setting.PermissionOrigin}; the next request asks again.");
+            }
+        }
+        catch (Exception error)
+        {
+            // A runtime without permission management, or a browser process that went away.
+            Shared.Logger.Warn($"Could not clear a saved camera denial: {error.Message}");
+        }
     }
 
     private async Task RetryWebViewInitializationAfterCatastrophicFailureAsync(COMException firstException)
@@ -933,6 +980,12 @@ public sealed class MainForm : Form
             {
                 try { core.ProcessFailed -= _processFailedHandler; } catch { }
                 _processFailedHandler = null;
+            }
+
+            if (_permissionRequestedHandler is not null)
+            {
+                try { core.PermissionRequested -= _permissionRequestedHandler; } catch { }
+                _permissionRequestedHandler = null;
             }
         }
         catch
