@@ -68,6 +68,32 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+# Errors a handler raised other than a client hanging up; main() reports them as a FAIL.
+server_errors = []
+
+
+class _QuietServer(http.server.ThreadingHTTPServer):
+    """A static server whose handler threads write nothing to stderr (R2-49).
+
+    socketserver's handle_error prints a traceback to stderr from the handler thread. A page
+    closed while it still loads aborts its transfers, so each run wrote 5-6 of them, and from
+    daemon threads such a write can land while the interpreter finalizes and kill the process
+    ("could not acquire lock for <stderr>"). A client hanging up is expected and only counted;
+    anything else is recorded. Handler threads are not daemons, so server_close() waits for
+    them.
+    """
+
+    daemon_threads = False
+    hangups = 0
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            self.hangups += 1
+            return
+        server_errors.append(f"{client_address[0]}:{client_address[1]} {error!r}")
+
+
 def serve(directory):
     """A localhost origin, because <script type="module"> will not load over file://."""
     handler = functools.partial(_QuietHandler, directory=str(directory))
@@ -75,25 +101,39 @@ def serve(directory):
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    httpd = _QuietServer(("127.0.0.1", port), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{port}"
 
 
+def close_server(httpd):
+    """Stop serving, then wait for every handler thread, so none is still running (or
+    recording an error) once this returns."""
+    httpd.shutdown()
+    httpd.server_close()
+
+
 def check_server_is_quiet():
-    """serve() answers a found and a missing path without writing anything to stderr."""
+    """serve() answers a found and a missing path, and a client that resets a transfer, without
+    writing anything to stderr, and close_server() waits for the handler threads."""
     import contextlib
+    import os
+    import struct
     import tempfile
     import urllib.error
     import urllib.request
 
     captured = io.StringIO()
     statuses = []
+    errors_before = len(server_errors)
+    handlers = lambda: [t for t in threading.enumerate() if t.name.endswith("(process_request_thread)")]
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
         (Path(folder) / "present.txt").write_text("present", encoding="utf-8")
-        httpd, origin = serve(folder)
-        try:
-            with contextlib.redirect_stderr(captured):
+        (Path(folder) / "big.bin").write_bytes(bytes(8 * 1024 * 1024))
+        # Everything up to the last handler finishing is captured, close_server() included.
+        with contextlib.redirect_stderr(captured):
+            httpd, origin = serve(folder)
+            try:
                 with urllib.request.urlopen(f"{origin}/present.txt", timeout=10) as response:
                     response.read()
                     statuses.append(response.status)
@@ -102,17 +142,49 @@ def check_server_is_quiet():
                     statuses.append(200)
                 except urllib.error.HTTPError as error:
                     statuses.append(error.code)
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+                # A page closed while it loads hangs up mid-transfer. This client reads only
+                # the status line, so copyfile blocks on the full socket, and resets the
+                # connection (SO_LINGER 0) 0.5 s later, while close_server() is waiting.
+                client = socket.create_connection(httpd.server_address, timeout=10)
+                try:
+                    client.sendall(b"GET /big.bin HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    statuses.append(int(client.recv(64)[9:12]))  # HTTP/1.x status code
+                    running = handlers()
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                      struct.pack("hh" if os.name == "nt" else "ii", 1, 0))
+                finally:
+                    threading.Timer(0.5, client.close).start()
+                # Any other handler error is recorded for main(), not printed.
+                try:
+                    raise OSError("synthetic handler error")
+                except OSError:
+                    httpd.handle_error(None, ("127.0.0.1", 0))
+            finally:
+                close_server(httpd)
+            outlived = handlers()
+            for thread in outlived:
+                thread.join(10)
     noise = [line for line in captured.getvalue().splitlines() if line.strip()]
-    if statuses != [200, 404]:
-        fail("the static server writes nothing to stderr", f"expected statuses [200, 404], got {statuses}")
+    errors = server_errors[errors_before:]
+    del server_errors[errors_before:]
+    name = "the static server writes nothing to stderr"
+    if statuses != [200, 404, 200]:
+        fail(name, f"expected statuses [200, 404, 200], got {statuses}")
     elif noise:
-        fail("the static server writes nothing to stderr",
-             f"{len(noise)} stderr line(s) for two requests, first: {noise[0]}")
+        fail(name, f"{len(noise)} stderr line(s) for three requests, first: {noise[0]}")
+    elif errors != ["127.0.0.1:0 OSError('synthetic handler error')"]:
+        fail(name, f"expected only the synthetic handler error to be recorded, got {errors}")
+    elif httpd.hangups < 1:
+        fail(name, "the reset transfer never reached handle_error, so it was not exercised")
     else:
-        ok("the static server writes nothing to stderr", "one 200 and one 404 request")
+        ok(name, "one 200, one 404, one transfer the client reset, one handler error recorded")
+    name = "the static server waits for its handler threads on close"
+    if not running:
+        fail(name, "no handler thread was visible mid-transfer, so none could be seen to outlive close")
+    elif outlived:
+        fail(name, f"{len(outlived)} handler thread(s) still running after server_close()")
+    else:
+        ok(name, "a handler blocked mid-transfer finished before server_close() returned")
 
 
 STUB = """
@@ -759,30 +831,47 @@ def check_matrix_web(page, origin):
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
     page.on("pageerror", lambda e: errors.append(str(e)))
 
-    page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40", wait_until="load")
+    # An explicit resolution, so the expected size below does not depend on config.js's default.
+    resolution = 0.5
+    page.goto(f"{origin}/index.html?suppressWarnings=true&numColumns=40&resolution={resolution}", wait_until="load")
     try:
         page.wait_for_function("document.querySelector('canvas') != null", timeout=20000)
     except Exception:
         fail("matrix web bundle creates a canvas", "no canvas after 20s; " + "; ".join(errors[:3]) + "; url=" + page.url)
         return
 
-    page.wait_for_timeout(3000)
+    # R2-50: the canvas exists, at the element's default 300x150, before any renderer sizes it,
+    # so a fixed 3 s wait read an unsized canvas as sized under load. ready is set from the
+    # first frame, after the first resize. Two seconds of the renderer's own clock keep the
+    # console-error window as long as the old wait, counted from the renderer's start, and the
+    # deadline makes a renderer that never starts a named failure, not a hang.
+    try:
+        page.wait_for_function(READY + " && window.matrixRuntimeDiagnostics.simulationTime >= 2", timeout=60000)
+        stalled = None
+    except Exception:
+        stalled = page.evaluate("JSON.stringify({frames: window.matrixRuntimeDiagnostics?.frames ?? 0,"
+                                " errors: window.matrixRuntimeDiagnostics?.errors ?? []})")
 
     if errors:
         fail("matrix web bundle loads without console errors", "; ".join(errors[:3]))
     else:
         ok("matrix web bundle loads without console errors")
 
-    drawn = page.evaluate("""() => {
+    if stalled is not None:
+        fail("matrix web bundle sizes its canvas", f"no renderer drew 2 s of frames within 60 s: {stalled}")
+        return
+    size = page.evaluate("""r => {
         const c = document.querySelector('canvas');
-        if (!c) return { ok: false, why: 'no canvas' };
-        if (c.width < 2 || c.height < 2) return { ok: false, why: `canvas is ${c.width}x${c.height}` };
-        return { ok: true, why: `${c.width}x${c.height}` };
-    }""")
-    if drawn["ok"]:
-        ok("matrix web bundle sizes its canvas", drawn["why"])
+        return { width: c.width, height: c.height,
+                 expectedWidth: Math.ceil(c.clientWidth * devicePixelRatio * r),
+                 expectedHeight: Math.ceil(c.clientHeight * devicePixelRatio * r) };
+    }""", resolution)
+    actual, expected = f"{size['width']}x{size['height']}", f"{size['expectedWidth']}x{size['expectedHeight']}"
+    if abs(size["width"] - size["expectedWidth"]) <= 1 and abs(size["height"] - size["expectedHeight"]) <= 1:
+        ok("matrix web bundle sizes its canvas", f"{actual} at resolution {resolution}")
     else:
-        fail("matrix web bundle sizes its canvas", drawn["why"])
+        fail("matrix web bundle sizes its canvas",
+             f"{actual}, expected {expected} (client size x devicePixelRatio x resolution {resolution})")
 
 
 NOTICE_IN_VIEW = ("text => { const n = [...document.querySelectorAll('.notice')].find(n => n.textContent.includes(text)); "
@@ -1163,8 +1252,11 @@ def main():
 
             browser.close()
     finally:
-        cfg_httpd.shutdown()
-        web_httpd.shutdown()
+        close_server(cfg_httpd)
+        close_server(web_httpd)
+    if server_errors:
+        fail("the static servers raise nothing but client hang-ups",
+             f"{len(server_errors)} handler error(s), first: {server_errors[0]}")
 
     print()
     if failures:

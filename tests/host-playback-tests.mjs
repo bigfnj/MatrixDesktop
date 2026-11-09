@@ -40,7 +40,21 @@ console.log("PASS host playback clock: pause, between-frame pause, resume, initi
   const source = await readFile(new URL("../MatrixDesktop/MainForm.cs", import.meta.url), "utf8");
   const match = source.match(/ExecuteScriptAsync\(\$"(window\.matrixHostPlaybackState=\{state\};[^"]*)"\)/);
   assert(match, "MainForm.SetHostPausedAsync's pause script was not found");
-  const hostScript = (paused) => match[1].replace("{state}", JSON.stringify({ paused, reason: "test" })).replaceAll("{{", "{").replaceAll("}}", "}");
+  // R2-48: {state} is the host's own payload, not one written here, so a renamed parameter or
+  // field, or a changed value, fails the pause below. The anonymous type's members are read from
+  // SetHostPausedAsync and evaluated as JavaScript with the arguments a tray pause and resume pass
+  // (MatrixApplicationContext.ReconcilePauseAsync); System.Text.Json's default options keep each
+  // member's C# name, and any other Serialize form fails here instead of being guessed.
+  const method = source.match(/SetHostPausedAsync\(bool (\w+), bool (\w+), string (\w+)\)\s*\{([\s\S]*?)ExecuteScriptAsync\(\$"window\.matrixHostPlaybackState=\{state\};/);
+  const payload = method?.[4].match(/var state = (?:System\.Text\.Json\.)?JsonSerializer\.Serialize\(new \{ ([^{}]*) \}\);/);
+  assert(payload, "SetHostPausedAsync's payload (var state = JsonSerializer.Serialize(new { ... }); before its pause script) was not found");
+  const members = payload[1].split(",").map((member) => member.trim().replace(/^(\w+)\s*=\s*/, "$1: ")).join(", ");
+  const hostState = (...args) => {
+    try { return new Function(method[1], method[2], method[3], `return JSON.stringify({ ${members} });`)(...args); }
+    catch (error) { assert.fail(`SetHostPausedAsync's payload new { ${payload[1]} } could not be evaluated as JavaScript (${error.message}); update this check`); }
+  };
+  const pauseState = hostState(true, false, "Manual"), resumeState = hostState(false, false, "None");
+  const hostScript = (paused) => match[1].replace("{state}", paused ? pauseState : resumeState).replaceAll("{{", "{").replaceAll("}}", "}");
   const webview = new EventTarget(), pointerEvents = [];
   const window = Object.assign(new EventTarget(), { chrome: { webview } });
   const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }), dispatchEvent: (event) => pointerEvents.push(event.type) };
@@ -53,9 +67,9 @@ console.log("PASS host playback clock: pause, between-frame pause, resume, initi
     message({ type: "matrix-host-state", paused: true });
     assert.deepEqual(states, [false], "a matrix-host-state web message has no host sender and must not pause");
     new Function("window", "CustomEvent", hostScript(true))(window, CustomEvent);
-    assert.deepEqual(states, [false, true], "the host's ExecuteScriptAsync pause script must pause");
+    assert.deepEqual(states, [false, true], `the host's ExecuteScriptAsync pause script must pause (host payload ${pauseState})`);
     new Function("window", "CustomEvent", hostScript(false))(window, CustomEvent);
-    assert.deepEqual(states, [false, true, false], "the host's resume script must resume");
+    assert.deepEqual(states, [false, true, false], `the host's resume script must resume (host payload ${resumeState})`);
     message({ type: "matrix-host-pointer", eventType: "move", x: 5, y: 5, viewportWidth: 10, viewportHeight: 10, button: 0 });
     assert(pointerEvents.includes("pointermove"), "pointer web messages must still reach the canvas");
   } finally { delete globalThis.window; delete globalThis.document; delete globalThis.MouseEvent; }
