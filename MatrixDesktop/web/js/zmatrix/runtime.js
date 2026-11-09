@@ -2,7 +2,7 @@ import { normalizeZMatrixSettings } from "./settings.js";
 import { createScene } from "./scene.js";
 import { createSurface, fitSurface, MAX_SURFACE_PIXELS } from "./surface.js";
 import { loadFonts, decodeImage } from "./fonts.js";
-import { createPlaybackClock } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback } from "../hostPlayback.js";
 import { showRenderFailure } from "../renderFailure.js";
 
 // Every asynchronous generation has one owner. Obsolete loads must dispose
@@ -165,10 +165,10 @@ export async function createRuntime(canvas, options, backend, maximumDimension =
 export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
   const clock = environment.clock ?? createPlaybackClock();
   const requested = Number(runtime.config.fps ?? 60), fps = Number.isFinite(requested) ? Math.max(0, Math.min(120, requested)) : 60;
-  let frame = 0, dead = false, previous = -Infinity, warmed = false;
+  let frame = 0, dead = false, parked = false, previous = -Infinity, warmed = false;
   const dispose = () => {
     if (dead) return; dead = true; cancelAnimationFrame(frame); window.removeEventListener("pagehide", dispose);
-    clock.dispose(); runtime.dispose(); cleanup();
+    unsubscribe(); clock.dispose(); runtime.dispose(); cleanup();
   };
   const present = state => {
     if (!state || dead) return;
@@ -190,7 +190,9 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
   const tick = now => {
     if (dead) return;
     const seconds = clock.seconds(now);
-    if (!clock.paused && (fps === 0 || runtime.config.once || now - previous >= 1000 / fps - .5)) {
+    // A paused host keeps the last frame on screen: park without requesting another frame.
+    if (clock.paused) { parked = true; return; }
+    if (fps === 0 || runtime.config.once || now - previous >= 1000 / fps - .5) {
       try {
         let state = runtime.update(seconds);
         if ((runtime.config.once || fps === 0) && !warmed) {
@@ -204,6 +206,10 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
     }
     frame = requestAnimationFrame(tick);
   };
+  // The host's resume re-arms a parked loop once. The listener also runs on subscribing.
+  const unsubscribe = (environment.subscribe ?? subscribeHostPlayback)(paused => {
+    if (!paused && parked && !dead) { parked = false; frame = requestAnimationFrame(tick); }
+  });
   window.addEventListener("pagehide", dispose, { once: true }); frame = requestAnimationFrame(tick);
   return dispose;
 }

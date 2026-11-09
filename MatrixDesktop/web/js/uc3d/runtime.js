@@ -3,7 +3,7 @@ import { createMedia, selectImages } from "./media.js";
 import { createOverlays } from "./overlays.js";
 import { createAudio } from "./audio.js";
 import colorToRGB from "../colorToRGB.js";
-import { createPlaybackClock } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback } from "../hostPlayback.js";
 import { fitSurface } from "../zmatrix/surface.js";
 import { showRenderFailure } from "../renderFailure.js";
 
@@ -92,10 +92,15 @@ export async function createRuntime(canvas, options, backend) {
       // A forming picture returns to a front-facing pose, as manual movement already
       // suppresses the picture. Keep the relief visible without shearing its silhouette.
       if (!scene.grid) {
-        state.yaw *= 1 - state.pictureWeight; state.pitch *= 1 - state.pictureWeight; state.roll *= 1 - state.pictureWeight;
-        // The scene seeds a mouse gesture from its own state, so the fixed isometric
-        // view offset belongs to this derived view only, never to the scene's object.
-        if (config.volumetric && config.isometric) state = { ...state, yaw: state.yaw + Math.PI / 4 * (1 - state.pictureWeight), pitch: state.pitch + Math.PI / 8 * (1 - state.pictureWeight) };
+        // The scene seeds a mouse gesture from its own state, and the touch drops the picture
+        // weight to 0. So its state keeps the flattened pose less the faded share of the fixed
+        // isometric offset, and only this derived view adds the whole offset: the same pose
+        // shows, and a gesture starts exactly where the view was.
+        const weight = state.pictureWeight, isometric = config.volumetric && config.isometric;
+        state.yaw = state.yaw * (1 - weight) - (isometric ? Math.PI / 4 * weight : 0);
+        state.pitch = state.pitch * (1 - weight) - (isometric ? Math.PI / 8 * weight : 0);
+        state.roll *= 1 - weight;
+        if (isometric) state = { ...state, yaw: state.yaw + Math.PI / 4, pitch: state.pitch + Math.PI / 8 };
       }
       const changed = dirty || Boolean(scene.grid);
       if (changed) { grid = scene.grid ? scene.grid(aspect, photo) : createGrid(config, aspect, photo); dirty = false; }
@@ -117,7 +122,7 @@ export async function createRuntime(canvas, options, backend) {
       uniforms[53] = grid.nativeMode ? 1 : 0;
       uniforms[54] = grid.glyphHalfSize ?? 0;
       overlays.update(state, photo);
-      diagnostics.frames++; diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
+      diagnostics.pictureWeight = state.pictureWeight; diagnostics.mouseActive = state.mouseActive;
       diagnostics.controls = config.uc3dControls ?? "legacy";
       diagnostics.simulationTime = state.time; diagnostics.targetStreams = grid.columns;
       diagnostics.activeStreams = state.activeStreams ?? grid.columns;
@@ -134,20 +139,21 @@ export async function createRuntime(canvas, options, backend) {
 // Both backends use one lifecycle and throttling implementation. No rendering callback
 // can survive pagehide, explicit teardown, or an initialization/runtime failure.
 // maximumDimension is the backend's texture/viewport limit for the canvas and render target.
-export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity) {
-  const clock = createPlaybackClock();
-  let frame = 0, dead = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
+export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity, environment = {}) {
+  const clock = environment.clock ?? createPlaybackClock();
+  let frame = 0, dead = false, parked = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
   const requestedFps = Number(runtime.config.fps ?? 60);
   const fps = Number.isFinite(requestedFps) ? Math.max(0, Math.min(120, requestedFps)) : 60;
   const dispose = () => {
     if (dead) return;
     dead = true; cancelAnimationFrame(frame); window.removeEventListener("pagehide", dispose);
-    clock.dispose(); runtime.dispose(); cleanup();
+    unsubscribe(); clock.dispose(); runtime.dispose(); cleanup();
   };
   const tick = (now) => {
     if (dead) return;
     now = clock.seconds(now) * 1000;
-    if (clock.paused) { frame = requestAnimationFrame(tick); return; }
+    // A paused host keeps the last frame on screen: park without requesting another frame.
+    if (clock.paused) { parked = true; return; }
     if (start === null) start = now;
     if (fps === 0 || now - previous >= 1000 / fps - 0.5 || runtime.config.once) {
       const ratio = window.devicePixelRatio || 1;
@@ -163,7 +169,11 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
       } else elapsed = (now - start) / 1000;
       lastDraw = now;
       // A draw that returns false presented nothing: a lost context waits for its event.
-      try { runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false; }
+      // Only a presented frame counts, as in ZMatrix; a throwing draw never reaches the count.
+      try {
+        runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false;
+        if (runtime.diagnostics.ready) runtime.diagnostics.frames++;
+      }
       catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); showRenderFailure("UC3D", error); dispose(); return; }
       previous = now;
       // Keep the single frame and overlays visible. Resources are released on pagehide
@@ -172,6 +182,10 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
     }
     frame = requestAnimationFrame(tick);
   };
+  // The host's resume re-arms a parked loop once. The listener also runs on subscribing.
+  const unsubscribe = (environment.subscribe ?? subscribeHostPlayback)(paused => {
+    if (!paused && parked && !dead) { parked = false; frame = requestAnimationFrame(tick); }
+  });
   window.addEventListener("pagehide", dispose, { once: true });
   runtime.diagnostics.dispose = dispose;
   frame = requestAnimationFrame(tick);

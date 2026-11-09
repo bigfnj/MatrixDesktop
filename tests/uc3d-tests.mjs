@@ -362,6 +362,32 @@ test("original once and zero-fps frames show settled startup while legacy captur
     assert.deepEqual(result.observed, [controls === "original" ? 10 : 0]); assert.equal(result.scheduled, 0);
   }
 });
+
+// A visible host pause (tray, fullscreen, battery) must not keep a frame loop running.
+test("a host pause parks the UC3D loop and the host's resume re-arms it once", () => {
+  const oldWindow = globalThis.window, oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
+  const callbacks = new Map(), hosts = new Set(); let serial = 0, draws = 0;
+  globalThis.window = { devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+  globalThis.requestAnimationFrame = callback => { callbacks.set(++serial, callback); return serial; };
+  globalThis.cancelAnimationFrame = id => callbacks.delete(id);
+  const clock = { paused: false, seconds: now => now / 1000, dispose() {} };
+  // The host's pause event reaches the clock and the loop's subscription alike.
+  const host = paused => { clock.paused = paused; for (const listener of [...hosts]) listener(paused); };
+  const run = now => { const [id, callback] = callbacks.entries().next().value; callbacks.delete(id); callback(now); };
+  try {
+    const runtime = { config: { fps: 60, resolution: 1 }, diagnostics: { errors: [], frames: 0 }, update: () => ({}), dispose() {} };
+    const stop = startLoop({ clientWidth: 20, clientHeight: 10 }, runtime, () => { draws++; }, () => {}, Infinity,
+      { clock, subscribe: listener => { hosts.add(listener); listener(clock.paused); return () => hosts.delete(listener); } });
+    run(0); assert.equal(draws, 1, "witness: the running loop draws");
+    host(true); run(100);
+    assert.equal(draws, 1, "witness: a paused tick draws nothing");
+    assert.equal(callbacks.size, 0, "a paused loop must stop requesting animation frames");
+    host(false); host(false);
+    assert.equal(callbacks.size, 1, "the host's resume must re-arm the parked loop exactly once");
+    run(200); assert.equal(draws, 2, "the resumed loop must draw"); assert.equal(callbacks.size, 1);
+    stop(); assert.equal(callbacks.size, 0); assert.equal(hosts.size, 0, "teardown must unsubscribe from host playback");
+  } finally { globalThis.window = oldWindow; globalThis.requestAnimationFrame = oldRequest; globalThis.cancelAnimationFrame = oldCancel; }
+});
 const previousDocument = globalThis.document, previousAudio = globalThis.Audio;
 const listeners = new Map(), buttons = [];
 globalThis.document = {
@@ -512,28 +538,43 @@ await asyncTest("legacy isometric mouse rotation starts from the displayed pose 
     } finally { runtime.dispose(); }
   } finally { dom.restore(); }
 });
-await asyncTest("legacy first touch during a forming picture keeps the flattened pose continuous", async () => {
-  const dom = runtimeDom({ images: [{ url: "synthetic:picture", group: "custom" }] });
-  try {
-    const config = resolveConfig({ scene: "uc3d", isometric: "false", mouseRotation: "true", showPictures: "true", pictureDelay: "1", pictureDuration: "8" });
-    assert.equal(config.uc3dControls, "legacy"); assert.equal(config.isometric, false); assert.equal(config.codeRotation, true);
-    const runtime = await createRuntime(dom.canvas, config, "regl");
-    try {
-      runtime.update(0, 200, 100); await settle();
-      assert.equal(runtime.diagnostics.pictureStatus, "ready");
-      const forming = runtime.update(2.85, 200, 100);
-      assert.ok(forming.state.pictureWeight > .2 && forming.state.pictureWeight < .8, `witness: picture weight ${forming.state.pictureWeight} is not forming`);
-      const before = forming.uniforms.slice(22, 24);
-      assert.ok(Math.abs(before[0]) + Math.abs(before[1]) > .01, "witness: automatic rotation must be visible before the touch");
-      dom.move(50, 50); dom.move(50, 50);
-      const after = runtime.update(2.85 + 1/60, 200, 100);
-      assert.equal(after.state.mouseActive, true); near(after.state.pictureWeight, 0);
-      for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
-        const jump = after.uniforms[22 + index] - before[index];
-        assert.ok(Math.abs(jump) < 1e-4, `first touch during a forming picture moved ${name} by ${jump.toFixed(3)} rad`);
-      }
-    } finally { runtime.dispose(); }
-  } finally { dom.restore(); }
+await asyncTest("legacy first touch during a forming or shown picture keeps the flattened pose continuous, isometric or not", async () => {
+  // 2.85 s: the picture is forming (weight about 0.48); 5 s: it is fully shown and faces the viewer.
+  for (const time of [2.85, 5]) {
+    let flat = null;
+    for (const isometric of [false, true]) {
+      const label = `${isometric ? "isometric" : "flat"} at ${time} s`;
+      const dom = runtimeDom({ images: [{ url: "synthetic:picture", group: "custom" }] });
+      try {
+        const config = resolveConfig({ scene: "uc3d", isometric: String(isometric), mouseRotation: "true", showPictures: "true", pictureDelay: "1", pictureDuration: "8" });
+        assert.equal(config.uc3dControls, "legacy"); assert.equal(config.volumetric, true); assert.equal(config.isometric, isometric); assert.equal(config.codeRotation, true);
+        const runtime = await createRuntime(dom.canvas, config, "regl");
+        try {
+          runtime.update(0, 200, 100); await settle();
+          assert.equal(runtime.diagnostics.pictureStatus, "ready");
+          const shown = runtime.update(time, 200, 100), weight = shown.state.pictureWeight, before = shown.uniforms.slice(22, 24);
+          if (time < 5) {
+            assert.ok(weight > .2 && weight < .8, `witness: ${label}: picture weight ${weight} is not forming`);
+            assert.ok(Math.abs(before[0]) + Math.abs(before[1]) > .01, `witness: ${label}: automatic rotation must be visible before the touch`);
+          } else {
+            assert.equal(weight, 1, `witness: ${label}: the picture must be fully shown`);
+            assert.ok(Math.abs(before[0]) + Math.abs(before[1]) < 1e-6, `witness: ${label}: a shown picture must face the viewer, got ${before[0]}, ${before[1]}`);
+          }
+          // What renders is unchanged: the isometric view is the flat pose plus the fixed offset, faded with the picture.
+          if (isometric) [Math.PI / 4, Math.PI / 8].forEach((offset, i) => assert.ok(Math.abs(before[i] - flat[i] - offset * (1 - weight)) < 2e-6,
+            `${label}: the displayed ${i ? "pitch" : "yaw"} ${before[i]} is not the flat pose ${flat[i]} plus the faded offset`));
+          else flat = before;
+          dom.move(50, 50); dom.move(50, 50);
+          const after = runtime.update(time + 1/60, 200, 100);
+          assert.equal(after.state.mouseActive, true); near(after.state.pictureWeight, 0);
+          for (const [index, name] of [[0, "yaw"], [1, "pitch"]]) {
+            const jump = after.uniforms[22 + index] - before[index];
+            assert.ok(Math.abs(jump) < 1e-4, `${label}: first touch moved ${name} by ${jump.toFixed(3)} rad`);
+          }
+        } finally { runtime.dispose(); }
+      } finally { dom.restore(); }
+    }
+  }
 });
 await asyncTest("a failed slideshow picture warns once however often the slideshow revisits it", async () => {
   const dom = runtimeDom({ images: [{ url: "synthetic:broken-a", group: "custom" }, { url: "synthetic:broken-b", group: "custom" }] });
@@ -759,11 +800,12 @@ await asyncTest("REGL UC3D waits for the lost-context event instead of failing a
     const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100);
     const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
     try {
-      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present");
+      tick(0); assert.equal(diagnostics().ready, true, "witness: the first frame must present"); assert.equal(diagnostics().frames, 1, "witness: the presented frame counts");
       // isContextLost() is true at once; the browser queues the event as a later task.
       gl.lose(); tick(100);
       assert.deepEqual(diagnostics().errors, [], `a frame while the context was lost failed: ${diagnostics().errors.join("; ")}`);
       assert.equal(diagnostics().ready, false, "ready must be false while the context is lost");
+      assert.equal(diagnostics().frames, 1, "a frame that drew nothing must not count");
       assert.equal(diagnostics().disposed, false, "the pass must wait for the lost event");
       let prevented = false;
       canvas.listeners.get("webglcontextlost")({ preventDefault: () => { prevented = true; } });
