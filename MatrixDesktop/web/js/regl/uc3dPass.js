@@ -1,5 +1,15 @@
 import { createRuntime, loadImage, loadText, startLoop, glyphSource, glyphConfig } from "../uc3d/runtime.js";
 import { createProgram } from "../webglProgram.js";
+import { fitSurface } from "../zmatrix/surface.js";
+
+// The composite samples the desktop snapshot across the whole screen, so a capture over
+// MAX_TEXTURE_SIZE is downscaled with its aspect kept, as in the WebGPU pass, instead of
+// failing the first frame. WebGL ignores UNPACK_FLIP_Y for an ImageBitmap, so it flips itself.
+async function fitDesktop(image, limit) {
+  if (!image) return null;
+  const fit = fitSurface(image.naturalWidth, image.naturalHeight, limit, Infinity);
+  return fit.factor < 1 ? createImageBitmap(image, { resizeWidth: fit.width, resizeHeight: fit.height, resizeQuality: "high", imageOrientation: "flipY" }) : image;
+}
 
 // A separate WebGL scene keeps the legacy REGL intensity-channel pipeline intact.
 // It uses the same WebGL API as that backend; no native donor renderer is loaded.
@@ -45,7 +55,9 @@ export default async function startUC3D(canvas, config) {
     const rainProgram = program(vertex, fragment);
     const compositeProgram = program("attribute vec2 position; varying vec2 uv; void main(){uv=(position+1.0)*0.5; gl_Position=vec4(position,0.0,1.0);}", composite);
     const glyphAtlas = texture(atlas, true); atlas.src = "";
-    const desktop = texture(runtime.desktop, true), output = texture();
+    const snapshot = await fitDesktop(runtime.desktop, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    const desktop = texture(snapshot, true), output = texture();
+    if (snapshot !== runtime.desktop) snapshot.close();
     const framebuffer = gl.createFramebuffer(); framebuffers.push(framebuffer);
     const geometry = gl.createBuffer(); buffers.push(geometry);
     const corners = gl.createBuffer(); buffers.push(corners);

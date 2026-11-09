@@ -131,12 +131,17 @@ export function createScene(options = {}, pictureCount = 0) {
   };
 }
 
+// The desktop bridge sends nothing while another window is in front and posts no leave, so
+// a move more than this long after the last one (the bridge sends at most one per 30 ms) starts a new
+// gesture. Event time, not the frame clock, which stops while the scene is paused.
+const GESTURE_GAP_MS = 250;
 export function attachMouse(canvas, scene, now) {
   if (!scene.config.mouseRotation || !scene.config.volumetric) return () => {};
   let previous = null;
   const move = (event) => {
-    if (previous) scene.pointer(event.clientX - previous[0], event.clientY - previous[1], now());
-    previous = [event.clientX, event.clientY];
+    const at = event.timeStamp > 0 ? event.timeStamp : performance.now();
+    if (previous && at - previous[2] <= GESTURE_GAP_MS) scene.pointer(event.clientX - previous[0], event.clientY - previous[1], now());
+    previous = [event.clientX, event.clientY, at];
   };
   const leave = () => { previous = null; };
   const down = (event) => {

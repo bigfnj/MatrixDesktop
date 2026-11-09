@@ -34,8 +34,97 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "image/svg+xml")
             self.end_headers()
             self.wfile.write(FIXTURE)
+        elif self.path.startswith("/desktop-") and self.path.endswith(".png"):
+            width, height = (int(n) for n in self.path[len("/desktop-"):-len(".png")].split("x"))
+            body = desktop_png(width, height)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             super().do_GET()
+
+
+# R2-28: the REGL pass fits the desktop snapshot to MAX_TEXTURE_SIZE, as AUD-71 made the WebGPU
+# pass do. A synthetic desktop one pixel over the limit on either axis must render, and one at
+# the limit uploads unchanged. Red over blue checks the orientation: WebGL ignores UNPACK_FLIP_Y
+# for an ImageBitmap, so a resized upload without the bitmap's own flip shows blue on top.
+DESKTOPS = {}
+DESKTOP_UPLOADS = """(() => {
+    const uploads = window.__desktopUploads = [], sources = window.__desktopSources = [];
+    const texImage2D = WebGLRenderingContext.prototype.texImage2D;
+    WebGLRenderingContext.prototype.texImage2D = function (...args) {
+        const source = args.length === 6 ? args[5] : null;
+        if (source instanceof HTMLImageElement || source instanceof ImageBitmap) {
+            uploads.push({ kind: source.constructor.name, width: source.naturalWidth ?? source.width, height: source.naturalHeight ?? source.height });
+            sources.push(source);
+        }
+        return texImage2D.apply(this, args);
+    };
+})();"""
+DESKTOP_STATE = """() => { const d = window.matrixRuntimeDiagnostics ?? {};
+    return { ready: d.ready, frames: d.frames, disposed: d.disposed, errors: d.errors,
+        uploads: (window.__desktopUploads ?? []).map((upload, i) => ({ ...upload,
+            closed: window.__desktopSources[i] instanceof ImageBitmap ? window.__desktopSources[i].width === 0 : null })) }; }"""
+
+
+def desktop_png(width, height):
+    if (width, height) not in DESKTOPS:
+        image = Image.new("RGB", (width, height), (0, 0, 255))
+        image.paste((255, 0, 0), (0, 0, width, height // 2))
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG")
+        DESKTOPS[width, height] = buffer.getvalue()
+    return DESKTOPS[width, height]
+
+
+def check_desktop_snapshot(browser, origin):
+    url = f"{origin}/index.html?scene=uc3d&renderer=regl&suppressWarnings=true&resolution=1&numColumns=48&bloomStrength=0&codeRotation=false&forwardMovement=false&volumetric=false&desktopBackground=true"
+    probe = browser.new_page()
+    limit = probe.evaluate("() => { const gl = document.createElement('canvas').getContext('webgl'); return gl.getParameter(gl.MAX_TEXTURE_SIZE); }")
+    probe.close()
+    results = []
+    for width, height in ((limit + 1, 600), (600, limit + 1), (limit, 600)):
+        label = f"{width}x{height} desktop (MAX_TEXTURE_SIZE {limit})"
+        context = browser.new_context(viewport={"width": 800, "height": 450}, device_scale_factor=1)
+        try:
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+            page.add_init_script(DESKTOP_UPLOADS)
+            page.add_init_script("window.matrixHostBootstrap=" + json.dumps({"desktopUrl": f"{origin}/desktop-{width}x{height}.png"}))
+            page.goto(url, wait_until="load")
+            page.wait_for_function("() => { const d = window.matrixRuntimeDiagnostics; return d && (d.frames > 5 || d.disposed || d.errors.length > 0); }", timeout=20000)
+            if not results:
+                served = bytes(page.evaluate("async url => Array.from(new Uint8Array(await (await fetch(url, {cache:'no-store'})).arrayBuffer()))", f"{origin}/js/regl/uc3dPass.js"))
+                assert served == (WEB / "js" / "regl" / "uc3dPass.js").read_bytes(), "served REGL UC3D pass differs from source on disk"
+                print("PASS WITNESS regl/uc3dPass.js", hashlib.sha256(served).hexdigest())
+            state = page.evaluate(DESKTOP_STATE)
+            assert state["ready"] is True and state["frames"] > 5 and not state["disposed"] and state["errors"] == [], f"{label} did not render: {state}"
+            frames = state["frames"]
+            page.wait_for_timeout(250)
+            assert page.evaluate("matrixRuntimeDiagnostics.frames") > frames, f"{label}: frames stopped advancing"
+            # Witness: the glyph atlas uploads first and the desktop snapshot second.
+            assert len(state["uploads"]) == 2, f"{label}: expected the atlas and desktop uploads, saw {state['uploads']}"
+            desktop = state["uploads"][1]
+            if max(width, height) > limit:
+                assert desktop["kind"] == "ImageBitmap", f"{label} must upload a resized bitmap: {desktop}"
+                assert max(desktop["width"], desktop["height"]) <= limit and abs(desktop["width"] * height - desktop["height"] * width) <= max(width, height), f"{label}: resized to {desktop['width']}x{desktop['height']}, aspect or limit lost"
+                assert desktop["closed"] is True, f"{label}: the resized bitmap must be released after upload"
+            else:
+                assert desktop == {"kind": "HTMLImageElement", "width": width, "height": height, "closed": None}, f"{label} must upload unchanged: {desktop}"
+            shot = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
+            top = ImageStat.Stat(shot.crop((0, 20, 800, 200))).median
+            bottom = ImageStat.Stat(shot.crop((0, 250, 800, 430))).median
+            assert top[0] > top[2] + 80 and bottom[2] > bottom[0] + 80, f"{label}: the desktop top half must stay on top (red over blue); top median {top}, bottom median {bottom}"
+            assert not errors, f"{label}: {errors}"
+            results.append({"desktop": f"{width}x{height}", "upload": desktop, "frames": frames, "top": top, "bottom": bottom})
+        finally:
+            context.close()
+    print("PASS desktop snapshot fits MAX_TEXTURE_SIZE:", json.dumps(results))
+    return results
 
 
 def main():
@@ -58,6 +147,13 @@ def main():
             # the host both-backend lane uses the installed driver and asserts WebGPU.
             flags += ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] if args.renderer == "regl" and not args.channel else ["--use-angle=d3d11"]
             browser = pw.chromium.launch(channel=args.channel, args=flags)
+            # Its own failure record, so neither this check nor the backend loop masks the other.
+            if args.renderer in ("regl", "both"):
+                try:
+                    reports.append({"backend": "regl", "desktopSnapshot": check_desktop_snapshot(browser, origin)})
+                except Exception as error:
+                    failures.append(f"desktop snapshot: {error}")
+                    print("FAIL UC3D desktop snapshot:", error)
             for backend in ["regl", "webgpu"] if args.renderer == "both" else [args.renderer]:
                 context = browser.new_context(viewport={"width": 800, "height": 450}, device_scale_factor=1)
                 page = context.new_page()
