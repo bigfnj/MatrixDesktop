@@ -33,10 +33,37 @@ internal static class CommandBuilderTests
         ("UC3D randomization edits active controls and retains the alternate unit set", Uc3dRandomization),
         ("Scene placements name real fields groups and anchors and UC3D shows its colours together", ScenePlacementsResolve),
         ("Untouched editors show what the renderer draws for each version and effect", UntouchedEditorsShowTheRender),
+        ("A command that names the palette effect keeps its effect cursor through import and Copy", NamedPaletteKeepsItsCursor),
         ("Use for screensaver saves exactly what the preview renders", ScreensaverMatchesPreview),
         ("Stored drafts keep their render when version and effect defaults arrive", StoredDraftsKeepTheirRender),
         ("A base value chosen after the migration survives save and reload", FreshBaseValueSurvivesReload),
+        ("A draft whose saved colours come back with reordered keys builds the same command", ReorderedKeysChangeNothing),
     ];
+
+    // R2-44. After a close and reopen every stored colour read b, g, r (palette stops at, b, g, r),
+    // and IsDefault compared serialized text, so each default colour became a flag. Key order is
+    // no difference: such a draft copies and previews as before, and a changed component is still
+    // sent. Killing mutation: compare serialized text again in IsDefault (CanonicalJson).
+    private static void ReorderedKeysChangeNothing()
+    {
+        static JsonNode? Reordered(JsonNode? node) => node switch
+        {
+            JsonObject obj => new JsonObject(obj.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => KeyValuePair.Create(pair.Key, Reordered(pair.Value)))),
+            JsonArray array => new JsonArray(array.Select(Reordered).ToArray()),
+            _ => node?.DeepClone(),
+        };
+        foreach (var command in new[] { "", "--version operator --effect plain", "--scene uc3d", "--effect pride", "--version trinity" })
+        {
+            var draft = command.Length == 0 ? Draft() : Importer.Import(command, Draft()).Draft;
+            var reordered = Reordered(draft)!.AsObject();
+            Check.True(Json(reordered["cursorColor"]).StartsWith("{\"b\"", StringComparison.Ordinal), "witness: the saved colours must really be reordered");
+            Check.Equal(Cmd(draft), Cmd(reordered), $"'{command}' with reordered keys must copy the same command");
+            Check.Equal(Builder.BuildWebQueryString(draft), Builder.BuildWebQueryString(reordered), $"'{command}' with reordered keys must preview the same");
+        }
+        var changed = Reordered(Draft())!.AsObject();
+        changed["cursorColor"]!["g"] = 0.5;
+        Check.Equal("MatrixDesktop.exe --cursorColor 0.756,0.5,0.46", Cmd(changed), "a changed component of a reordered colour is still sent");
+    }
 
     // Values read from web/js/config.js and regl/stripePass.js, not from the catalog, so a wrong
     // C# table cannot agree with itself here. White is hsl(0, 0, 1); operator's cursor is
@@ -61,15 +88,16 @@ internal static class CommandBuilderTests
 
     // config.js:652-685 and stripePass.js:39: an imported command that names only a version and an
     // effect must leave every editor on what that command renders, and the regenerated command
-    // must leave those fields out so the renderer draws exactly that.
+    // must leave those fields out so the renderer draws exactly that. A command that names the
+    // palette effect is NamedPaletteKeepsItsCursor's, since CommandBuilder never names palette.
     private static void UntouchedEditorsShowTheRender()
     {
         var failures = new List<string>();
         foreach (var (version, rendered) in RenderedByVersion)
-        foreach (var effect in new[] { "palette", "plain", "stripes", "customStripes", "pride", "trans", "transPride" })
+        foreach (var effect in new[] { null, "plain", "stripes", "customStripes", "pride", "trans", "transPride" })
         {
-            var draft = Importer.Import($"--version {version} --effect {effect}", Draft()).Draft;
-            var named = effect != "palette";
+            var draft = Importer.Import($"--version {version}" + (effect is null ? "" : $" --effect {effect}"), Draft()).Draft;
+            var named = effect is not null;
             var expected = new Dictionary<string, string>
             {
                 ["cursorColor"] = named ? "{\"r\":1,\"g\":1,\"b\":1}" : rendered.Cursor,
@@ -80,10 +108,45 @@ internal static class CommandBuilderTests
             var query = Builder.BuildWebQueryString(draft);
             foreach (var (field, value) in expected)
             {
-                if (Json(draft[field]) != value) failures.Add($"{version}/{effect} {field} editor shows {Json(draft[field])}, renderer draws {value}");
-                if (query.Contains(field + "=", StringComparison.Ordinal)) failures.Add($"{version}/{effect} sends {field} although it is untouched: {query}");
+                if (Json(draft[field]) != value) failures.Add($"{version}/{effect ?? "no effect"} {field} editor shows {Json(draft[field])}, renderer draws {value}");
+                if (query.Contains(field + "=", StringComparison.Ordinal)) failures.Add($"{version}/{effect ?? "no effect"} sends {field} although it is untouched: {query}");
             }
         }
+        Check.True(failures.Count == 0, string.Join("; ", failures));
+    }
+
+    // R2-11. config.js:654-670 applies an effect's implied values whenever a command names one,
+    // palette included: a white cursor (UC3D keeps its own), cursor intensity 2, a white glint
+    // and glyph intensity 1. CommandBuilder never names the default palette effect, so an
+    // imported --effect palette keeps those values in its editors and sends each one the version
+    // draws differently, or Copy, Test, the preview and the screensaver would change the render.
+    // Applied still lists only what the command named. Killing mutations: drop the importer's
+    // named-palette branch, or let AdoptRenderedDefaults see only the applied keys.
+    private static void NamedPaletteKeepsItsCursor()
+    {
+        const string white = "{\"r\":1,\"g\":1,\"b\":1}";
+        var uc3dCursor = Json(JsonSerializer.SerializeToNode(Metadata.SceneDefaults["uc3d"]["cursorColor"], new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var failures = new List<string>();
+        foreach (var (command, cursor, applied, sent) in new[]
+        {
+            ("--effect palette", white, "effect", "cursorColor=1,1,1"),
+            ("--version operator --effect palette", white, "effect version", "cursorColor=1,1,1 cursorIntensity=2 version=operator"),
+            ("--version trinity --effect palette", white, "effect version", "cursorColor=1,1,1 glintColor=1,1,1 version=trinity"),
+            ("--scene uc3d --version operator --effect palette", uc3dCursor, "effect scene version", "cursorIntensity=2 scene=uc3d version=operator"),
+            ("--effect palette --cursorColor 1,0,0 --version operator", "{\"r\":1,\"g\":0,\"b\":0}", "cursorColor effect version", "cursorColor=1,0,0 cursorIntensity=2 version=operator"),
+        })
+        {
+            var imported = Importer.Import(command, Draft());
+            foreach (var (field, value) in new[] { ("cursorColor", cursor), ("cursorIntensity", "2"), ("glintColor", white), ("glyphIntensity", "1") })
+                if (Json(imported.Draft[field]) != value) failures.Add($"'{command}' {field} editor shows {Json(imported.Draft[field])}, renderer draws {value}");
+            var query = string.Join(" ", QueryPairs(Builder.BuildWebQueryString(imported.Draft)).OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + pair.Value));
+            if (query != sent) failures.Add($"'{command}' previews '{query}', not '{sent}'");
+            if (string.Join(" ", imported.Applied) != applied) failures.Add($"'{command}' reports applying '{string.Join(" ", imported.Applied)}', not '{applied}'");
+        }
+        // The guide's own example (MatrixDesktop_Argument_Guide.txt, the palette effect).
+        var guide = Importer.Import("MatrixDesktop.exe --windowed --effect palette --clickRipples", Draft()).Draft;
+        var copied = Cmd(guide);
+        if (copied != "MatrixDesktop.exe --windowed --clickRipples true --cursorColor 1,1,1") failures.Add($"the guide's palette example copies as '{copied}'");
         Check.True(failures.Count == 0, string.Join("; ", failures));
     }
 
@@ -101,14 +164,18 @@ internal static class CommandBuilderTests
         => query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries).Select(pair => pair.Split('=', 2))
             .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
 
-    // ConfiguratorForm.UseScreensaver saves BuildScreensaverArguments. It used to emit every
-    // default, which drew the catalog's stripe rows on pride and classic values on paradise.
+    // ConfiguratorForm.UseScreensaver saves ConfiguratorRequests.ScreensaverArguments. It used to
+    // emit every default, which drew the catalog's stripe rows on pride and classic values on
+    // paradise, and named --borderless and every app flag (R2-13: that revert passed every suite
+    // while it sat in ConfiguratorForm). Killing mutation: BuildArguments(draft, true, false).
     private static void ScreensaverMatchesPreview()
     {
         foreach (var command in new[] { "--effect pride", "--version paradise --effect stripes", "--version operator", "--scene uc3d --version operator --effect plain", "--numColumns 90 --cursorColor 1,0,0" })
         {
             var draft = Importer.Import(command, Draft()).Draft;
-            var saver = WebPairs(Builder.BuildScreensaverArguments(draft));
+            var arguments = ConfiguratorRequests.ScreensaverArguments(Builder, draft);
+            Check.False(arguments.Contains("--borderless"), $"the screensaver profile for '{command}' must not carry every default: {string.Join(" ", arguments)}");
+            var saver = WebPairs(arguments);
             var preview = QueryPairs(Builder.BuildWebQueryString(draft));
             Check.Equal(string.Join(" ", preview.OrderBy(pair => pair.Key).Select(pair => pair.Key + "=" + pair.Value)),
                 string.Join(" ", saver.OrderBy(pair => pair.Key).Select(pair => pair.Key + "=" + pair.Value)),
@@ -276,7 +343,7 @@ internal static class CommandBuilderTests
             var saved = d.DeepClone();
             Check.DoesNotContain(Cmd(d), "--camera", $"the copied command must not open the webcam for effect {effect}");
             Check.DoesNotContain(Builder.BuildWebQueryString(d), "camera=", $"the preview must not open the webcam for effect {effect}");
-            Check.False(Builder.BuildArguments(d, true, false).Contains("--camera"), $"the screensaver profile must not open the webcam for effect {effect}");
+            Check.False(ConfiguratorRequests.ScreensaverArguments(Builder, d).Contains("--camera"), $"the screensaver profile must not open the webcam for effect {effect}");
             Check.False(Builder.BuildArguments(d, false, true).Contains("--camera"), $"Test must not open the webcam for effect {effect}");
             Check.True(JsonNode.DeepEquals(saved, d), "building must leave the saved camera value for a return to Mirror");
         }
@@ -286,6 +353,7 @@ internal static class CommandBuilderTests
         Check.Contains(Cmd(mirror), "--effect mirror --camera true", "Mirror still asks for the webcam");
         Check.Contains(Builder.BuildWebQueryString(mirror), "camera=true", "the Mirror preview still asks for the webcam");
         Check.True(Builder.BuildArguments(mirror, false, true).Contains("--camera"), "a Mirror test still asks for the webcam");
+        Check.Contains(string.Join(" ", ConfiguratorRequests.ScreensaverArguments(Builder, mirror)), "--camera true", "a Mirror screensaver still asks for the webcam");
         mirror["camera"] = false;
         Check.Contains(string.Join(" ", Builder.BuildArguments(mirror, true, false)), "--camera false", "Mirror with every default still names the camera setting");
     }

@@ -478,14 +478,16 @@ internal static class ArgumentCatalog
     internal static readonly ColorValue[] PrideStripes = Rows(2,
         new(0.89, 0.01, 0.01), new(1, 0.55, 0), new(1, 0.93, 0), new(0, 0.5, 0.15), new(0, 0.3, 1), new(0.46, 0.03, 0.53));
 
-    // config.js:652-668: naming any effect makes the cursor white (except in UC3D), the cursor
-    // intensity 2, the glint white and the glyph intensity 1, over the version's own values.
-    // CommandBuilder never names the default palette effect, so palette keeps the version's.
+    // config.js:654-670: naming any effect, palette included, makes the cursor white (except in
+    // UC3D), the cursor intensity 2, the glint white and the glyph intensity 1, over the
+    // version's own values. CommandBuilder never names the default palette effect, so
+    // EffectiveDefault skips palette's entry and ArgumentImporter applies it to a command that
+    // names palette (R2-11).
     internal static Dictionary<string, Dictionary<string, Dictionary<string, object?>>> CreateEffectDefaults(IEnumerable<ArgumentGroup> groups)
     {
         var white = new ColorValue(1, 1, 1);
         var effects = groups.SelectMany(group => group.Fields).Single(field => field.Id == "effect").Options
-            .Select(option => option.Value).Where(effect => effect != "palette").ToArray();
+            .Select(option => option.Value).ToArray();
         var result = new Dictionary<string, Dictionary<string, Dictionary<string, object?>>>();
         foreach (var scene in new[] { "matrix", "uc3d" })
         {
@@ -516,8 +518,9 @@ internal sealed class ConfiguratorMetadata
     public Dictionary<string, Dictionary<string, Dictionary<string, object?>>> EffectDefaults => _effectDefaults ??= ArgumentCatalog.CreateEffectDefaults(Groups);
 
     // What the renderer draws for a field the command leaves out, in config.js's order
-    // (:679-698): an effect's implied values over the scene profile over the version over the
-    // catalog. Version and effect are not emitted for ZMatrix, so it renders classic there.
+    // (:679-698): an effect's implied values (never palette's, which the command does not name)
+    // over the scene profile over the version over the catalog. Version and effect are not
+    // emitted for ZMatrix, so it renders classic there.
     // app.js effectiveDefaultsFor is the page's copy of this rule.
     internal object? EffectiveDefault(ArgumentDefinition field, string scene, string? uc3dMode, string? version, string? effect)
     {

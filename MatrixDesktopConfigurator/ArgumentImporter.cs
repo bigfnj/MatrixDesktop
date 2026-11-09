@@ -104,8 +104,19 @@ internal sealed class ArgumentImporter
                 draft["animationSpeed"] = Math.Clamp(animationSpeed, 0, 4);
         }
         // A field the command leaves out shows what that command renders for its version and
-        // effect (AUD-13), as the scene profile above does for the scene.
-        CommandBuilder.AdoptRenderedDefaults(_metadata, draft, applied);
+        // effect (AUD-13), as the scene profile above does for the scene. Naming palette applies
+        // its implied cursor, glint and intensities too (config.js:654-670), but CommandBuilder
+        // never names palette, so they become this draft's own values, sent wherever the version
+        // draws others (R2-11). Applied keeps listing only what the command named.
+        var explicitKeys = new HashSet<string>(applied, StringComparer.OrdinalIgnoreCase);
+        if (scene != "zmatrix" && applied.Contains("effect") && draft["effect"] is JsonValue effect
+            && effect.TryGetValue<string>(out var effectName) && effectName == "palette"
+            && _metadata.EffectDefaults[scene == "uc3d" ? "uc3d" : "matrix"].TryGetValue("palette", out var named))
+        {
+            foreach (var (key, value) in named)
+                if (explicitKeys.Add(key)) draft[key] = JsonSerializer.SerializeToNode(value, JsonOptions);
+        }
+        CommandBuilder.AdoptRenderedDefaults(_metadata, draft, explicitKeys);
 
         return new ImportResult
         {

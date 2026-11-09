@@ -12,7 +12,65 @@ internal static class ConfiguratorHostTests
         ("The desktop snapshot help says wallpaper hosts use the wallpaper only", DesktopSnapshotHelp),
         ("Stop Test ends the Test host but not the processes it started", StopTestEndsOnlyTheHost),
         ("A Test host that ends by itself sends one exit notice for the current test only", TestExitNotice),
+        ("Every request the page posts is one the configurator host serves, and Rename keeps the saved values", PageRequestsAreServed),
     ];
+
+    // R2-13. No test project compiles ConfiguratorForm, so a deleted request arm passed every
+    // suite while each Rename on the page failed with "Unknown configurator request". The form
+    // routes every request through ConfiguratorRequests.DispatchAsync, which this sends each
+    // requestHost name in app.js through (the window's own requests reach a stand-in): none may
+    // be refused, and renamePreset, answered from the store alone, must keep the saved values,
+    // the working draft and the selection on a fixture store. Killing mutations: delete the
+    // renamePreset arm, or drop a name from FormTypes; this case fails naming it.
+    private static void PageRequestsAreServed()
+    {
+        using var resource = typeof(ConfiguratorHostTests).Assembly.GetManifestResourceStream("app.js.txt")
+            ?? throw new InvalidOperationException("configurator/js/app.js is not embedded in the harness.");
+        var source = new StreamReader(resource).ReadToEnd();
+        var literal = System.Text.RegularExpressions.Regex.Matches(source, @"requestHost\(\s*[""'`]([A-Za-z]+)[""'`]");
+        Check.Equal(System.Text.RegularExpressions.Regex.Matches(source, @"requestHost\(").Count, literal.Count,
+            "every requestHost call in app.js must name its request literally, or this contract cannot see it");
+        var names = literal.Select(match => match.Groups[1].Value).Distinct(StringComparer.Ordinal).ToList();
+        Check.True(names.Count >= 15 && names.Contains("renamePreset"), "app.js posts too few requests for this to be the page: " + string.Join(", ", names));
+
+        var directory = Path.Combine(AppContext.BaseDirectory, "synthetic-requests-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var storage = new StorageService(Path.Combine(directory, "presets.json"));
+        try
+        {
+            var state = new ConfiguratorState { SelectedPresetId = "night", LastDraft = new System.Text.Json.Nodes.JsonObject { ["effect"] = "stripes" } };
+            state.UserPresets.Add(new UserPreset { Id = "night", Name = "Night", Values = new System.Text.Json.Nodes.JsonObject { ["effect"] = "palette" } });
+            using var payload = System.Text.Json.JsonDocument.Parse("""{"id":"night","name":"Midnight"}""");
+            var refused = new List<string>();
+            var byForm = new List<string>();
+            foreach (var name in names)
+            {
+                try
+                {
+                    ConfiguratorRequests.DispatchAsync(name, payload.RootElement, state, storage,
+                        (type, _) => { byForm.Add(type); return Task.FromResult<object?>(null); }).GetAwaiter().GetResult();
+                }
+                catch (InvalidOperationException error) when (error.Message.StartsWith("Unknown configurator request", StringComparison.Ordinal))
+                {
+                    refused.Add(name);
+                }
+            }
+            Check.True(refused.Count == 0, "the configurator host refuses requests the page posts: " + string.Join(", ", refused));
+            Check.False(byForm.Contains("renamePreset"), "renamePreset is answered from the store, not by the window");
+            var stored = storage.Load();
+            var preset = stored.UserPresets.Single();
+            Check.Equal("Midnight", preset.Name, "Rename through the host's dispatch must store the new name");
+            Check.Equal("palette", preset.Values["effect"]!.GetValue<string>(), "Rename must keep the preset's saved values");
+            Check.Equal("stripes", stored.LastDraft["effect"]!.GetValue<string>(), "Rename must keep the working draft");
+            Check.Equal("night", stored.SelectedPresetId ?? "(none)", "Rename must keep the selection");
+        }
+        finally
+        {
+            foreach (var path in new[] { storage.StoragePath, storage.BackupPath, storage.StoragePath + ".tmp" })
+                if (File.Exists(path)) File.Delete(path);
+            Directory.Delete(directory);
+        }
+    }
 
     private static void TestExitNotice()
     {
