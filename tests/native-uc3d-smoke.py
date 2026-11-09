@@ -1,5 +1,6 @@
 """Exercise the published Windows WebView2 applications, including the native media bridge."""
 import argparse
+import atexit
 import ctypes
 from ctypes import wintypes
 from functools import wraps
@@ -37,18 +38,138 @@ def close_window(process):
     assert process.returncode == 0, f"application exited {process.returncode}"
 
 def remove_profile(profile, attempts=20, delay=0.25):
-    """Delete a private WebView2 profile, retrying while its msedgewebview2 children exit."""
+    """Delete a private WebView2 profile, retrying while its msedgewebview2 children exit.
+    True only once the folder itself is gone: on Python 3.11 and 3.12 rmtree raises
+    FileNotFoundError for an inner file that an exiting browser renamed after rmtree listed
+    it, and the rest of the profile is still there."""
+    error = None
     for attempt in range(attempts):
         try:
             shutil.rmtree(profile)
             return True
-        except FileNotFoundError:
-            return True
-        except OSError as error:
-            if attempt == attempts - 1:
-                print(f"WARN could not remove WebView2 profile {profile}: {error}", flush=True)
-                return False
+        except OSError as caught:
+            error = caught
+            if not os.path.lexists(profile):
+                return True
+        if attempt < attempts - 1:
             time.sleep(delay)
+    print(f"WARN could not remove WebView2 profile {profile}: {error}", flush=True)
+    return False
+
+# AUD-26 (R2-37): the host's msedgewebview2 browser and that browser's children keep profile
+# files open after the host exits, sometimes for longer than remove_profile's 5 s of retries
+# (WinError 32 on DIPS and Extension State in the gate), so the profile is deleted only after
+# they exit. Only processes the host started are waited for: each must have started after its
+# parent, so an older process that inherited a reused parent pid never counts, and the open
+# handles keep every pid from being reused during the wait.
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+
+KERNEL32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+KERNEL32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+KERNEL32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+KERNEL32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+KERNEL32.OpenProcess.restype = wintypes.HANDLE
+KERNEL32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+KERNEL32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
+KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+def process_parents():
+    """{pid: parent pid} for every process, from one Toolhelp snapshot."""
+    snapshot = KERNEL32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        entry, parents = PROCESSENTRY32W(dwSize=ctypes.sizeof(PROCESSENTRY32W)), {}
+        more = KERNEL32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            parents[entry.th32ProcessID] = entry.th32ParentProcessID
+            more = KERNEL32.Process32NextW(snapshot, ctypes.byref(entry))
+        return parents
+    finally:
+        KERNEL32.CloseHandle(snapshot)
+
+def process_started(handle):
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if not KERNEL32.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+        return None
+    return times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
+
+def open_descendants(pid):
+    """SYNCHRONIZE handles to every live process descended from pid. The caller closes them."""
+    root = KERNEL32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not root:
+        return []  # no such process: nothing it started can be identified
+    try:
+        root_started = process_started(root)
+    finally:
+        KERNEL32.CloseHandle(root)
+    children = {}
+    for child, parent in process_parents().items():
+        if child != parent:
+            children.setdefault(parent, []).append(child)
+    handles, pending, seen = [], [(pid, root_started)], {pid}
+    while pending:
+        parent, parent_started = pending.pop()
+        for child in children.get(parent, ()):
+            if child in seen:
+                continue
+            handle = KERNEL32.OpenProcess(0x00101000, False, child)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+            if not handle:
+                continue
+            started = process_started(handle)
+            if started is None or parent_started is None or started < parent_started:
+                KERNEL32.CloseHandle(handle)
+                continue
+            seen.add(child)
+            handles.append(handle)
+            pending.append((child, started))
+    return handles
+
+def wait_for_descendants(process, timeout=30):
+    """Wait until every process the exited host started has exited; returns how many still run."""
+    handles = open_descendants(process.pid)
+    if not handles:
+        return 0
+    try:
+        deadline, running = time.monotonic() + timeout, 0
+        for handle in handles:
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            running += KERNEL32.WaitForSingleObject(handle, remaining) != 0
+        return running
+    finally:
+        for handle in handles:
+            KERNEL32.CloseHandle(handle)
+
+LEAKED_PROFILES = []
+
+def delete_owned_profile(process, profile, timeout=30):
+    """Delete the private profile of an exited host once the processes it started are gone.
+    A profile that survives is named by remove_profile's WARN and counted for the LEAKED line."""
+    try:
+        running = wait_for_descendants(process, timeout)
+        if running:
+            print(f"WARN {running} process(es) started by pid {process.pid} still running after {timeout} s; deleting {profile} anyway", flush=True)
+    except OSError as error:
+        print(f"WARN could not wait for the processes started by pid {process.pid}: {error}", flush=True)
+    if remove_profile(profile):
+        return True
+    LEAKED_PROFILES.append(profile)
+    return False
+
+def report_leaked_profiles():
+    """One line at exit for every importer (screensaver, ZMatrix configurator, desktop snapshot)."""
+    if LEAKED_PROFILES:
+        print(f"LEAKED {len(LEAKED_PROFILES)} WebView2 profile(s): {', '.join(map(str, LEAKED_PROFILES))}", flush=True)
+
+atexit.register(report_leaked_profiles)
 
 def prune_stale_profiles(max_age_seconds=24 * 3600):
     """Delete profile folders older than a day. Concurrent runs share this folder, so a
@@ -74,7 +195,7 @@ def stop_application(process):
     finally:
         profile = getattr(process, "webview_profile", None)
         if profile is not None:
-            remove_profile(profile)
+            delete_owned_profile(process, profile)
 
 def preserve_portable_presets(case):
     """Restore the exact preset files after the case has reaped its owned app."""

@@ -204,7 +204,10 @@ The default publish input is `artifacts\gate\win-x64-fd\`. These probes open
 test-owned WebView2 debugging profiles and verify both native backends, granted
 local image resources, rejection of ungranted URLs, and configurator preview
 bootstrap data. Each launch's private profile is deleted when that launch ends,
-and profiles older than a day are pruned when the probe starts. The optional
+after the processes the application started exit (it waits up to 30 s). A
+profile that still cannot be deleted is named in a `WARN` line and counted in
+one `LEAKED` line when the probe exits. Profiles older than a day are pruned
+when the probe starts. The optional
 donor input also exercises the imported manifest,
 glyph atlas and explicit sound-test action. Screenshots and reports under
 `artifacts\native-uc3d\` can contain donor media; keep that directory private.

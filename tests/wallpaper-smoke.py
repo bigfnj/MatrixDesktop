@@ -3,11 +3,16 @@
 Requires an interactive desktop, Playwright and Pillow. Never installs/registers
 a screensaver, changes startup/wallpaper settings, or restarts Explorer.
 """
-import argparse, asyncio, ctypes, json, os, socket, subprocess, tempfile, time, urllib.request
+import argparse, asyncio, ctypes, importlib.util, json, os, socket, subprocess, tempfile, time, urllib.request
 from ctypes import wintypes
 from pathlib import Path
 from playwright.async_api import async_playwright
 from PIL import Image, ImageStat
+
+# The native smoke's profile cleanup: wait for the browser processes, delete, report leaks.
+_spec = importlib.util.spec_from_file_location('native_smoke', Path(__file__).with_name('native-uc3d-smoke.py'))
+native = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(native)
 
 u = ctypes.WinDLL('user32', use_last_error=True)
 u.GetForegroundWindow.restype = wintypes.HWND
@@ -57,7 +62,7 @@ def free_port():
         sock.bind(('127.0.0.1', 0))
         return sock.getsockname()[1]
 
-async def run(app, output, scene, renderer):
+async def run(app, output, scene, renderer, delete_profile=False):
     name = f'{scene}-{renderer}'
     directory = output / name
     directory.mkdir(parents=True, exist_ok=True)
@@ -65,7 +70,8 @@ async def run(app, output, scene, renderer):
     port = free_port()
     env = dict(os.environ)
     env['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = f'--remote-debugging-port={port} --remote-allow-origins=*'
-    env['WEBVIEW2_USER_DATA_FOLDER'] = str(directory / 'owned-webview-profile')
+    profile = directory / 'owned-webview-profile'
+    env['WEBVIEW2_USER_DATA_FOLDER'] = str(profile)
     process = subprocess.Popen([str(app), '--wallpaper', '--wallpaper-pause-fullscreen', 'false', '--scene', scene, '--renderer', renderer], env=env)
     witness = {'case':name, 'pid':process.pid, 'foregroundBefore':int(before or 0)}
     try:
@@ -159,15 +165,19 @@ async def run(app, output, scene, renderer):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        if delete_profile:
+            # R2-37: nothing reuses a manual run's fresh folder, so its profile (about 14 MB)
+            # would only pile up; the evidence beside it stays.
+            witness['profileDeleted'] = native.delete_owned_profile(process, profile)
         (directory / 'evidence.json').write_text(json.dumps(witness, indent=2), encoding='utf-8')
 
-if __name__ == '__main__':
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--app', type=Path, default=Path(__file__).resolve().parents[1] / 'MatrixDesktop/bin/Release/net10.0-windows/MatrixDesktop.exe')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--scene', default='all', choices=['matrix','uc3d','zmatrix','all'])
     parser.add_argument('--renderer', default='both', choices=['regl','webgpu','both'])
-    options = parser.parse_args()
+    options = parser.parse_args(argv)
     if not options.app.is_file():
         parser.error('build/publish MatrixDesktop first, or supply --app')
     output = options.output or Path(tempfile.mkdtemp(prefix='matrix-wallpaper-smoke-'))
@@ -175,6 +185,11 @@ if __name__ == '__main__':
     renderers = ['regl','webgpu'] if options.renderer == 'both' else [options.renderer]
     for scene in scenes:
         for renderer in renderers:
-            asyncio.run(run(options.app.resolve(), output.resolve(), scene, renderer))
+            # Profiles are deleted only from a folder this run created. A caller's --output
+            # (the gate's is fixed) keeps its profiles, which the next run reuses.
+            asyncio.run(run(options.app.resolve(), output.resolve(), scene, renderer, delete_profile=options.output is None))
             print(f'PASS {scene}/{renderer}: actual WorkerW, requested backend, animation, focus and clean exit', flush=True)
     print(f'Evidence: {output.resolve()}', flush=True)
+
+if __name__ == '__main__':
+    main()
