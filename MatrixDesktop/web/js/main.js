@@ -69,6 +69,21 @@ window.matrixRendererLost = installRecovery({
 	showError,
 });
 
+// R2-23: Plug me in's consent must outlive that reload and the host's renderer reload, which
+// both return to the startup query, or the notice comes back over a hidden canvas and no
+// renderer starts. It holds for this tab's session and this exact configuration only, so a
+// fresh launch or a changed configuration still warns. Storage can throw; without it the
+// notice simply returns.
+const CONSENT_KEY = "matrixSoftwareRenderingConsent";
+const consentGiven = () => {
+	try { return window.sessionStorage.getItem(CONSENT_KEY) === startupSearch; }
+	catch { return false; }
+};
+const recordConsent = () => {
+	try { window.sessionStorage.setItem(CONSENT_KEY, startupSearch); }
+	catch { /* the notice returns after a reload */ }
+};
+
 document.body.onload = async () => {
 	// WebView2 can retain an older document-created script in a reused iframe.
 	// The native bridge fetches the current generation before any renderer uses
@@ -88,6 +103,8 @@ document.body.onload = async () => {
 	if (config.useHoloplay && config.renderer?.toLowerCase() === "webgpu") {
 		console.info("Looking Glass uses the WebGL renderer for its multiview quilt output.");
 	}
+	// The same state a click on Plug me in leaves behind (below).
+	if (consentGiven()) config.suppressWarnings = true;
 
 	// suppressWarnings FIRST, same reason. isRunningSwiftShader() creates a second canvas
 	// and a whole throwaway WebGL context just to read a renderer string, and never releases
@@ -117,6 +134,7 @@ document.body.onload = async () => {
 		document.querySelector(".blue.pill").addEventListener("click", async () => {
 			try {
 				config.suppressWarnings = true;
+				recordConsent();
 				urlParams.set("suppressWarnings", true);
 				history.replaceState({}, "", "?" + urlParams.toString());
 				notice.remove();

@@ -8,7 +8,7 @@ import { wantsWebGPU } from "../MatrixDesktop/web/js/rendererChoice.js";
 import makeConfig from "../MatrixDesktop/web/js/config.js";
 import getLKG from "../MatrixDesktop/web/js/regl/lkgHelper.js";
 import { makePipeline, loadTexture } from "../MatrixDesktop/web/js/webgpu/utils.js";
-import { createShaderTime, rebaseLimits, shaderTick } from "../MatrixDesktop/web/js/shaderTime.js";
+import { createShaderTime, introSafeLimits, rebaseLimits, shaderTick } from "../MatrixDesktop/web/js/shaderTime.js";
 import createClickRipples from "../MatrixDesktop/web/js/clickRipples.js";
 
 const root = new URL("../MatrixDesktop/web/", import.meta.url);
@@ -455,17 +455,21 @@ await test("shader time stays small over days and moves its origin only when the
 	const { gapMs, briefGapMs, softSeconds, hardSeconds, restartSeconds } = rebaseLimits;
 	const time = createShaderTime(), shifts = [];
 	time.onRebase((shift) => shifts.push(shift));
-	let wall = 1000;
-	const frame = (seconds, gap = 16) => time.frame(seconds, (wall += gap));
+	// hidden: the page reported a visibility change during the gap (js/hostPlayback.js unseenEpoch).
+	let wall = 1000, epoch = 0;
+	const frame = (seconds, gap = 16, hidden = false) => time.frame(seconds, (wall += gap), hidden ? ++epoch : epoch);
 	assert.equal(frame(0), 0);
-	assert.equal(frame(500, 2 * gapMs), 500, "time below the restart point must not move");
-	assert.equal(frame(1800, gapMs - 1000), 1800, "a pause under a minute must keep time continuous");
+	assert.equal(frame(500, 2 * gapMs, true), 500, "time below the restart point must not move");
+	assert.equal(frame(1800, gapMs - 1000, true), 1800, "a pause under a minute must keep time continuous");
 	assert.deepEqual(shifts, []);
-	near(frame(1800.016, gapMs), restartSeconds, "a minute without frames (lock, display off, suspend) must restart shader time");
-	near(frame(1800.032), restartSeconds + 0.016, "time must stay continuous after a move", 1e-9);
-	near(shifts[0], 1200.016, "the shift must be the distance moved");
+	// R2-19: a visible host pause (manual, a fullscreen app, battery) keeps its frame on screen.
+	near(frame(1800.016, 2 * gapMs), 1800.016, "a visible pause of two minutes must keep time continuous", 1e-9);
+	assert.deepEqual(shifts, []);
+	near(frame(1800.032, gapMs, true), restartSeconds, "a minute without frames (lock, display off, suspend) must restart shader time");
+	near(frame(1800.048), restartSeconds + 0.016, "time must stay continuous after a move", 1e-9);
+	near(shifts[0], 1200.032, "the shift must be the distance moved");
 	// Four days of active time with no pause: the hard bound keeps every value under six hours.
-	let seconds = 1800.032, previous = restartSeconds + 0.016, max = 0, moves = shifts.length;
+	let seconds = 1800.048, previous = restartSeconds + 0.016, max = 0, moves = shifts.length;
 	for (let step = 0; step < 4 * 24 * 60; step++) {
 		seconds += 60;
 		const value = frame(seconds);
@@ -474,13 +478,14 @@ await test("shader time stays small over days and moves its origin only when the
 	}
 	assert(max < hardSeconds + 60, `shader time reached ${max} s during a 4-day run`);
 	assert(shifts.length >= 15, `a 4-day run without pauses moved the origin ${shifts.length} time(s)`);
-	near(frame(seconds, 5 * gapMs), restartSeconds, "a long pause after four days must restart shader time");
-	// Past an hour, any pause of a second or more is unseen enough; frame jitter is not.
+	near(frame(seconds, 5 * gapMs, true), restartSeconds, "a long pause after four days must restart shader time");
+	// Past an hour, any hidden pause of a second or more is unseen enough; frame jitter is not.
 	const soft = createShaderTime();
-	soft.frame(softSeconds - 10, (wall += 16));
-	near(soft.frame(softSeconds - 9, (wall += briefGapMs)), softSeconds - 9, "a brief pause before an hour must keep time continuous");
-	near(soft.frame(softSeconds + 1, (wall += briefGapMs - 1)), softSeconds + 1, "jitter under a second must keep time continuous");
-	near(soft.frame(softSeconds + 2, (wall += briefGapMs)), restartSeconds, "a brief pause past an hour must restart shader time");
+	soft.frame(softSeconds - 10, (wall += 16), ++epoch);
+	near(soft.frame(softSeconds - 9, (wall += briefGapMs), ++epoch), softSeconds - 9, "a brief pause before an hour must keep time continuous");
+	near(soft.frame(softSeconds + 1, (wall += briefGapMs - 1), ++epoch), softSeconds + 1, "jitter under a second must keep time continuous");
+	near(soft.frame(softSeconds + 2, (wall += 2 * briefGapMs), epoch), softSeconds + 2, "a visible brief pause past an hour must keep time continuous");
+	near(soft.frame(softSeconds + 3, (wall += briefGapMs), ++epoch), restartSeconds, "a brief pause past an hour must restart shader time");
 	// Click stamps move with the origin: a ripple in flight keeps its age, unused slots stay unused.
 	const canvas = new Events(); canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 });
 	const ripples = createClickRipples(canvas, true), stamped = createShaderTime();
@@ -488,13 +493,64 @@ await test("shader time stays small over days and moves its origin only when the
 	ripples.syncTime(stamped.frame(5000, (wall += 16)));
 	for (const fn of canvas.listeners.get("click")) fn({ clientX: 50, clientY: 50 });
 	ripples.markClean();
-	const now = stamped.frame(5000.5, (wall += gapMs));
+	const now = stamped.frame(5000.5, (wall += gapMs), ++epoch);
 	near(now, restartSeconds, "the stamped clock must have moved");
 	near(now - ripples.clicks[2], 0.5, "a ripple in flight must keep its age across a move");
 	near(now - ripples.touches[0][2], 0.5, "a ripple in flight must keep its age across a move (WebGPU layout)");
 	assert(ripples.clicks[5] < -1e8 && ripples.touches[1][2] < -1e8, "unused ripple slots must stay inactive");
 	assert.equal(ripples.changed, true, "moved stamps must be uploaded again");
 	ripples.cleanup();
+});
+
+// R2-20: whether every column's intro has passed the bottom row at a shader time, from the
+// column offsets in rainPass.intro.frag.glsl and rainPass.wgsl (WebGPU divides the column by
+// the row count, so volumetric density above 1 reaches the sine term's lower half). Done means
+// no brightness boost (1 - 5 * progress) and the cell below counts as activated.
+const introDone = (config, shaderSeconds) => {
+	const rows = config.numColumns, columns = Math.max(1, Math.floor(config.numColumns * (config.volumetric ? config.density : 1)));
+	const random = (x) => { const v = Math.sin((x * 12.9898) % Math.PI) * 43758.5453; return v - Math.floor(v); };
+	const simTime = shaderSeconds * config.animationSpeed;
+	for (let x = 0; x < columns; x++) {
+		const offset = x === Math.trunc(rows / 2) ? -1 : x === Math.trunc(rows * 0.75) ? -2 : random(x) * -4 + (Math.sin((x / rows) * Math.PI) - 1) * 2 - 2.5;
+		const intro = (((simTime + offset) * config.fallSpeed) / rows) * 100;
+		if (!(intro - 1 >= 0.2 && intro - (1 + 1 / rows) > 0)) return false;
+	}
+	return true;
+};
+
+await test("a shader time move with the intro on restarts after the slowest column's intro is done (R2-20)", () => {
+	// 50 s frames to 3500 s, then a 61 s gap the page spent hidden.
+	const moveAfterHiddenGap = (config) => {
+		const time = createShaderTime(introSafeLimits(config));
+		let wall = 0, seconds = 0;
+		time.frame(0, wall, 0);
+		while (seconds < 3500) time.frame((seconds += 50), (wall += 50_000), 0);
+		return time.frame(seconds + 0.016, wall + 61_000, 1);
+	};
+	for (const query of [{ numColumns: "80" }, { numColumns: "80", volumetric: "true", density: "2" }, { numColumns: "40", animationSpeed: "-0.01", fallSpeed: "-0.3" }]) {
+		const config = makeConfig({ skipIntro: "false", animationSpeed: "0.01", fallSpeed: "0.3", ...query }), label = JSON.stringify(query);
+		assert.equal(config.skipIntro, false, `the intro must stay on (${label})`);
+		const moved = moveAfterHiddenGap(config);
+		assert(moved < 3500, `the hidden gap must move shader time (${label}: ${moved} s)`);
+		assert(introDone(config, moved), `shader time restarted at ${moved} s, inside the slowest column's intro (${label})`);
+	}
+	const skipped = makeConfig({ skipIntro: "true", animationSpeed: "0.01", fallSpeed: "0.3", numColumns: "80" });
+	assert.equal(introSafeLimits(skipped), rebaseLimits, "skipIntro must keep the plain limits");
+	near(moveAfterHiddenGap(skipped), rebaseLimits.restartSeconds, "with skipIntro a move must still restart at ten minutes");
+	// A restart point past the plain six-hour bound must not pin time there.
+	const slow = makeConfig({ skipIntro: "false", animationSpeed: "0.001", fallSpeed: "0.05", numColumns: "80" }), limits = introSafeLimits(slow);
+	assert(limits.restartSeconds > rebaseLimits.hardSeconds, `the probe needs a restart point past six hours, got ${limits.restartSeconds} s`);
+	const time = createShaderTime(limits);
+	let seconds = 0, wall = 0, previous = time.frame(0, wall, 0), moves = 0;
+	time.onRebase(() => moves++);
+	while (seconds < 4 * limits.hardSeconds) {
+		const before = moves, value = time.frame((seconds += 60), (wall += 16), 0);
+		if (moves === before) near(value, previous + 60, `time must keep advancing at ${seconds} s`, 1e-6);
+		else assert(introDone(slow, value), `a move restarted at ${value} s, inside the intro`);
+		previous = value;
+	}
+	assert(moves >= 2, `a long run must still move the origin (${moves} moves)`);
+	near(time.frame((seconds += 60), (wall += 16), 0), previous + 60, "time must advance after a move, not stay pinned at the restart point", 1e-6);
 });
 
 await test("rain and mirror passes move their click stamps with the shader time origin", async () => {
@@ -551,6 +607,42 @@ await test("regl tick stays exact in float32 past 2^24 frames and cycles glyphs 
 	}
 });
 
+// R2-21: the WebGPU palette and stripe passes dither with randomFloat(uv + time), and the hash's
+// dot product is about 91 * time, so as shader time grows float32 gives neighbouring pixels the
+// same input and the dither turns into bars. This emulates the hash input in float32 for each
+// form computeMain is known to use, across a whole shader time cycle at a 4K-at-0.75 width.
+const ditherInputs = {
+	"uv+vec2<f32>(time.seconds)": (t) => Math.fround(t),
+	"uv+vec2<f32>(fract(time.seconds))": (t) => { const s = Math.fround(t); return Math.fround(s - Math.floor(s)); },
+};
+const ditherArgument = (source) => {
+	const main = source.slice(source.indexOf("fn computeMain"));
+	const start = main.indexOf("randomFloat(") + "randomFloat(".length;
+	let depth = 1, end = start;
+	while (depth > 0 && end < main.length) { const c = main[end++]; if (c === "(") depth++; else if (c === ")") depth--; }
+	return main.slice(start, end - 1).replace(/\s+/g, "");
+};
+for (const file of ["palettePass", "stripePass"]) {
+	await test(`WebGPU ${file} dither keeps neighbouring pixels distinct for a whole shader time cycle`, async () => {
+		const source = await readFile(new URL(`shaders/wgsl/${file}.wgsl`, root), "utf8");
+		assert(source.includes("fn computeMain") && source.slice(source.indexOf("fn computeMain")).includes("randomFloat("), `${file}.wgsl no longer dithers in computeMain`);
+		const argument = ditherArgument(source), input = ditherInputs[argument];
+		assert(input, `update the dither emulation: ${file}.wgsl computeMain now hashes randomFloat(${argument})`);
+		const f = Math.fround, a = f(12.9898), b = f(78.233), W = 2880, H = 1620, uvY = f(810 / H);
+		for (const t of [600, 1437, 2874, 3600, 5747, 11495, 16384, 21599.98]) {
+			const shift = input(t), py = f(f(uvY + shift) * b);
+			let previous = NaN, distinct = 0;
+			for (let x = 0; x < W; x++) {
+				const dt = f(f(f(f(x / W) + shift) * a) + py);
+				if (x > 0 && dt !== previous) distinct++;
+				previous = dt;
+			}
+			const share = distinct / (W - 1);
+			assert(share >= 0.9, `${file}.wgsl at shader time ${t} s: only ${(share * 100).toFixed(1)}% of neighbouring pixels get distinct dither inputs`);
+		}
+	});
+}
+
 // A fake page for webgpu/main.js: the device records texture sizes and can raise GPU events.
 // These stubs are installed last so they cannot change any earlier case.
 const makeMatrixDevice = (maxTextureDimension2D) => {
@@ -572,13 +664,24 @@ const makeMatrixDevice = (maxTextureDimension2D) => {
 	});
 };
 let pendingFrame = null, lastFrame = null;
+// One document for every fake page: js/hostPlayback.js listens for visibilitychange on the
+// document it finds when first imported.
+const pageDocument = new Events();
+// js/hostPlayback.js adds its matrix-host-state listener to window once, when first imported,
+// and every case clears window's listeners, so keep that listener to pause the host (R2-24).
+let hostState = null;
+const addWindowListener = window.addEventListener;
+window.addEventListener = function (type, fn) {
+	if (type === "matrix-host-state") hostState ??= fn;
+	return addWindowListener.call(this, type, fn);
+};
 const startMatrixWebGPU = async ({ adapterLimit, cssWidth, cssHeight, resolution, params = {} }) => {
 	const run = {};
 	const borrowed = { createView: () => ({}), destroy() { throw new Error("canvas texture destroyed"); } };
 	globalThis.requestAnimationFrame = (fn) => { pendingFrame = lastFrame = fn; return 1; };
 	globalThis.cancelAnimationFrame = () => { pendingFrame = null; };
-	globalThis.document = { fullscreenEnabled: false, body: { appendChild: (tag) => queueMicrotask(() => tag.onload?.()) },
-		createElement: () => ({ getContext: () => ({ drawImage() {} }) }) };
+	globalThis.document = Object.assign(pageDocument, { fullscreenEnabled: false, body: { appendChild: (tag) => queueMicrotask(() => tag.onload?.()) },
+		createElement: () => ({ getContext: () => ({ drawImage() {} }) }) });
 	Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: { gpu: {
 		getPreferredCanvasFormat: () => "rgba8unorm",
 		requestAdapter: async () => ({ limits: { maxTextureDimension2D: adapterLimit }, requestDevice: async (descriptor) => {
@@ -718,6 +821,34 @@ await test("WebGPU Matrix renderer feeds the shaders a small time after four day
 	} finally { run.dispose(); }
 });
 
+await test("WebGPU Matrix renderer moves shader time only across a gap the page spent hidden (R2-19)", async () => {
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	try {
+		const seconds = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0]).map(([, data]) => new Float32Array(data)[0]).at(-1);
+		run.frame(16); run.frame(33);
+		run.frame(1_800_000);
+		near(seconds(), 1800, "a 30-minute gap with no visibility change (a visible host pause) must keep shader time continuous", 1);
+		pageDocument.fire("visibilitychange");
+		run.frame(1_861_000);
+		near(seconds(), rebaseLimits.restartSeconds, "a minute the page spent hidden must restart shader time", 1e-3);
+	} finally { run.dispose(); }
+});
+
+await test("WebGPU Matrix renderer restarts shader time after a slow intro is done (R2-20)", async () => {
+	const params = { skipIntro: "false", animationSpeed: "0.01" };
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params });
+	try {
+		const { restartSeconds } = introSafeLimits(makeConfig({ numColumns: "4", camera: "false", ...params }));
+		assert(restartSeconds > 1000, `the probe needs an intro longer than ten minutes, got a restart at ${restartSeconds} s`);
+		const seconds = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0]).map(([, data]) => new Float32Array(data)[0]).at(-1);
+		run.frame(16); run.frame(33);
+		run.frame(3_500_000);
+		pageDocument.fire("visibilitychange");
+		run.frame(3_561_000);
+		near(seconds(), restartSeconds, "a move must restart shader time after the intro, where introSafeLimits puts it", 1e-2);
+	} finally { run.dispose(); }
+});
+
 await test("WebGPU Matrix renderer at fps 0 draws one still frame and stops", async () => {
 	const still = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "0" } });
 	try {
@@ -731,6 +862,35 @@ await test("WebGPU Matrix renderer at fps 0 draws one still frame and stops", as
 		control.frame(16);
 		assert.notEqual(pendingFrame, null, "fps 30 must keep animating");
 	} finally { control.dispose(); }
+});
+
+await test("WebGPU Matrix renderer parks its frame loop through a host pause (R2-24)", async () => {
+	assert.equal(typeof hostState, "function", "js/hostPlayback.js no longer listens for matrix-host-state on window");
+	const host = (paused) => hostState({ detail: { paused } });
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	const request = globalThis.requestAnimationFrame;
+	let requests = 0;
+	globalThis.requestAnimationFrame = (fn) => { requests++; return request(fn); };
+	try {
+		run.frame(16); run.frame(33);
+		assert.notEqual(pendingFrame, null, "a playing renderer must request its next frame");
+		// A pause and resume before the requested frame runs must not request a second one.
+		host(true); host(false);
+		assert.equal(requests, 2, "a resume with a frame still pending requested another");
+		host(true);
+		run.frame(50);
+		assert.equal(pendingFrame, null, "a paused renderer must not request another frame");
+		const frames = run.diagnostics.frames;
+		host(false);
+		assert.notEqual(pendingFrame, null, "a resume must request a frame");
+		run.frame(66);
+		assert.equal(run.diagnostics.frames, frames + 1, "the frame after a resume must draw");
+		assert.notEqual(pendingFrame, null, "the resumed renderer must keep requesting frames");
+	} finally {
+		host(false);
+		run.dispose();
+		globalThis.requestAnimationFrame = request;
+	}
 });
 
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);

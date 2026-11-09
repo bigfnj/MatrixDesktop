@@ -75,3 +75,24 @@ console.log("PASS host playback clock: pause, between-frame pause, resume, initi
   } finally { delete globalThis.window; delete globalThis.document; delete globalThis.MouseEvent; }
   console.log("PASS host playback transport: pause and resume only through the host's window event; pointer web messages still forwarded");
 }
+
+// R2-19: the unseen epoch moves on every visibility change and on nothing else, so a visible
+// host pause (manual, fullscreen app, battery) never lets js/shaderTime.js move its origin.
+{
+  const window = new EventTarget(), document = new EventTarget();
+  Object.assign(globalThis, { window, document });
+  try {
+    const playback = await import("../MatrixDesktop/web/js/hostPlayback.js?visibility");
+    const start = playback.unseenEpoch(), host = (paused) => window.dispatchEvent(new CustomEvent("matrix-host-state", { detail: { paused } }));
+    host(true); host(false);
+    assert.equal(playback.unseenEpoch(), start, "a host pause without a visibility change must not move the unseen epoch");
+    document.dispatchEvent(new Event("visibilitychange"));
+    assert.equal(playback.unseenEpoch(), start + 1, "a visibility change must move the unseen epoch");
+    document.dispatchEvent(new Event("visibilitychange"));
+    assert.equal(playback.unseenEpoch(), start + 2, "every visibility change must move it, so a coalesced hidden-then-visible pair still counts");
+    window.dispatchEvent(new Event("pagehide"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    assert.equal(playback.unseenEpoch(), start + 2, "pagehide must remove the visibility listener");
+  } finally { delete globalThis.window; delete globalThis.document; }
+  console.log("PASS host playback unseen epoch: moves on each visibility change, not on a visible host pause; pagehide removes the listener");
+}

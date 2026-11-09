@@ -9,8 +9,8 @@ import makeQuiltPass from "./quiltPass.js";
 import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
-import { createPlaybackClock } from "../hostPlayback.js";
-import { createShaderTime, shaderTick } from "../shaderTime.js";
+import { createPlaybackClock, subscribeHostPlayback, unseenEpoch } from "../hostPlayback.js";
+import { createShaderTime, introSafeLimits, shaderTick } from "../shaderTime.js";
 
 const effects = {
 	none: null,
@@ -50,7 +50,11 @@ export default async (canvas, config) => {
 	window.matrixRuntimeDiagnostics = diagnostics; window.__matrixRuntime = diagnostics;
 	canvas.dataset.scene = "matrix"; canvas.dataset.renderer = "regl";
 
+	// R2-22: assigning the canvas size clears it, and a still frame (fps 0, or once) is never
+	// drawn again, so once it is shown the backing size stays as drawn, as in the other scenes.
+	let stillShown = false;
 	const resize = () => {
+		if (stillShown) return;
 		const devicePixelRatio = window.devicePixelRatio ?? 1;
 		canvas.width = Math.max(1, Math.ceil(canvas.clientWidth * devicePixelRatio * config.resolution));
 		canvas.height = Math.max(1, Math.ceil(canvas.clientHeight * devicePixelRatio * config.resolution));
@@ -76,7 +80,7 @@ export default async (canvas, config) => {
 	let pipeline = [];
 	let cleanedUp = false;
 	let regl;
-	let tick;
+	let frameRequest = null, parked = false, stopListening = null;
 	let contextLost = false;
 	const cleanup = () => {
 		if (cleanedUp) {
@@ -86,7 +90,8 @@ export default async (canvas, config) => {
 		diagnostics.ready = false; diagnostics.disposed = true;
 		clock.dispose();
 		window.removeEventListener("pagehide", cleanup);
-		tick?.cancel();
+		cancelAnimationFrame(frameRequest);
+		stopListening?.();
 		window.removeEventListener("resize", resize);
 		if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
 			canvas.removeEventListener("dblclick", dblclickHandler);
@@ -153,7 +158,7 @@ export default async (canvas, config) => {
 	const fullScreenQuad = makeFullScreenQuad(regl);
 	let activeFrames = 0;
 	// AUD-64: shaders get float32 time measured from an origin that moves forward (js/shaderTime.js).
-	const shaderTime = createShaderTime();
+	const shaderTime = createShaderTime(introSafeLimits(config));
 	let shaderSeconds = 0;
 	// AUD-65: tick wraps before float32 loses integers (js/shaderTime.js).
 	const withClock = regl({ context: { time: () => shaderSeconds, tick: () => shaderTick(activeFrames, config.cycleFrameSkip) } });
@@ -174,14 +179,22 @@ export default async (canvas, config) => {
 	diagnostics.initialized = true;
 	diagnostics.dispose = cleanup;
 
-	tick = regl.frame(({ viewportWidth, viewportHeight }) => {
+	// R2-24: a manual, fullscreen-app or battery pause leaves the page visible (AUD-06), so the
+	// loop parks while paused instead of waking at the display rate, and the resume listener
+	// below starts it again. It is this file's own requestAnimationFrame chain, as in UC3D and
+	// ZMatrix: regl's stop hands cancelAnimationFrame its callback instead of the request id, so
+	// after a cancel regl's next request stays pending, and a loop made again at that moment
+	// would run twice per frame. regl.poll() and the flush are what regl.frame did around each
+	// callback.
+	const draw = () => {
+		frameRequest = null;
 		// AUD-19: isContextLost() turns true before the browser queues webglcontextlost, so a
 		// frame in between finds the canvas blank and must clear ready, as UC3D and ZMatrix do.
 		if (contextLost || regl._gl.isContextLost()) { diagnostics.ready = false; return; }
-		if (clock.paused) return;
-		if (singleFrame) {
-			tick.cancel();
-		}
+		if (clock.paused) { parked = true; return; }
+		if (!singleFrame) frameRequest = requestAnimationFrame(draw);
+		regl.poll();
+		const viewportWidth = regl._gl.drawingBufferWidth, viewportHeight = regl._gl.drawingBufferHeight;
 
 		const now = clock.seconds() * 1000;
 
@@ -207,7 +220,7 @@ export default async (canvas, config) => {
 				step.setSize(viewportWidth, viewportHeight);
 			}
 		}
-		shaderSeconds = shaderTime.frame(clock.seconds(), performance.now());
+		shaderSeconds = shaderTime.frame(clock.seconds(), performance.now(), unseenEpoch());
 		withClock(() => fullScreenQuad(() => {
 			for (const step of pipeline) {
 				step.execute(shouldRender);
@@ -219,9 +232,17 @@ export default async (canvas, config) => {
 		diagnostics.simulationTime = clock.seconds();
 		if (singleFrame) {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
+			stillShown = true;
 			if (config.useCamera) stopCamera();
 		}
+		regl._gl.flush();
+	};
+	stopListening = subscribeHostPlayback((paused) => {
+		if (paused || !parked || cleanedUp) return;
+		parked = false;
+		frameRequest = requestAnimationFrame(draw);
 	});
+	frameRequest = requestAnimationFrame(draw);
 	} catch (error) {
 		diagnostics.errors.push(error.message);
 		cleanup();

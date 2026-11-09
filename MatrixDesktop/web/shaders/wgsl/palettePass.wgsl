@@ -64,7 +64,7 @@ fn getBrightness(uv : vec2<f32>) -> vec4<f32> {
 	var brightness = getBrightness(uv);
 
 	// Dither: subtract a random value from the brightness
-	brightness -= randomFloat( uv + vec2<f32>(time.seconds) ) * config.ditherMagnitude / 3.0;
+	brightness -= randomFloat( uv + vec2<f32>(fract(time.seconds)) ) * config.ditherMagnitude / 3.0;
 
 	// Map the brightness to a position in the palette texture
 	var paletteIndex = clamp(i32(brightness.r * 512.0), 0, 511);

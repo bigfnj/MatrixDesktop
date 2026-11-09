@@ -5,23 +5,27 @@
 // within hours. The rain does not depend on where time 0 is, and only click stamps store
 // times, so the renderers feed the shaders clock time minus an origin and move the origin
 // forward. A move changes the rain pattern, so it happens when nobody saw the last frame:
-// after a minute or more with no rendered frame (a host pause for lock, display off,
-// suspend or a fullscreen app, or a hidden or suspended WebView), after a gap of a second
-// or more once shader time passes an hour, and unconditionally past six hours. Shader time
-// restarts at ten minutes, not zero: with skipIntro off the intro is a function of time,
-// and restarting it would sweep its cursor wave over a screen already full of rain.
+// after a minute or more with no rendered frame while the page was hidden (a host pause for
+// lock, display off or suspend hides the WebView first, and a hidden or occluded page stops
+// drawing), after such a gap of a second or more once shader time passes an hour, and
+// unconditionally past six hours. R2-19: a manual, fullscreen-app or battery pause keeps the
+// paused frame on screen, so a gap without a visibility change never moves the origin.
+// Shader time restarts at ten minutes, not zero, or later for a slow intro (introSafeLimits):
+// with skipIntro off the intro is a function of time, and restarting it would sweep its
+// cursor wave over a screen already full of rain.
 export const rebaseLimits = Object.freeze({ gapMs: 60_000, briefGapMs: 1_000, softSeconds: 3_600, hardSeconds: 21_600, restartSeconds: 600 });
 
 export const createShaderTime = (limits = rebaseLimits) => {
-	let origin = 0, lastWall = NaN;
+	let origin = 0, lastWall = NaN, lastEpoch = 0;
 	const listeners = new Set();
 	return {
-		// Once per rendered frame, with the clock's active seconds and the frame's wall time in
-		// milliseconds. Returns the shader time for that frame.
-		frame(seconds, wall) {
-			const gap = wall - lastWall, time = seconds - origin;
-			lastWall = wall;
-			const unseen = gap >= limits.gapMs || (gap >= limits.briefGapMs && time >= limits.softSeconds);
+		// Once per rendered frame, with the clock's active seconds, the frame's wall time in
+		// milliseconds and the page's unseen epoch (js/hostPlayback.js), which moves whenever
+		// the page's visibility changes. Returns the shader time for that frame.
+		frame(seconds, wall, epoch = lastEpoch) {
+			const gap = wall - lastWall, time = seconds - origin, hidden = epoch !== lastEpoch;
+			lastWall = wall; lastEpoch = epoch;
+			const unseen = hidden && (gap >= limits.gapMs || (gap >= limits.briefGapMs && time >= limits.softSeconds));
 			if (time > limits.restartSeconds && (unseen || time >= limits.hardSeconds)) {
 				const shift = time - limits.restartSeconds;
 				origin += shift;
@@ -37,6 +41,23 @@ export const createShaderTime = (limits = rebaseLimits) => {
 			return () => listeners.delete(listener);
 		},
 	};
+};
+
+// R2-20: with skipIntro off, the rain pass draws a cell the intro front has not reached with
+// extra brightness (1 - 5 * introProgress) over its sticky activated flag, so restarting shader
+// time inside a slow intro whites out the screen under a new cursor wave. A column's intro
+// passes the bottom row once (simTime + offset) * fallSpeed / numRows * 100 reaches
+// 1.2 + 1 / numRows. The rain grid has numColumns rows, the column offset goes down to -10.5
+// (WebGPU reaches the lower half of its sine term at volumetric density above 1), and two
+// negative speeds progress the same way. Shader time restarts a minute after the slowest column
+// is done; the soft and hard limits move by the same amount, so the hard rule never pins time
+// at the restart point. skipIntro keeps the plain limits.
+export const introSafeLimits = (config, numRows = config.numColumns) => {
+	if (config.skipIntro) return rebaseLimits;
+	const simSeconds = ((1.2 + 1 / numRows) * numRows) / (100 * Math.abs(config.fallSpeed)) + 10.5;
+	const raise = Math.max(0, simSeconds / Math.abs(config.animationSpeed) + 60 - rebaseLimits.restartSeconds);
+	return Object.freeze({ ...rebaseLimits, softSeconds: rebaseLimits.softSeconds + raise,
+		hardSeconds: rebaseLimits.hardSeconds + raise, restartSeconds: rebaseLimits.restartSeconds + raise });
 };
 
 // AUD-65: regl feeds the frame counter to the shaders as the float32 tick uniform, and
