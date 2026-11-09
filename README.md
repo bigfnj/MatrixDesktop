@@ -13,7 +13,10 @@ Current source version: **1.2.0**. Tagged releases are listed on the [releases p
 
 Choose **Wallpaper** in the configurator's window mode, or launch any scene with
 `--wallpaper`. The tray menu provides pause/resume, settings, exit and explicit
-per-user startup control. Wallpaper mode leaves typing and desktop icons usable;
+per-user startup control. **Start with Windows** is ticked only when the startup shortcut
+starts this launch's settings; when it starts other settings, the item reads **Start with
+Windows (other settings)** and one click stores this launch's settings instead. Wallpaper
+mode leaves typing and desktop icons usable;
 desktop pointer effects are optional. Fullscreen applications pause it by default,
 and battery pause is available separately. A paused wallpaper keeps its last frame
 on the desktop; only a locked or disconnected session, sleep or Windows turning the
@@ -27,19 +30,29 @@ MatrixDesktop.exe --wallpaper --scene zmatrix
 
 Launching the wallpaper again, for example with new settings, replaces the running one,
 and one tray icon remains. If the running wallpaper has not exited within 10 seconds,
-the new launch shows a message and stops. A launch without administrator rights cannot
-ask a wallpaper started as administrator to exit, so both keep running, each with its
-own tray icon, and the new launch logs a warning.
+the new launch withdraws its request, shows a message and stops, and the running wallpaper
+keeps the desktop. A running wallpaper that has already begun to exit by then gets 10 seconds
+more. Of two launches that overlap, the newer one wins and the older one stops without a
+message. A launch without administrator rights cannot ask a wallpaper started as
+administrator to exit, so both keep running, each with its own tray icon, and the new
+launch logs a warning.
 
-If WebView2's renderer process exits or stays unresponsive, the wallpaper reloads its
+If WebView2's renderer process exits, the wallpaper reloads its
 page, at most 3 times in 10 minutes. If the browser process is lost, or a reload fails
 or would exceed that budget, the wallpaper rebuilds its surface after a backoff that
 starts at 0.5 s and doubles up to 8 s; the backoff starts over once a renderer has stayed
 ready for a minute. Fullscreen, windowed, screensaver and preview launches reload the
 same way, and exit where a wallpaper would rebuild.
 
+WebView2 reports an unresponsive renderer only when input or a navigation goes unanswered,
+so only fullscreen and windowed launches get that report; after three reports in a row they
+reload the page the same way. A hung wallpaper page stays frozen until a display change or
+an Explorer restart rebuilds the surface, or until a relaunch. A hung preview stays frozen
+until Windows closes the preview window, and a hung screensaver until input ends it.
+
 A ZMatrix wallpaper's tray menu also offers **Refresh desktop**, which re-reads what the
-scene takes from Windows (the desktop wallpaper and the font-smoothing settings) and
+scene takes from Windows (the desktop wallpaper, the font-smoothing settings and the
+installed fonts, so a font installed after the wallpaper started is picked up) and
 updates the scene only if anything changed. The same refresh runs about 400 ms after
 Windows reports a wallpaper, desktop pattern, high-contrast, font-smoothing, system color
 or theme change, and waits for resume while the wallpaper is paused.
@@ -195,8 +208,8 @@ These screenshots are rendered by the same bundled offline web app that MatrixDe
   - "Export .ps1" button copies the current command as a runnable PowerShell script.
 - **Automated releases.** Push a tag for the source version, such as `v1.2.0`, and GitHub Actions
   builds, zips, and publishes a Release with both EXEs + assets + SHA256. It first checks the
-  tag against both csproj versions and the guide header, and requires CI to have passed on the
-  tagged commit.
+  tag against both csproj versions, the guide header and README's current source version, and
+  requires CI to have passed on the tagged commit.
 
 ## Build warning cleanup (NETSDK1137 / MSB3277)
 
@@ -328,8 +341,8 @@ older presets keep Legacy controls.
 
 Preset storage is portable-first:
 
-- If the publish folder is writable, presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`.
-- If the publish folder is not writable, presets are stored under `%LOCALAPPDATA%\MatrixDesktop\Configurator\`.
+- If the publish folder accepts new files and any presets file already there is writable (not read-only, and its permissions allow writes), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`.
+- Otherwise presets are stored under `%LOCALAPPDATA%\MatrixDesktop\Configurator\`. When that hides a presets file beside the configurator, the configurator logs a warning naming both paths.
 
 In framework-dependent publish output, run:
 
@@ -473,7 +486,7 @@ limits animation speed to 0 to 4.
 
 #### Feature toggles and click controls
 
-- `camera` (bool): enables webcam input for the mirror effect only; other effects ignore it and never open the webcam.
+- `camera` (bool): enables webcam input for the mirror effect only; other effects ignore it and never open the webcam. Windowed and fullscreen launches show WebView2's camera prompt, and a Block there lasts only for that launch. A wallpaper, screensaver or preview cannot show the prompt, so it runs without the camera unless the camera was already allowed in a windowed launch, such as the configurator's Test.
 - `clickRipples` (bool): enables click-triggered ripples in non-mirror rain effects such as `stripes`, `palette`, or `image`.
 - `clickRippleShape` (string): click ripple shape: `circle` (default), `box`, `triangle`, or `star`. Invalid values fall back to `circle`.
 - `volumetric` (bool): enables volumetric/3D rendering.
@@ -610,17 +623,20 @@ build, the native regression harness, renderer lifecycle and UC3D scenario tests
 the media importer's synthetic tests, `node --check` over every first-party web module,
 every referenced shader and asset resolving, a headless DOM smoke, the embedded argument
 guide, a window icon in both executables at every size the app asks for, the guide header's
-version matching both csproj (`tests/check-release-version.ps1`, which `release.yml` also
-runs with the tag), embedded source-line symbols, the publish payload, local publish
-profiles that set nothing the release does not, and ICU globalization in both published
-`runtimeconfig.json` files.
+version and README's current source version matching both csproj
+(`tests/check-release-version.ps1`, which `release.yml` also runs with the tag), embedded
+source-line symbols, the publish payload, local publish profiles that set nothing the
+release does not, and ICU globalization in both published `runtimeconfig.json` files.
 The UC3D WebGL browser smoke checks rendered picture colors and relief as well as
 animation and disposal. The original-control WebGL calibration checks slider endpoints, independent
 population/size, 2D/portrait, motion and cleanup. The runtime tiers create real windows
 and capture frames, so they need an attached session and cannot run on a headless runner.
 
-One tier-1 check is about the gate itself: it asserts the publish flags it uses appear in
-both of `release.yml`'s publish steps. Without that the gate measures a payload nobody ships,
+One tier-1 check is about the gate itself: it asserts that each of `release.yml`'s two
+publish steps sets the same effective MSBuild properties as the gate's own publish, in both
+directions, with comments ignored, continued lines joined and the last value of a property
+winning. Only the output folder and the version stamps may differ, and a publish profile or
+a switch the check does not understand fails it. Without that the gate measures a payload nobody ships,
 which is exactly what it used to do. Another asserts that `release.yml` runs the tag version
 check and the CI result check before its first `dotnet publish`.
 
@@ -664,7 +680,7 @@ Exit codes:
 | --- | --- |
 | `0` | Pass. Every selected check ran and passed. |
 | `1` | A real failure. At least one check failed and the cause is in the code or the repo. |
-| `2` | Something could not be verified: a check was skipped for lack of an interactive session, missing build output, or similar. Not a pass; the skipped list is printed. |
+| `2` | Something could not be verified: a check was skipped for lack of an interactive session, missing build output, or similar, or a GUI check came back black, frozen or failing after the app asked WebView2 to suspend its renderer for display-off, a locked or disconnected session or sleep. Not a pass; the not-verified list is printed. |
 | `3` | The gate itself broke. Treat as a harness bug, not a product failure. |
 
 Exit 2 is worth treating as acceptable in CI while still printing the not-verified list,
@@ -681,7 +697,7 @@ which is what `ci.yml` does. Exit 1 and 3 fail the build.
   - Some upstream folders and docs are excluded from build/publish output to keep the portable folder smaller.
 
 - WebView2 user data:
-  - The wrapper stores WebView2 profile/cache data in `%LOCALAPPDATA%\MatrixDesktop\WebView2\`.
+  - The wrapper stores WebView2 profile/cache data in `%LOCALAPPDATA%\MatrixDesktop\WebView2\`. A camera Block saved there is cleared at the next start, so deleting the folder is not needed to undo one.
   - If LocalAppData is not writable, it falls back to `%APPDATA%\MatrixDesktop\WebView2\`, then `%TEMP%\MatrixDesktop\WebView2\`.
 
 - WebView2 web assets:
@@ -692,7 +708,10 @@ which is what `ci.yml` does. Exit 1 and 3 fail the build.
   - If the GPU context or device is lost, for example after a GPU reset or a graphics driver
     crash, the page reloads itself, up to 3 times in 5 minutes. After that it shows "Error
     loading renderer: the GPU renderer was lost ... and could not be recovered automatically.
-    Restart MatrixDesktop to try again."
+    Restart MatrixDesktop to try again." The same notice appears at once, without a reload,
+    when the WebGL renderer cannot start because the browser refuses the page a new WebGL
+    context, as Chromium does for the rest of its session after repeated GPU resets; no reload
+    can help then.
 
 ## Attribution / License
 
