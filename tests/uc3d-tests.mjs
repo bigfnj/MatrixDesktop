@@ -933,5 +933,67 @@ await asyncTest("REGL UC3D builds its programs only through the shared createPro
     assert.equal(released.length, 1, "the live path must release the failed shader");
   });
 });
+// AUD-52: gl.getError() waits for the GPU process, so the REGL passes read it on their first
+// frames, on a frame that allocates and then about once a second (glErrorCheck.js). An error
+// stays recorded until it is read, so it still fails the scene, at most a second later.
+const { createErrorCheck } = await import("../MatrixDesktop/web/js/glErrorCheck.js");
+{
+  const { createHash } = await import("node:crypto");
+  for (const file of ["glErrorCheck.js", "regl/uc3dPass.js"])
+    console.log(`WITNESS ${file} ${createHash("sha256").update(readFileSync(new URL(`../MatrixDesktop/web/js/${file}`, import.meta.url))).digest("hex")}`);
+}
+test("a WebGL error check reads about once a second, and at once on the first frames and a forced frame", () => {
+  // A getError double: fault() records one error, held until it is read.
+  const source = () => {
+    let pending = 0;
+    const gl = { NO_ERROR: 0, reads: 0, fault: code => { pending = code; }, getError: () => { gl.reads++; const error = pending; pending = 0; return error; } };
+    return gl;
+  };
+  // Frames 1..120 at fps 60; returns the frame that threw and its message, or frame 0.
+  const run = (gl, at = 0, force = false) => {
+    const check = createErrorCheck(gl, "UC3D", { everyFrames: 60 });
+    for (let frame = 1; frame <= 120; frame++) {
+      if (frame === at) gl.fault(1282);
+      try { check(force && frame === at); } catch (error) { return { frame, message: error.message }; }
+    }
+    return { frame: 0 };
+  };
+  const problems = [], quiet = source();
+  if (run(quiet).frame || quiet.reads < 1 || quiet.reads > 5) problems.push(`120 quiet frames read getError ${quiet.reads} times, expected 1 to 5`);
+  for (const [at, force, by] of [[1, false, 1], [10, false, 60], [10, true, 10]]) {
+    const result = run(source(), at, force);
+    if (result.message !== "UC3D WebGL error 1282" || result.frame < at || result.frame > by)
+      problems.push(`an error recorded at frame ${at}${force ? " (forced)" : ""} was reported at frame ${result.frame} (${result.message ?? "never"}), expected by frame ${by}`);
+  }
+  assert.ok(!problems.length, problems.join("; "));
+});
+await asyncTest("REGL UC3D reads WebGL errors about once a second and still fails visibly on one", async () => {
+  await withPassEnvironment({}, async ({ tick, diagnostics, visible }) => {
+    // 120 frames, one per 17 ms tick at fps 60. fault() records an error before frame `at`; with
+    // resize that frame also widens the canvas, so it reallocates the render target.
+    const run = async (at = 0, resize = false) => {
+      const gl = fakeGL(4096), canvas = passCanvas(gl, 200, 100), read = gl.getError;
+      let reads = 0;
+      gl.getError = () => { reads++; return read(); };
+      const stop = await startREGL(canvas, resolveConfig({ scene: "uc3d", resolution: "1" }));
+      try {
+        for (let frame = 1; frame <= 120; frame++) {
+          if (frame === at) { gl.fault(1282); if (resize) canvas.clientWidth = 300; }
+          tick(frame * 17);
+          if (diagnostics().errors.length) return { reads, frame, errors: diagnostics().errors, disposed: diagnostics().disposed, visible: visible() };
+        }
+        return { reads, frame: 0, errors: diagnostics().errors, drawn: diagnostics().frames };
+      } finally { stop(); }
+    };
+    const problems = [], quiet = await run(), late = await run(10), resized = await run(10, true);
+    assert.equal(quiet.drawn, 120, `witness: 120 ticks drew ${quiet.drawn} frames (${quiet.errors.join("; ")})`);
+    if (quiet.reads > 5) problems.push(`120 frames read getError ${quiet.reads} times, expected at most 5`);
+    if (late.frame < 10 || late.frame > 60 || late.errors[0] !== "UC3D WebGL error 1282" || !late.disposed)
+      problems.push(`an error recorded at frame 10 failed the scene at frame ${late.frame} (${late.errors.join("; ") || "never"}), expected by frame 60`);
+    else if (!late.visible.includes("UC3D rendering failed: UC3D WebGL error 1282")) problems.push(`no visible failure; the page shows ${JSON.stringify(late.visible)}`);
+    if (resized.frame !== 10) problems.push(`a frame that reallocates its render target must read errors at once; an error there failed the scene at frame ${resized.frame}`);
+    assert.ok(!problems.length, problems.join("; "));
+  });
+});
 console.log(`${passed} UC3D scenario tests passed, ${failures} failed`);
 process.exitCode = failures ? 1 : 0;

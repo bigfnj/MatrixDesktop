@@ -1,5 +1,6 @@
 import { createRuntime, startLoop } from "../zmatrix/runtime.js";
 import { createProgram } from "../webglProgram.js";
+import { createErrorCheck } from "../glErrorCheck.js";
 
 // The persistent 2D scene is shared; this pass really presents it through WebGL.
 export default async function startZMatrix(canvas, config) {
@@ -32,6 +33,8 @@ export default async function startZMatrix(canvas, config) {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.bindBuffer(gl.ARRAY_BUFFER, geometry); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
     const position = gl.getAttribLocation(program, "position"), image = gl.getUniformLocation(program, "image");
+    // A resized frame reallocates the presented texture, so it reads its errors at once.
+    const checkErrors = createErrorCheck(gl, "ZMatrix", { everyFrames: runtime.config.fps });
     stop = startLoop(canvas, runtime, frame => {
       // The lost event is queued after isContextLost() turns true; a frame between them draws
       // nothing and must not fail, so the event can still preventDefault for the page's restore.
@@ -44,7 +47,7 @@ export default async function startZMatrix(canvas, config) {
       gl.viewport(0, 0, width, height); gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.useProgram(program);
       gl.bindBuffer(gl.ARRAY_BUFFER, geometry); gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
       gl.uniform1i(image, 0); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disableVertexAttribArray(position);
-      const error = gl.getError(); if (error !== gl.NO_ERROR) throw new Error(`ZMatrix WebGL error ${error}`);
+      checkErrors(resized);
     }, cleanup);
     return stop;
   } catch (error) { runtime?.diagnostics.errors.push(error.message); cleanup(); throw error; }

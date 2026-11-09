@@ -36,6 +36,60 @@ def canvas_image(page):
     return Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
 
 
+# AUD-52: gl.getError() waits for the GPU process, so the REGL pass reads it about once a second
+# (glErrorCheck.js) instead of on every frame. A WebGL error recorded between two reads is held
+# until the next one, so it must still fail the scene, record the error and show the notice.
+COUNT_ERROR_READS = """(() => {
+    const read = WebGLRenderingContext.prototype.getError;
+    window.__getErrorReads = 0;
+    WebGLRenderingContext.prototype.getError = function () { window.__getErrorReads++; return read.call(this); };
+})();"""
+
+
+def check_error_reads(browser, origin):
+    context = browser.new_context(viewport={"width": 640, "height": 360}, device_scale_factor=1)
+    try:
+        page = context.new_page()
+        page.add_init_script(COUNT_ERROR_READS)
+        page.goto(f"{origin}/index.html?scene=zmatrix&renderer=regl&suppressWarnings=true&resolution=1&fps=30"
+                  "&zmMaxStream=80&zmRefreshTime=20&zmBackgroundMode=color&zmBackgroundColor=9,18,27", wait_until="load")
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.ready && matrixRuntimeDiagnostics.frames > 10", timeout=30000)
+        for relative in ("js/glErrorCheck.js", "js/regl/zmatrixPass.js"):
+            deployed = bytes(page.evaluate("async path => Array.from(new Uint8Array(await (await fetch(path,{cache:'no-store'})).arrayBuffer()))", relative))
+            assert deployed == (WEB / relative).read_bytes(), f"served source mismatch: {relative}"
+            print(f"SOURCE {relative} sha256={hashlib.sha256(deployed).hexdigest()}", flush=True)
+        before = page.evaluate("({frames: matrixRuntimeDiagnostics.frames, reads: __getErrorReads})")
+        page.wait_for_function("count => matrixRuntimeDiagnostics.frames >= count + 90", arg=before["frames"], timeout=30000)
+        after = page.evaluate("({frames: matrixRuntimeDiagnostics.frames, reads: __getErrorReads, errors: matrixRuntimeDiagnostics.errors})")
+        frames, reads = after["frames"] - before["frames"], after["reads"] - before["reads"]
+        assert not after["errors"], after["errors"]
+        # fps=30 reads once every 30 frames; a read on every frame gives one read per frame.
+        assert 1 <= reads <= frames / 10, f"{reads} getError reads in {frames} frames, expected about one every 30"
+        # generateMipmap with no texture bound records INVALID_OPERATION (1282) in WebGL itself.
+        injected = page.evaluate("""() => {
+            const gl = document.querySelector("canvas").getContext("webgl");
+            gl.bindTexture(gl.TEXTURE_2D, null); gl.generateMipmap(gl.TEXTURE_2D);
+            return {frames: matrixRuntimeDiagnostics.frames, at: performance.now()};
+        }""")
+        try:
+            page.wait_for_function("() => matrixRuntimeDiagnostics.errors.length > 0 && document.querySelector('.render-failure')", timeout=10000)
+        except Exception as error:
+            state = page.evaluate("({errors: matrixRuntimeDiagnostics.errors, frames: matrixRuntimeDiagnostics.frames})")
+            raise AssertionError(f"an INVALID_OPERATION recorded at frame {injected['frames']} was not reported within 10 s: {state}") from error
+        failed = page.evaluate("""at => ({errors: matrixRuntimeDiagnostics.errors, frames: matrixRuntimeDiagnostics.frames,
+            disposed: matrixRuntimeDiagnostics.disposed, notice: document.querySelector(".render-failure").textContent,
+            elapsed: performance.now() - at})""", injected["at"])
+        later = failed["frames"] - injected["frames"]
+        assert failed["errors"] == ["ZMatrix WebGL error 1282"], failed["errors"]
+        assert failed["notice"] == "ZMatrix rendering failed: ZMatrix WebGL error 1282", failed["notice"]
+        assert failed["disposed"], "the failed scene was not disposed"
+        assert later < 30, f"the error was reported {later} frames after it was recorded, expected within 30"
+        assert failed["elapsed"] <= 1500, f"the error was reported {failed['elapsed']:.0f} ms after it was recorded, expected within 1500"
+        return {"frames": frames, "reads": reads, "framesToFailure": later, "msToFailure": round(failed["elapsed"])}
+    finally:
+        context.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", default=None)
@@ -111,6 +165,14 @@ def main():
                     print(f"FAIL ZMatrix {backend}: {error}", flush=True)
                 finally:
                     context.close()
+            if args.renderer in ("regl", "both"):
+                try:
+                    reads = check_error_reads(browser, origin)
+                    reports.append({"backend": "regl", "errorReads": reads})
+                    print(f"PASS ZMatrix regl error reads: {json.dumps(reads)}", flush=True)
+                except Exception as error:
+                    failures.append(f"regl error reads: {error}")
+                    print(f"FAIL ZMatrix regl error reads: {error}", flush=True)
             browser.close()
     finally:
         server.shutdown()
