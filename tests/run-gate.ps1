@@ -80,6 +80,7 @@ $script:Fail = 0
 $script:Unchecked = 0
 $script:Failures = New-Object 'Collections.Generic.List[string]'
 $script:Uncheckables = New-Object 'Collections.Generic.List[string]'
+$script:DisplayHeld = $false
 
 function Test-Hdr { param([string]$Msg) Write-Host ''; Write-Host "=== $Msg" -ForegroundColor Cyan }
 function Test-Ok { param([string]$Msg) $script:Pass++; Write-Host "  ok         $Msg" -ForegroundColor DarkGray }
@@ -128,6 +129,9 @@ $StartMarker = "CrashDumpWriter installed for process"
 $RenderStdFloor = 0.04
 $RenderNonBlackFloor = 0.02
 $RenderChangedFloor = 0.005
+# A cold first launch was still a uniform fill at the fixed settle and failed (R2-36), so the
+# first frame is polled from $SettleMs until it clears the floors or this many ms have passed.
+$RenderSettleLimitMs = 20000
 
 # ---------------------------------------------------------------- win32
 
@@ -244,6 +248,22 @@ function Get-ChangedFraction {
     return [double]$v
 }
 
+# Captures $Path after $SettleMs, then again every second until the frame clears the render
+# floors or $RenderSettleLimitMs has passed since the window appeared (R2-36). A healthy warm
+# launch still returns after $SettleMs. Returns the capture size, or $null without a bitmap.
+function Wait-RenderedCapture {
+    param([IntPtr]$Hwnd, [string]$Path, [double]$NonBlackFloor = 0)
+    Start-Sleep -Milliseconds $SettleMs
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $size = Get-WindowCapture -Hwnd $Hwnd -Path $Path
+        if (-not $size -or $SettleMs + $clock.ElapsedMilliseconds -ge $RenderSettleLimitMs) { return $size }
+        $probe = Get-RenderStats $Path
+        if ($probe.Std -ge $RenderStdFloor -and $probe.NonBlack -ge $NonBlackFloor) { return $size }
+        Start-Sleep -Milliseconds 1000
+    }
+}
+
 # ---------------------------------------------------------------- process
 
 function Assert-NoStaleInstance {
@@ -294,9 +314,10 @@ function Get-WebViewDescendantCount {
 # shutdown gets reported as leaked. That produced a real intermittent FAIL on one smoke case
 # out of three while the other two passed, which is the signature of a timing bug rather
 # than a product defect. Returns as soon as the count reaches zero, so a genuinely clean
-# shutdown costs nothing; a real leak still fails, it just takes $TimeoutMs to say so.
+# shutdown costs nothing; a real leak still fails, it just takes $TimeoutMs to say so. 5 s
+# still failed under load and on a cold profile (R2-36), so the wait is 15 s.
 function Wait-WebViewDescendantsGone {
-    param([int]$RootPid, [int]$TimeoutMs = 5000)
+    param([int]$RootPid, [int]$TimeoutMs = 15000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     while ($true) {
         $n = Get-WebViewDescendantCount -RootPid $RootPid
@@ -366,7 +387,8 @@ function Test-SessionChurn {
 # hide records. Attribution is by pid, which rotation cannot destroy, with a byte offset
 # only used to detect that rotation happened.
 function Get-LogRecordsForPid {
-    param([int]$ProcessId, [datetime]$Since)
+    # -AnyProcess keeps every pid's records: tier 3's Python harnesses start the app themselves.
+    param([int]$ProcessId, [datetime]$Since, [switch]$AnyProcess)
     $out = New-Object 'Collections.Generic.List[object]'
     $header = '^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[pid=(?<pid>\d+) tid=\d+\] (?<lvl>INFO|WARN|ERROR) (?<msg>.*)$'
     foreach ($path in @("$LogPath.old", $LogPath)) {
@@ -396,7 +418,7 @@ function Get-LogRecordsForPid {
             $fs.Dispose()
         }
     }
-    return @($out | Where-Object { $_.Pid -eq $ProcessId -and $_.Ts -ge $Since.AddSeconds(-3) })
+    return @($out | Where-Object { ($AnyProcess -or $_.Pid -eq $ProcessId) -and $_.Ts -ge $Since.AddSeconds(-3) })
 }
 
 # ---------------------------------------------------------------- run
@@ -488,13 +510,21 @@ try {
     if (-not (Test-Path -LiteralPath $nativeProject -PathType Leaf)) {
         Test-Fail 'native GDI font rendering' "missing: $nativeProject"
     } else {
-        $nativeFontRun = Start-Process -FilePath (Get-Command dotnet).Source -ArgumentList ('run --project "' + $nativeProject + '" -c Release --no-launch-profile') `
-            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeFontLog -RedirectStandardError "$nativeFontLog.err"
-        $nativeFontOutput = Get-Content -LiteralPath $nativeFontLog, "$nativeFontLog.err" | Out-String
-        if ($nativeFontRun.ExitCode -ne 0 -or $nativeFontOutput -notmatch '(?m)^PASS Native GDI resolves bundled and special fonts with real metrics') {
-            Test-Fail 'native GDI font rendering' "exit $($nativeFontRun.ExitCode) or missing execution witness; see $nativeFontLog"
-            Write-Host $nativeFontOutput
-        } else { Test-Ok 'native GDI font rendering and handle cleanup' }
+        # Built on every run, -SkipBuild included, because the solution does not contain it.
+        # Invoke-GateBuildAndRun (gate-lib.ps1) builds with the call operator and runs only the
+        # built exe under Start-Process: 'dotnet run' under -Wait also waited for the compiler
+        # server its build started, about ten minutes after a native-only edit (R2-30).
+        $nativeProgram = Join-Path (Split-Path -Parent $nativeProject) 'bin\Release\net10.0-windows\MatrixDesktop.Native.Tests.exe'
+        $nativeVerdict = Invoke-GateBuildAndRun -Dotnet (Get-Command dotnet).Source -Project $nativeProject -Program $nativeProgram `
+            -Log $nativeFontLog -Witness '(?m)^PASS Native GDI resolves bundled and special fonts with real metrics'
+        if ($nativeVerdict.Outcome -eq 'ok') { Test-Ok 'native GDI font rendering and handle cleanup' }
+        elseif ($nativeVerdict.Outcome -eq 'unchecked') { Test-Unchecked 'native GDI font rendering' $nativeVerdict.Detail }
+        else {
+            Test-Fail 'native GDI font rendering' $nativeVerdict.Detail
+            # The run log exists only when the build passed and the suite ran.
+            $nativeShown = if (Test-Path -LiteralPath $nativeFontLog) { @($nativeFontLog, "$nativeFontLog.err") } else { @("$nativeFontLog.build") }
+            Get-Content -LiteralPath $nativeShown -ErrorAction SilentlyContinue | Select-Object -Last 80 | ForEach-Object { Write-Host $_ }
+        }
     }
 
     # Web asset integrity complements the behavior and browser checks below.
@@ -594,6 +624,36 @@ try {
     # geometric instead, and because they run in headless Chromium they need no session, no
     # GPU and no WebView2, so they are the only configurator UI coverage that works in CI.
     Test-Hdr 'tier 1: headless web smoke'
+    # The loadState fixture, and the node suites that read it, need the built harness and node
+    # but never Python, so they run ahead of the Python lookup and report by name whatever else
+    # is missing (Get-FixtureSuiteVerdicts, gate-lib.ps1; R2-31). The fixture is regenerated
+    # from the real ArgumentCatalog every run, so it can never be a stale snapshot of a
+    # catalogue that has since changed.
+    $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
+    $fixture = Join-Path $RepoRoot 'artifacts\gate\loadState.json'
+    $fixtureExit = $null
+    if (Test-Path -LiteralPath $testExe -PathType Leaf) {
+        & $testExe --dump-state $fixture | Out-Null
+        $fixtureExit = $LASTEXITCODE
+        if ($fixtureExit -ne 0) { Test-Fail 'loadState fixture generates' "$testExe --dump-state exited $fixtureExit" }
+    }
+    $fixtureSuites = @(
+        @{ Name = 'UC3D rebuilt slider metadata and web parsers agree'; Script = 'tests\uc3d-config-tests.mjs'; Log = 'md-gate-uc3d-config.log' }
+        @{ Name = 'ZMatrix rebuilt metadata and structured web parsers agree'; Script = 'tests\zmatrix-config-tests.mjs'; Log = 'md-gate-zmatrix-config.log' }
+        # AUD-13 drift guard: the C# effective-default tables against config.js and the stripe passes.
+        @{ Name = 'configurator effective defaults match the renderer for every version and effect'; Script = 'tests\effective-defaults-tests.mjs'; Log = 'md-gate-effective-defaults.log' }
+    )
+    $suiteVerdicts = @(Get-FixtureSuiteVerdicts -Names @($fixtureSuites | ForEach-Object { $_.Name }) -NodeFound ([bool]$node) -FixtureExit $fixtureExit)
+    for ($i = 0; $i -lt $fixtureSuites.Count; $i++) {
+        $suite = $fixtureSuites[$i]
+        if ($suiteVerdicts[$i].Outcome -ne 'run') { Test-Unchecked $suite.Name $suiteVerdicts[$i].Detail; continue }
+        $suiteLog = Join-Path $env:TEMP $suite.Log
+        $suiteRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + (Join-Path $RepoRoot $suite.Script) + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $suiteLog -RedirectStandardError "$suiteLog.err"
+        if ($suiteRun.ExitCode -eq 0) { Test-Ok $suite.Name }
+        else { Test-Fail $suite.Name "see $suiteLog" }
+    }
+
     # Prefer an interpreter that actually has playwright. On a developer box the bare
     # 'python' is deliberately the sanctioned system one, which does not, so searching PATH
     # alone would report CANNOT VERIFY forever and this check would never once run locally.
@@ -603,46 +663,16 @@ try {
     # a candidate without Playwright writes to stderr and that crashed Windows PowerShell 5.1.
     $py = Find-GatePython -Candidates @($env:MD_GATE_PYTHON, $env:TOOLBOX_PYTHON, 'python', 'python3', 'py')
     $smokeScript = Join-Path $RepoRoot 'tests\web-smoke.py'
-    $testExe = Join-Path $RepoRoot 'tests\MatrixDesktop.Tests\bin\Release\MatrixDesktop.Tests.exe'
     if (-not $py) {
         Test-Unchecked 'headless web smoke' 'no python on PATH (set MD_GATE_PYTHON to point at one)'
     } elseif (-not (Test-Path -LiteralPath $smokeScript -PathType Leaf)) {
         Test-Fail 'headless web smoke' "missing: $smokeScript"
-    } elseif (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+    } elseif ($null -eq $fixtureExit) {
         Test-Unchecked 'headless web smoke' 'the test harness has not been built, so the loadState fixture cannot be generated'
     } else {
-        # The fixture is regenerated from the real ArgumentCatalog every run, so it can never
-        # be a stale snapshot of a catalogue that has since changed.
-        $fixture = Join-Path $RepoRoot 'artifacts\gate\loadState.json'
-        & $testExe --dump-state $fixture | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Test-Fail 'headless web smoke' 'could not generate the loadState fixture'
+        if ($fixtureExit -ne 0) {
+            Test-Unchecked 'headless web smoke' 'the loadState fixture could not be generated; its FAIL is listed above'
         } else {
-            if ($node) {
-                $configTest = Join-Path $RepoRoot 'tests\uc3d-config-tests.mjs'
-                $configLog = Join-Path $env:TEMP 'md-gate-uc3d-config.log'
-                $configRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $configTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $configLog -RedirectStandardError "$configLog.err"
-                if ($configRun.ExitCode -eq 0) { Test-Ok 'UC3D rebuilt slider metadata and web parsers agree' }
-                else { Test-Fail 'UC3D rebuilt slider metadata and web parsers agree' "see $configLog" }
-                $zmatrixConfigTest = Join-Path $RepoRoot 'tests\zmatrix-config-tests.mjs'
-                $zmatrixConfigLog = Join-Path $env:TEMP 'md-gate-zmatrix-config.log'
-                $zmatrixConfigRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $zmatrixConfigTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $zmatrixConfigLog -RedirectStandardError "$zmatrixConfigLog.err"
-                if ($zmatrixConfigRun.ExitCode -eq 0) { Test-Ok 'ZMatrix rebuilt metadata and structured web parsers agree' }
-                else { Test-Fail 'ZMatrix rebuilt metadata and structured web parsers agree' "see $zmatrixConfigLog" }
-                # AUD-13 drift guard: the C# effective-default tables against config.js and the stripe passes.
-                $defaultsTest = Join-Path $RepoRoot 'tests\effective-defaults-tests.mjs'
-                $defaultsLog = Join-Path $env:TEMP 'md-gate-effective-defaults.log'
-                $defaultsRun = Start-Process -FilePath $node.Source -ArgumentList ('"' + $defaultsTest + '" "' + $fixture + '"') -Wait -PassThru -NoNewWindow `
-                    -RedirectStandardOutput $defaultsLog -RedirectStandardError "$defaultsLog.err"
-                if ($defaultsRun.ExitCode -eq 0) { Test-Ok 'configurator effective defaults match the renderer for every version and effect' }
-                else { Test-Fail 'configurator effective defaults match the renderer for every version and effect' "see $defaultsLog" }
-            } else {
-                Test-Unchecked 'UC3D rebuilt slider metadata and web parsers agree' 'node is not on PATH'
-                Test-Unchecked 'ZMatrix rebuilt metadata and structured web parsers agree' 'node is not on PATH'
-                Test-Unchecked 'configurator effective defaults match the renderer for every version and effect' 'node is not on PATH'
-            }
             $smokeLog = Join-Path $env:TEMP 'md-gate-web-smoke.log'
             $smokeRun = Start-Process -FilePath $py -ArgumentList ('"' + $smokeScript + '"') -Wait -PassThru -NoNewWindow `
                 -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"
@@ -662,7 +692,14 @@ try {
                     $bad = @([regex]::Matches($smokeOut, '(?m)^\s+FAIL\s+(.+)$') | ForEach-Object { $_.Groups[1].Value })
                     Test-Fail 'headless web smoke' ($bad -join ' | ')
                 }
-                2 { Test-Unchecked 'headless web smoke' 'playwright or its chromium build is unavailable for this interpreter' }
+                # UNCHECKED only with the UNVERIFIED line web-smoke.py prints on its cannot-verify
+                # paths, so the reason names the real cause and the logs; exit 2 without it is a
+                # FAIL, as for the other Python cases (Get-GateCaseVerdict, gate-lib.ps1; R2-35).
+                2 {
+                    $smokeVerdict = Get-GateCaseVerdict -ExitCode 2 -Log $smokeLog
+                    if ($smokeVerdict.Outcome -eq 'unchecked') { Test-Unchecked 'headless web smoke' $smokeVerdict.Detail }
+                    else { Test-Fail 'headless web smoke' $smokeVerdict.Detail }
+                }
                 default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
             }
         }
@@ -696,8 +733,10 @@ try {
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' },
             # AUD-59: with no WebGPU adapter the calibration must report unverified coverage
-            # (exit 2 and its witness), as README says, not a product failure (exit 1).
-            @{ Name = 'UC3D calibration reports a hidden WebGPU adapter as unverified'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer webgpu --only amount-500'
+            # (exit 2 and its witness), as README says, not a product failure (exit 1). Its own
+            # --output, or its empty report.json replaces the regl case's summary (R2-32); a
+            # literal, because gate-lib.tests.ps1 reads these cases back with SafeGetValue.
+            @{ Name = 'UC3D calibration reports a hidden WebGPU adapter as unverified'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer webgpu --only amount-500 --output artifacts\gate\uc3d-calibration-hidden-adapter'
                 Environment = @{ MD_UC3D_HIDE_WEBGPU_ADAPTER = '1' }; ExpectCannotVerify = '(?m)^\s*CANNOT VERIFY WebGPU'; Forbidden = '(?m)^\s*PASS webgpu' },
             @{ Name = 'ZMatrix WebGL smoke'; Script = 'tests\zmatrix-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'ZMatrix configurator controls and imports'; Script = 'tests\zmatrix-configurator.py'; Arguments = '' },
@@ -913,8 +952,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     # Asserts the two values are EQUAL, not that a version line exists: a regex that merely
     # matched "v1.0.something" would have passed happily on the stale 1.0.2.
     #
-    # Agreement between the files was not enough either: at v1.0.3 and v1.0.4 all three said
-    # 1.0.2 and this check passed, while release.yml stamped the binaries from the tag. The
+    # Agreement between the files was not enough either: at v1.0.3 and v1.0.4 both csproj files,
+    # the guide and README said 1.0.2 and this check passed, while release.yml stamped the
+    # binaries from the tag (gate-lib.ps1, Get-ReleaseVersionReport, lists the files). The
     # comparison now lives in tests\check-release-version.ps1, which release.yml runs with
     # -Tag before it builds; the gate runs the same script, in a child of this same shell, with
     # no tag. Only a tag run (GITHUB_REF_TYPE=tag) reads the ref name, so main pushes and pull
@@ -958,7 +998,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     # difference between what is measured and what a user downloads. DebugType/DebugSymbols
     # matter just as much, because without them the "no .pdb" assertion below was passing on a
     # publish that had no reason to emit one, which is a check that cannot fail.
-    # The release-parity check further down holds the two lists together.
+    # The release-parity check further down compares the effective properties of this publish
+    # and of each release.yml publish step, both ways (R2-33).
+    $PublishArguments = @('-c', 'Release', '-r', 'win-x64', '--no-self-contained')
     $PublishFlags = @(
         '-p:PublishSingleFile=false'
         '-p:PublishReadyToRun=true'
@@ -972,7 +1014,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
     $publishOk = $true
     foreach ($proj in 'MatrixDesktop\MatrixDesktop.csproj', 'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj') {
-        & dotnet publish (Join-Path $RepoRoot $proj) -c Release -r win-x64 --no-self-contained `
+        & dotnet publish (Join-Path $RepoRoot $proj) @PublishArguments `
             @PublishFlags -p:PublishDir="$GatePublishDir\" --nologo -v:minimal | Out-Null
         if ($LASTEXITCODE -ne 0) { $publishOk = $false; Test-Fail "publish $proj" }
     }
@@ -1029,39 +1071,24 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             Test-Fail 'repository has a LICENSE' 'no LICENSE at the repo root, and this is a public repo'
         }
 
-        # Assert the CONDITION, not the presence of a line: every flag the gate publishes with
-        # must appear in each of release.yml's two publish steps. Checking only that the file
-        # mentions PublishReadyToRun somewhere would still pass if it were moved, commented out,
-        # or applied to just one of the two executables.
+        # Each of release.yml's two publish steps must set every property this publish sets, to
+        # the same EFFECTIVE value, and nothing else but its output folder and the version
+        # stamps: comments dropped, continuations joined, the last value winning as in MSBuild
+        # (Get-ReleasePublishParityProblems, gate-lib.ps1). The substring check this replaces
+        # passed a property set only in release.yml, a later override, --self-contained and a
+        # flag left only in a comment (R2-33).
         $releaseYml = Join-Path $RepoRoot '.github\workflows\release.yml'
         if (-not (Test-Path -LiteralPath $releaseYml -PathType Leaf)) {
             Test-Fail 'gate publishes what release.yml publishes' "not found: $releaseYml"
         } else {
-            $ymlText = Get-Content -LiteralPath $releaseYml -Raw
-            # Bounded by the next step header or end of file, NOT by a blank line. A blank
-            # line terminator looked fine until a mutation removed one flag and left the line
-            # whitespace-only, which truncated the capture and made the gate report four
-            # missing flags instead of the one that was actually removed. It still failed, but
-            # a check that misidentifies what broke is most of the way to being useless.
-            $steps = @([regex]::Matches($ymlText, '(?s)dotnet publish\s+(.*?)(?=\r?\n\s{6}- name|\Z)'))
-            if ($steps.Count -ne 2) {
+            $gatePublish = @($PublishArguments) + @($PublishFlags)
+            $drift = @(Get-ReleasePublishParityProblems -YamlText ([IO.File]::ReadAllText($releaseYml)) -GateArguments $gatePublish)
+            if ($drift.Count -gt 0) {
                 Test-Fail 'gate publishes what release.yml publishes' `
-                    "expected 2 'dotnet publish' steps in release.yml, found $($steps.Count); the parity check cannot be trusted"
+                    ("the gate would measure a payload the release does not build: " + ($drift -join '; '))
             } else {
-                $drift = @()
-                foreach ($flag in $PublishFlags) {
-                    for ($i = 0; $i -lt $steps.Count; $i++) {
-                        if ($steps[$i].Groups[1].Value -notmatch [regex]::Escape($flag)) {
-                            $drift += "$flag (missing from publish step $($i + 1))"
-                        }
-                    }
-                }
-                if ($drift.Count -gt 0) {
-                    Test-Fail 'gate publishes what release.yml publishes' `
-                        ("the gate would measure a payload the release does not build: " + ($drift -join '; '))
-                } else {
-                    Test-Ok "gate publishes what release.yml publishes ($($PublishFlags.Count) flags matched in both steps)"
-                }
+                $gateProperties = (ConvertTo-PublishProperties -Arguments $gatePublish).Properties.Count
+                Test-Ok "gate publishes what release.yml publishes (both steps set the gate's $gateProperties properties to the same values, and nothing else but the output folder and version stamps)"
             }
         }
     }
@@ -1091,6 +1118,13 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         Test-Hdr 'tier 2 and 3: not requested'
         Write-Host '  runtime smoke omitted by -Tier1Only, an explicit caller decision' -ForegroundColor DarkGray
     } else {
+
+        # Tiers 2 and 3 photograph real windows, and every host hides its renderer when the
+        # console display powers off, so the gate keeps the display and the system on until it
+        # exits (Enter-GateDisplayHold, gate-lib.ps1; R2-36). Said on every run, held or not.
+        $script:DisplayHeld = Enter-GateDisplayHold
+        if ($script:DisplayHeld) { Write-Host 'display hold: on (SetThreadExecutionState, until the gate exits)' }
+        else { Write-Host 'display hold: unavailable (SetThreadExecutionState refused), so an idle display can still power off' -ForegroundColor Yellow }
 
         # -------------------------------------------------------- tier 2
 
@@ -1165,11 +1199,12 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         Test-Ok "smoke [$caseName] window appeared in $($started.MsToWindow) ms"
 
                         # Calibrated: black at 500 ms, a uniform fill at 1-2 s, real content
-                        # by 3 s. Two frames 700 ms apart so the animation can be proven live.
-                        Start-Sleep -Milliseconds $SettleMs
+                        # by 3 s on a warm profile; a cold first launch takes longer, so frame A
+                        # is polled (Wait-RenderedCapture). Two frames 700 ms apart so the
+                        # animation can be proven live.
                         $shotA = Join-Path $ShotDir "$caseName-a.png"
                         $shotB = Join-Path $ShotDir "$caseName-b.png"
-                        $sizeA = Get-WindowCapture -Hwnd $started.Hwnd -Path $shotA
+                        $sizeA = Wait-RenderedCapture -Hwnd $started.Hwnd -Path $shotA -NonBlackFloor $RenderNonBlackFloor
                         Start-Sleep -Milliseconds 700
                         $sizeB = Get-WindowCapture -Hwnd $started.Hwnd -Path $shotB
 
@@ -1181,17 +1216,16 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                             $stats = Get-RenderStats $shotA
                             $changed = Get-ChangedFraction -PathA $shotA -PathB $shotB
                             $detail = "std={0:N5} mean={1:N5} nonBlack={2:N5} moved={3:N5} {4}" -f $stats.Std, $stats.Mean, $stats.NonBlack, $changed, $sizeA
-                            if ($stats.Std -lt $RenderStdFloor) {
-                                Test-Fail "smoke [$caseName] rendered content" "$detail (std floor $RenderStdFloor; a black or uniform frame measures like this)"
-                            } elseif ($stats.NonBlack -lt $RenderNonBlackFloor) {
-                                Test-Fail "smoke [$caseName] rendered content" "$detail (non-black floor $RenderNonBlackFloor)"
-                            } else {
-                                Test-Ok "smoke [$caseName] rendered content ($detail)"
-                                if ($changed -lt $RenderChangedFloor) {
-                                    Test-Fail "smoke [$caseName] animation is running" "$detail (moved floor $RenderChangedFloor; the frame is static)"
-                                } else {
-                                    Test-Ok ("smoke [$caseName] animation is running (moved={0:N5})" -f $changed)
-                                }
+                            # A black or static frame is UNCHECKED when this pid logged that it hid
+                            # its renderer for the display, session or power state (Get-RenderVerdict,
+                            # gate-lib.ps1; R2-36), and a FAIL otherwise.
+                            $frameRecords = @(Get-LogRecordsForPid -ProcessId $proc.Id -Since $launchedAt)
+                            foreach ($verdict in @(Get-RenderVerdict -Stats $stats -Changed $changed -Records $frameRecords -Detail $detail `
+                                    -StdFloor $RenderStdFloor -NonBlackFloor $RenderNonBlackFloor -ChangedFloor $RenderChangedFloor)) {
+                                $verdictName = "smoke [$caseName] $($verdict.Check)"
+                                if ($verdict.Outcome -eq 'ok') { Test-Ok "$verdictName ($($verdict.Detail))" }
+                                elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $verdictName $verdict.Detail }
+                                else { Test-Fail $verdictName $verdict.Detail }
                             }
                         }
 
@@ -1299,9 +1333,8 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                         Test-Fail 'configurator creates a visible window' 'MainWindowHandle never became visible'
                     } else {
                         Test-Ok "configurator window appeared in $($started.MsToWindow) ms"
-                        Start-Sleep -Milliseconds $SettleMs
                         $shot = Join-Path $ShotDir 'configurator.png'
-                        $size = Get-WindowCapture -Hwnd $started.Hwnd -Path $shot
+                        $size = Wait-RenderedCapture -Hwnd $started.Hwnd -Path $shot
                         if (-not $size) {
                             Test-Unchecked 'configurator rendered content' 'PrintWindow returned no bitmap'
                         } else {
@@ -1361,9 +1394,14 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
         } else {
             $nativeScript = Join-Path $RepoRoot 'tests\native-uc3d-smoke.py'
             $nativeLog = Join-Path $ShotDir 'native-uc3d.log'
+            $nativeStarted = Get-Date
             $nativeRun = Start-Process -FilePath $py -ArgumentList ('"' + $nativeScript + '" --renderer regl --publish "' + $GatePublishDir + '"') `
                 -Wait -PassThru -NoNewWindow -RedirectStandardOutput $nativeLog -RedirectStandardError "$nativeLog.err"
+            # The script starts the app itself, so any MatrixDesktop pid's suspension record since
+            # it started marks the failure as environmental (Find-HostSuspension; R2-36).
+            $nativeSuspension = if ($nativeRun.ExitCode -ne 0) { Find-HostSuspension -Records @(Get-LogRecordsForPid -AnyProcess -Since $nativeStarted) } else { '' }
             if ($nativeRun.ExitCode -eq 0) { Test-Ok 'published UC3D media and preview' }
+            elseif ($nativeSuspension) { Test-Unchecked 'published UC3D media and preview' "exit $($nativeRun.ExitCode) after a MatrixDesktop process logged '$nativeSuspension'; see $nativeLog" }
             else { Test-Fail 'published UC3D media and preview' "exit $($nativeRun.ExitCode); see $nativeLog" }
         }
     }
@@ -1385,9 +1423,12 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 continue
             }
             $log = Join-Path $ShotDir (($case.Name -replace ' ', '-') + '.log')
+            $caseStarted = Get-Date
             $verdict = Invoke-GateChildCase -FilePath $py -ArgumentList ('"' + $path + '"' + $case.Arguments) -Log $log
+            $caseSuspension = if ($verdict.Outcome -eq 'fail') { Find-HostSuspension -Records @(Get-LogRecordsForPid -AnyProcess -Since $caseStarted) } else { '' }
             if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
             elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
+            elseif ($caseSuspension) { Test-Unchecked $case.Name "$($verdict.Detail), after a MatrixDesktop process logged '$caseSuspension' (R2-36)" }
             else {
                 Test-Fail $case.Name $verdict.Detail
                 Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
@@ -1441,5 +1482,6 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     }
     Stop-Harness "unhandled exception: $($_.Exception.Message) $where"
 } finally {
+    if ($script:DisplayHeld) { [void](Exit-GateDisplayHold) }
     Pop-Location
 }

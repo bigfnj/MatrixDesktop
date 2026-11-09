@@ -1,13 +1,13 @@
 #requires -Version 5
 <#
 .SYNOPSIS
-    Checks that both csproj <Version> values and the argument guide header agree, and with a
-    release tag that they equal it.
+    Checks that both csproj <Version> values, the argument guide header and README's current
+    source version agree, and with a release tag that they equal it.
 
 .DESCRIPTION
     release.yml runs this with -Tag before it builds anything, and the gate runs it with no tag
-    on every run. At tags v1.0.3 and v1.0.4 both csproj files and the guide said 1.0.2 while the
-    release stamped the binaries from the tag; the comparison lives in gate-lib.ps1
+    on every run. At tags v1.0.3 and v1.0.4 both csproj files, the guide and README said 1.0.2
+    while the release stamped the binaries from the tag; the comparison lives in gate-lib.ps1
     (Get-ReleaseVersionReport) so both callers run the same code.
 
     Without -Tag the GitHub ref name is used only when GITHUB_REF_TYPE is 'tag': ci.yml runs the

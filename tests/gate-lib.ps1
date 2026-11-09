@@ -124,12 +124,14 @@ function Get-DumpsForPid {
 
 # ---------------------------------------------------------------- release version and CI
 
-# A release states its version in three files: both csproj <Version> elements and the guide
-# header that --help-full and the configurator's ? button show. At tags v1.0.3 and v1.0.4 all
-# three said 1.0.2 while release.yml stamped the binaries from the tag, and a check that only
-# compared the files with each other passed at both. With -Tag (one leading 'v' stripped) each
-# file must equal the tag; without it the files must agree with each other. Problems name the
-# file, so an empty Problems list means consistent.
+# A release states its version in four files: both csproj <Version> elements, the guide
+# header that --help-full and the configurator's ? button show, and README's 'Current source
+# version' line, which every release zip ships. At tags v1.0.3 and v1.0.4 all four said 1.0.2
+# while release.yml stamped the binaries from the tag, and a check that only compared the files
+# with each other passed at both. With -Tag (one leading 'v' stripped) each file must equal the
+# tag; without it the files must agree with each other. Problems name the file, so an empty
+# Problems list means consistent. README's 'source' is optional: it read 'Current version'
+# before 1.2.0.
 function Get-ReleaseVersionReport {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -139,6 +141,7 @@ function Get-ReleaseVersionReport {
         'MatrixDesktop\MatrixDesktop.csproj'                         = '<Version>([^<]+)</Version>'
         'MatrixDesktopConfigurator\MatrixDesktopConfigurator.csproj' = '<Version>([^<]+)</Version>'
         'MatrixDesktop_Argument_Guide.txt'                           = 'ARGUMENT GUIDE \(desktop wrapper v([0-9][^)]*)\)'
+        'README.md'                                                  = 'Current (?:source )?version: \*\*([0-9][^*]*)\*\*'
     }
     $versions = [ordered]@{}
     $problems = @()
@@ -434,4 +437,263 @@ function Invoke-GatePythonCase {
     if (-not $Case.ContainsKey('ExpectCannotVerify')) { return $verdict }
     $forbidden = if ($Case.ContainsKey('Forbidden')) { $Case.Forbidden } else { '' }
     return Get-ExpectedCannotVerifyVerdict -ExitCode $verdict.ExitCode -Log $Log -Witness $Case.ExpectCannotVerify -Forbidden $forbidden
+}
+
+# ---------------------------------------------------------------- build, then run what was built
+
+# Builds a project and runs the program it produced, the way the gate runs the native suite,
+# whose project is not in MatrixDesktopApp.sln. The build uses the call operator in a child
+# scope, like the solution build in run-gate.ps1, never Start-Process -Wait: -Wait also waits
+# for every descendant, and a build that compiles anything starts the compiler server
+# (VBCSCompiler), which stays alive until it idles out minutes later. 'dotnet run' under -Wait
+# held the gate that long after any native-only edit (R2-30). Only the built program runs
+# under Start-Process, redirected and classified like every gate case. A failed build is a
+# FAIL naming its log, "$Log.build".
+function Invoke-GateBuildAndRun {
+    param(
+        [Parameter(Mandatory = $true)][string]$Dotnet,
+        [Parameter(Mandatory = $true)][string]$Project,
+        [Parameter(Mandatory = $true)][string]$Program,
+        [Parameter(Mandatory = $true)][string]$Log,
+        [string]$Witness
+    )
+    $buildLog = "$Log.build"
+    # A run log left by an earlier run must not be read as this one's.
+    Remove-Item -LiteralPath $Log, "$Log.err" -Force -ErrorAction SilentlyContinue
+    $global:LASTEXITCODE = -1
+    & { $ErrorActionPreference = 'Continue'
+        & $Dotnet build $Project -c Release --nologo -v:minimal *>&1 | Out-File -LiteralPath $buildLog -Encoding utf8 }
+    $buildExit = $global:LASTEXITCODE
+    if ($buildExit -ne 0) {
+        return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $buildExit; Detail = "dotnet build exited $buildExit; see $buildLog" }
+    }
+    if (-not (Test-Path -LiteralPath $Program -PathType Leaf)) {
+        return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $buildExit; Detail = "the build passed but did not produce $Program; see $buildLog" }
+    }
+    # 'dotnet run' gives the apphost DOTNET_ROOT when it is unset, so the program finds the
+    # runtime of the dotnet that built it; do the same.
+    $savedRoot = [Environment]::GetEnvironmentVariable('DOTNET_ROOT', 'Process')
+    if (-not $savedRoot) { Set-ProcessEnvironmentVariable -Name 'DOTNET_ROOT' -Value (Split-Path -Parent $Dotnet) }
+    try {
+        $run = Start-Process -FilePath $Program -Wait -PassThru -NoNewWindow -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
+    } finally {
+        Set-ProcessEnvironmentVariable -Name 'DOTNET_ROOT' -Value $savedRoot
+    }
+    return Get-GateCaseVerdict -ExitCode $run.ExitCode -Log $Log -Witness $Witness
+}
+
+# ---------------------------------------------------------------- loadState fixture suites
+
+# The node suites that read the loadState fixture need node and the fixture the built harness
+# writes, never Python. They used to run only inside the web smoke's innermost branch, so with
+# no Python or no harness they vanished from the report without an UNCHECKED line (R2-31).
+# Takes no Python input on purpose. -FixtureExit is the harness's --dump-state exit code, or
+# $null when the harness was not built. Returns one verdict per name, in order: Outcome 'run',
+# or 'unchecked' with the reason in Detail.
+function Get-FixtureSuiteVerdicts {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [bool]$NodeFound,
+        [AllowNull()][object]$FixtureExit
+    )
+    $why = ''
+    if (-not $NodeFound) { $why = 'node is not on PATH' }
+    elseif ($null -eq $FixtureExit) { $why = 'the test harness has not been built, so the loadState fixture cannot be generated' }
+    elseif ([int]$FixtureExit -ne 0) { $why = "the loadState fixture could not be generated (--dump-state exited $FixtureExit)" }
+    return @($Names | ForEach-Object {
+        [pscustomobject]@{ Name = $_; Outcome = $(if ($why) { 'unchecked' } else { 'run' }); Detail = $why }
+    })
+}
+
+# ---------------------------------------------------------------- release publish parity
+
+# release.yml publishes each executable with its own 'dotnet publish' command, and the gate
+# signs off on what its own publish builds, so the two must build the same thing. Checking that
+# each gate flag appears somewhere in each step passed a property set only in release.yml, a
+# later override of a gate flag (MSBuild keeps the last value), --self-contained and a flag left
+# only in a comment (R2-33). This compares the EFFECTIVE properties both ways instead. -Ignore
+# holds what may differ: the output folder and the version stamps taken from the tag. Problems
+# name the step; an empty list means parity.
+function Get-ReleasePublishParityProblems {
+    param(
+        [Parameter(Mandatory = $true)][string]$YamlText,
+        [Parameter(Mandatory = $true)][string[]]$GateArguments,
+        [string[]]$Ignore = @('PublishDir', 'Version', 'AssemblyVersion', 'FileVersion'),
+        [int]$StepCount = 2
+    )
+    $problems = @()
+    $expected = ConvertTo-PublishProperties -Arguments $GateArguments
+    foreach ($token in $expected.Unknown) { $problems += "the gate's own publish passes '$token', which this check does not understand" }
+    $commands = @(Get-PublishCommands -YamlText $YamlText)
+    if ($commands.Count -ne $StepCount) {
+        return @($problems + "expected $StepCount 'dotnet publish' commands in release.yml, found $($commands.Count); the parity check cannot be trusted")
+    }
+    for ($n = 0; $n -lt $commands.Count; $n++) {
+        $step = "publish step $($n + 1) (release.yml line $($commands[$n].Line))"
+        $actual = ConvertTo-PublishProperties -Arguments $commands[$n].Arguments
+        foreach ($token in $actual.Unknown) { $problems += "$step passes '$token', which this check does not understand" }
+        foreach ($name in @($expected.Properties.Keys | Sort-Object)) {
+            if ($Ignore -contains $name) { continue }
+            $want = $expected.Properties[$name]
+            if (-not $actual.Properties.ContainsKey($name)) { $problems += "$step does not set $name; the gate publishes with $name=$want" }
+            elseif ($actual.Properties[$name] -ne $want) { $problems += "$step sets $name=$($actual.Properties[$name]); the gate publishes with $name=$want" }
+        }
+        foreach ($name in @($actual.Properties.Keys | Sort-Object)) {
+            if ($Ignore -contains $name -or $expected.Properties.ContainsKey($name)) { continue }
+            if ($name -eq 'PublishProfile') { $problems += "$step loads the publish profile $($actual.Properties[$name]), whose properties the gate does not publish with" }
+            else { $problems += "$step sets $name=$($actual.Properties[$name]), which only release.yml sets; the gate publishes without it" }
+        }
+    }
+    return $problems
+}
+
+# Each 'dotnet publish' command in a workflow: its line number and its argument tokens after
+# 'publish'. A comment starts at a '#' that opens a line or follows whitespace, as in pwsh and
+# YAML, and a line ending in a backtick continues on the next, so a flag commented out at the
+# end of the chain ends the command there, as it does in pwsh.
+function Get-PublishCommands {
+    param([Parameter(Mandatory = $true)][string]$YamlText)
+    $lines = @($YamlText -split "`r?`n" | ForEach-Object { ($_ -replace '(^|\s)#.*$', '').TrimEnd() })
+    $commands = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*(-\s+)?name\s*:') { continue }
+        $m = [regex]::Match($lines[$i], '\bdotnet\s+publish\b(?<rest>.*)$')
+        if (-not $m.Success) { continue }
+        $start = $i + 1
+        $text = $m.Groups['rest'].Value
+        while ($text.EndsWith('`') -and $i + 1 -lt $lines.Count) {
+            $i++
+            $text = $text.Substring(0, $text.Length - 1) + ' ' + $lines[$i]
+        }
+        $commands += [pscustomobject]@{ Line = $start; Arguments = @(Split-PublishArguments -Text $text) }
+    }
+    return $commands
+}
+
+# Splits a command line on whitespace, keeping quoted text and each GitHub '${{ ... }}'
+# expression in one token, and removes the quotes.
+function Split-PublishArguments {
+    param([AllowEmptyString()][string]$Text)
+    $flat = [regex]::Replace($Text, '\$\{\{.*?\}\}', { param($m) $m.Value -replace '\s+', '' })
+    return @([regex]::Matches($flat, '(?:"[^"]*"|''[^'']*''|[^\s"''])+') | ForEach-Object { $_.Value -replace '["'']', '' })
+}
+
+# The MSBuild global properties a 'dotnet publish' argument list sets, the last value winning
+# as in MSBuild: -p:, -property:, --property:, /p: and /property: (several per flag with ';'),
+# -c and -r and their long forms, --self-contained [true|false] or --sc, --no-self-contained.
+# --nologo and -v change console output only. The first bare token is the project. Anything
+# else lands in Unknown, so a switch this function was never taught fails the parity check.
+function ConvertTo-PublishProperties {
+    param([AllowEmptyCollection()][string[]]$Arguments = @())
+    $properties = @{}
+    $unknown = @()
+    $project = $null
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $token = $Arguments[$i]
+        $m = [regex]::Match($token, '^(?:--?property|-p|/p(?:roperty)?):(?<list>.*)$', 'IgnoreCase')
+        if ($m.Success) {
+            foreach ($pair in @($m.Groups['list'].Value -split ';' | Where-Object { $_ })) {
+                $eq = $pair.IndexOf('=')
+                if ($eq -lt 1) { $unknown += $token; continue }
+                $properties[$pair.Substring(0, $eq).Trim()] = $pair.Substring($eq + 1).Trim()
+            }
+            continue
+        }
+        $m = [regex]::Match($token, '^(?<switch>-c|--configuration|-r|--runtime|-v|--verbosity)(?:[:=](?<value>.*))?$', 'IgnoreCase')
+        if ($m.Success) {
+            if ($m.Groups['value'].Success) { $value = $m.Groups['value'].Value }
+            elseif ($i + 1 -lt $Arguments.Count) { $i++; $value = $Arguments[$i] }
+            else { $unknown += $token; continue }
+            $switch = $m.Groups['switch'].Value.ToLowerInvariant()
+            if ($switch -eq '-c' -or $switch -eq '--configuration') { $properties['Configuration'] = $value }
+            elseif ($switch -eq '-r' -or $switch -eq '--runtime') { $properties['RuntimeIdentifier'] = $value }
+            continue
+        }
+        $m = [regex]::Match($token, '^(?:--self-contained|--sc)(?:[:=](?<value>.*))?$', 'IgnoreCase')
+        if ($m.Success) {
+            $value = 'true'
+            if ($m.Groups['value'].Success) { $value = $m.Groups['value'].Value }
+            elseif ($i + 1 -lt $Arguments.Count -and $Arguments[$i + 1] -match '^(?:true|false)$') { $i++; $value = $Arguments[$i] }
+            $properties['SelfContained'] = $value.ToLowerInvariant()
+            continue
+        }
+        if ($token -eq '--no-self-contained') { $properties['SelfContained'] = 'false'; continue }
+        if ($token -eq '--nologo') { continue }
+        if ($null -eq $project -and $token -notmatch '^[-/]') { $project = $token; continue }
+        $unknown += $token
+    }
+    return [pscustomobject]@{ Project = $project; Properties = $properties; Unknown = $unknown }
+}
+
+# ---------------------------------------------------------------- display, session and power state
+
+# Every MatrixDesktop host hides and suspends its WebView when the console display powers off,
+# the session locks or disconnects, or the system sleeps (PauseReason DisplayOff, Session,
+# Suspend; MainForm.TrySuspendWebViewAsync), and logs it with the reason. An unattended full
+# gate photographed that black or frozen window and reported a product FAIL (R2-36). Returns
+# the first such record's message, or '' when none of $Records is one.
+function Find-HostSuspension {
+    param([AllowEmptyCollection()][object[]]$Records = @())
+    $pattern = "^(?:WebView suspended|TrySuspendAsync declined|Failed to suspend WebView) \(reason='[^']*\b(?:DisplayOff|Session|Suspend)\b"
+    foreach ($record in $Records) {
+        if ($null -ne $record -and $record.Msg -match $pattern) { return [string]$record.Msg }
+    }
+    return ''
+}
+
+# The render and animation verdicts for one tier-2 frame pair. A frame under a floor is
+# UNCHECKED when the case's pid logged a host suspension (Find-HostSuspension), FAIL otherwise;
+# the same holds for a static frame. -Changed is the moved fraction between the two frames.
+# Returns one verdict per check that applies, in order: 'rendered content', then 'animation is
+# running' once the frame rendered.
+function Get-RenderVerdict {
+    param(
+        [Parameter(Mandatory = $true)][object]$Stats,
+        [Parameter(Mandatory = $true)][double]$Changed,
+        [AllowEmptyCollection()][object[]]$Records = @(),
+        [string]$Detail = '',
+        [double]$StdFloor = 0.04,
+        [double]$NonBlackFloor = 0.02,
+        [double]$ChangedFloor = 0.005
+    )
+    $suspension = Find-HostSuspension -Records $Records
+    $outcome = if ($suspension) { 'unchecked' } else { 'fail' }
+    $cause = if ($suspension) { "; the case logged '$suspension', so the host hid its renderer for the display, session or power state" } else { '' }
+    $floor = ''
+    if ($Stats.Std -lt $StdFloor) { $floor = "std floor $StdFloor; a black or uniform frame measures like this" }
+    elseif ($Stats.NonBlack -lt $NonBlackFloor) { $floor = "non-black floor $NonBlackFloor" }
+    if ($floor) { return @([pscustomobject]@{ Check = 'rendered content'; Outcome = $outcome; Detail = "$Detail ($floor)$cause" }) }
+    $verdicts = @([pscustomobject]@{ Check = 'rendered content'; Outcome = 'ok'; Detail = $Detail })
+    if ($Changed -lt $ChangedFloor) {
+        $verdicts += [pscustomobject]@{ Check = 'animation is running'; Outcome = $outcome; Detail = "$Detail (moved floor $ChangedFloor; the frame is static)$cause" }
+    } else {
+        $verdicts += [pscustomobject]@{ Check = 'animation is running'; Outcome = 'ok'; Detail = ('moved={0:N5}' -f $Changed) }
+    }
+    return $verdicts
+}
+
+# SetThreadExecutionState flags: ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED.
+function Get-GatePowerApi {
+    if (-not ('GatePowerApi' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class GatePowerApi {
+    [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
+}
+'@
+    }
+    return [GatePowerApi]
+}
+
+# Keeps the display and the system on while the gate's GUI tiers run, so an idle timeout cannot
+# power the console display off under them. The request belongs to the calling thread and ends
+# with the process; Exit-GateDisplayHold clears it sooner. Returns $true when Windows took it.
+function Enter-GateDisplayHold {
+    $api = Get-GatePowerApi
+    return ($api::SetThreadExecutionState([uint32]2147483651) -ne 0)
+}
+
+function Exit-GateDisplayHold {
+    $api = Get-GatePowerApi
+    return ($api::SetThreadExecutionState([uint32]2147483648) -ne 0)
 }
