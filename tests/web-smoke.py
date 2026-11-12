@@ -1166,7 +1166,10 @@ def check_probe_ignores_proxy():
     import tempfile
 
     name = "the smoke-server probe ignores the proxy settings"
-    probe = ("import importlib.util, json, sys; "
+    # A -c child puts the working directory first on sys.path, not tests/, so web-smoke.py's
+    # own imports of its sibling modules (browser_launch) would fail; put its folder first.
+    probe = ("import importlib.util, json, os, sys; "
+             "sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1]))); "
              "spec = importlib.util.spec_from_file_location('web_smoke_probe', sys.argv[1]); "
              "ws = importlib.util.module_from_spec(spec); spec.loader.exec_module(ws); "
              "print(json.dumps(ws.server_unreachable(sys.argv[2])))")
@@ -1177,7 +1180,7 @@ def check_probe_ignores_proxy():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
         httpd, origin = serve(folder)
         try:
-            run = subprocess.run([sys.executable, "-c", probe, str(Path(__file__).resolve()), origin], env=env,
+            run = subprocess.run([sys.executable, "-B", "-c", probe, str(Path(__file__).resolve()), origin], env=env,
                                  capture_output=True, text=True, timeout=60)
         finally:
             close_server(httpd)
