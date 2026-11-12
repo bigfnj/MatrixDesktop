@@ -80,7 +80,7 @@ $script:Fail = 0
 $script:Unchecked = 0
 $script:Failures = New-Object 'Collections.Generic.List[string]'
 $script:Uncheckables = New-Object 'Collections.Generic.List[string]'
-$script:Harness = 0
+$script:HarnessCount = 0
 $script:HarnessErrors = New-Object 'Collections.Generic.List[string]'
 $script:DisplayHeld = $false
 
@@ -104,7 +104,7 @@ function Test-Unchecked {
 # in exit 3 unless a check failed, because a broken harness is never a verdict on the app (R3-26).
 function Test-Harness {
     param([string]$Msg, [string]$Detail)
-    $script:Harness++
+    $script:HarnessCount++
     $script:HarnessErrors.Add("$Msg ($Detail)")
     Write-Host "  HARNESS    $Msg" -ForegroundColor Magenta
     if ($Detail) { Write-Host "               $Detail" -ForegroundColor Magenta }
@@ -1475,14 +1475,14 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
     Write-Host ''
     Write-Host ('=' * 74)
-    Write-Host ((" PASS {0}    FAIL {1}    UNCHECKED {2}" -f $script:Pass, $script:Fail, $script:Unchecked) + $(if ($script:Harness -gt 0) { "    HARNESS $($script:Harness)" } else { '' }))
+    Write-Host ((" PASS {0}    FAIL {1}    UNCHECKED {2}" -f $script:Pass, $script:Fail, $script:Unchecked) + $(if ($script:HarnessCount -gt 0) { "    HARNESS $($script:HarnessCount)" } else { '' }))
     Write-Host ('=' * 74)
 
     if ($script:Fail -gt 0) {
         Write-Host ''
         Write-Host 'GATE FAILED:' -ForegroundColor Red
         foreach ($f in $script:Failures) { Write-Host "  - $f" -ForegroundColor Red }
-        if ($script:Harness -gt 0) {
+        if ($script:HarnessCount -gt 0) {
             Write-Host 'and the harness broke in:' -ForegroundColor Magenta
             foreach ($h in $script:HarnessErrors) { Write-Host "  - $h" -ForegroundColor Magenta }
         }
@@ -1494,7 +1494,7 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
     }
 
     # Nothing failed, but a check's own harness broke: exit 3 as the header defines it (R3-26).
-    if ($script:Harness -gt 0) {
+    if ($script:HarnessCount -gt 0) {
         Write-Host ''
         Write-Host 'HARNESS ERROR:' -ForegroundColor Magenta
         foreach ($h in $script:HarnessErrors) { Write-Host "  - $h" -ForegroundColor Magenta }

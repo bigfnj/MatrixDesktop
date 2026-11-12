@@ -905,10 +905,10 @@ try {
             @{ Fail = 1; Harness = 1; Unchecked = 0; Want = 1 }, @{ Fail = 0; Harness = 0; Unchecked = 1; Want = 2 },
             @{ Fail = 0; Harness = 0; Unchecked = 0; Want = 0 })) {
             $label = "fail$($leg.Fail)-harness$($leg.Harness)-unchecked$($leg.Unchecked)"
-            $preset = "`$script:Pass = 1; `$script:Fail = $($leg.Fail); `$script:Unchecked = $($leg.Unchecked); `$script:Harness = $($leg.Harness)`n" +
+            $preset = "`$script:Pass = 1; `$script:Fail = $($leg.Fail); `$script:Unchecked = $($leg.Unchecked); `$script:HarnessCount = $($leg.Harness)`n" +
                 "`$script:Failures = New-Object 'Collections.Generic.List[string]'; if (`$script:Fail) { `$script:Failures.Add('a stub failure') }`n" +
                 "`$script:Uncheckables = New-Object 'Collections.Generic.List[string]'; if (`$script:Unchecked) { `$script:Uncheckables.Add('a stub gap') }`n" +
-                "`$script:HarnessErrors = New-Object 'Collections.Generic.List[string]'; if (`$script:Harness) { `$script:HarnessErrors.Add('headless web smoke (a stub harness error)') }`n"
+                "`$script:HarnessErrors = New-Object 'Collections.Generic.List[string]'; if (`$script:HarnessCount) { `$script:HarnessErrors.Add('headless web smoke (a stub harness error)') }`n"
             $stub = New-StubFile ("r3_26_summary_$label.ps1") ($preset + $summary)
             $log = New-LogPath "r3-26-summary-$label"
             $verdict = Invoke-GateChildCase -FilePath (Get-Process -Id $PID).Path -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + $stub + '"') -Log $log
@@ -916,6 +916,19 @@ try {
             $text = [IO.File]::ReadAllText($log)
             if ($leg.Harness -and $text -notlike '*headless web smoke (a stub harness error)*') { $wrong += "${label}: the summary does not list the harness error" }
         }
+        # Variable names ignore case, so a script-scope '$harness = <exe path>' in the unit-harness
+        # step overwrote a counter named $script:Harness and a real -Tier1Only run printed
+        # 'HARNESS <path>' and exited 3. Only the initialisation and Test-Harness may write them.
+        $counterWrites = @($gateAst.FindAll({ param($n)
+                    $n -is [Management.Automation.Language.VariableExpressionAst] -and
+                    ($n.VariablePath.UserPath -replace '^script:', '') -in @('HarnessCount', 'HarnessErrors') -and
+                    (($n.Parent -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Parent.Left -eq $n) -or
+                     $n.Parent -is [Management.Automation.Language.UnaryExpressionAst] -or
+                     ($n.Parent -is [Management.Automation.Language.ForEachStatementAst] -and $n.Parent.Variable -eq $n)) }, $true) |
+                ForEach-Object { $_.Parent.Extent.Text })
+        $allowed = @('$script:HarnessCount = 0', "`$script:HarnessErrors = New-Object 'Collections.Generic.List[string]'", '$script:HarnessCount++')
+        $stray = @($counterWrites | Where-Object { $allowed -notcontains $_ })
+        if ($stray.Count -gt 0 -or $counterWrites.Count -ne 3) { $wrong += "the summary counters are written outside their initialisation and Test-Harness: $($counterWrites -join ' / ')" }
         Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
     }
 
