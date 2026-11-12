@@ -164,16 +164,18 @@ internal static class CommandBuilderTests
         => query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries).Select(pair => pair.Split('=', 2))
             .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
 
-    // ConfiguratorForm.UseScreensaver saves ConfiguratorRequests.ScreensaverArguments. It used to
-    // emit every default, which drew the catalog's stripe rows on pride and classic values on
-    // paradise, and named --borderless and every app flag (R2-13: that revert passed every suite
-    // while it sat in ConfiguratorForm). Killing mutation: BuildArguments(draft, true, false).
+    // Use for screensaver saves the argv ConfiguratorRequests.DispatchAsync builds and hands the
+    // window (ConfiguratorForm saves what it is handed and never sees the draft). It used to emit
+    // every default, which drew the catalog's stripe rows on pride and classic values on
+    // paradise, and named --borderless and every app flag (R2-13, R3-08: that revert passed every
+    // suite while it sat in ConfiguratorForm). Killing mutation: the useScreensaver arm builds
+    // with BuildArguments(draft, true, false).
     private static void ScreensaverMatchesPreview()
     {
         foreach (var command in new[] { "--effect pride", "--version paradise --effect stripes", "--version operator", "--scene uc3d --version operator --effect plain", "--numColumns 90 --cursorColor 1,0,0" })
         {
             var draft = Importer.Import(command, Draft()).Draft;
-            var arguments = ConfiguratorRequests.ScreensaverArguments(Builder, draft);
+            var arguments = SavedScreensaverArguments(draft);
             Check.False(arguments.Contains("--borderless"), $"the screensaver profile for '{command}' must not carry every default: {string.Join(" ", arguments)}");
             var saver = WebPairs(arguments);
             var preview = QueryPairs(Builder.BuildWebQueryString(draft));
@@ -181,6 +183,17 @@ internal static class CommandBuilderTests
                 string.Join(" ", saver.OrderBy(pair => pair.Key).Select(pair => pair.Key + "=" + pair.Value)),
                 $"the screensaver profile for '{command}' must carry exactly the preview's settings");
         }
+    }
+
+    // What Use for screensaver hands the window for this draft, sent the way the page sends it.
+    private static string[] SavedScreensaverArguments(JsonObject draft)
+    {
+        using var payload = JsonDocument.Parse(new JsonObject { ["draft"] = draft.DeepClone() }.ToJsonString());
+        var window = new RecordingConfiguratorWindow();
+        var storage = new StorageService(Path.Combine(AppContext.BaseDirectory, "unwritten-" + Guid.NewGuid().ToString("N"), "presets.json"));
+        ConfiguratorRequests.DispatchAsync("useScreensaver", payload.RootElement, new ConfiguratorState(), storage, Builder, window).GetAwaiter().GetResult();
+        Check.Equal("useScreensaver", string.Join(" ", window.Calls), "Use for screensaver must reach the window once");
+        return window.ScreensaverArguments ?? throw new InvalidOperationException("Use for screensaver handed the window no argv");
     }
 
     // What the renderer draws for each active web field: the emitted value, or what config.js
@@ -343,7 +356,7 @@ internal static class CommandBuilderTests
             var saved = d.DeepClone();
             Check.DoesNotContain(Cmd(d), "--camera", $"the copied command must not open the webcam for effect {effect}");
             Check.DoesNotContain(Builder.BuildWebQueryString(d), "camera=", $"the preview must not open the webcam for effect {effect}");
-            Check.False(ConfiguratorRequests.ScreensaverArguments(Builder, d).Contains("--camera"), $"the screensaver profile must not open the webcam for effect {effect}");
+            Check.False(SavedScreensaverArguments(d).Contains("--camera"), $"the screensaver profile must not open the webcam for effect {effect}");
             Check.False(Builder.BuildArguments(d, false, true).Contains("--camera"), $"Test must not open the webcam for effect {effect}");
             Check.True(JsonNode.DeepEquals(saved, d), "building must leave the saved camera value for a return to Mirror");
         }
@@ -353,7 +366,7 @@ internal static class CommandBuilderTests
         Check.Contains(Cmd(mirror), "--effect mirror --camera true", "Mirror still asks for the webcam");
         Check.Contains(Builder.BuildWebQueryString(mirror), "camera=true", "the Mirror preview still asks for the webcam");
         Check.True(Builder.BuildArguments(mirror, false, true).Contains("--camera"), "a Mirror test still asks for the webcam");
-        Check.Contains(string.Join(" ", ConfiguratorRequests.ScreensaverArguments(Builder, mirror)), "--camera true", "a Mirror screensaver still asks for the webcam");
+        Check.Contains(string.Join(" ", SavedScreensaverArguments(mirror)), "--camera true", "a Mirror screensaver still asks for the webcam");
         mirror["camera"] = false;
         Check.Contains(string.Join(" ", Builder.BuildArguments(mirror, true, false)), "--camera false", "Mirror with every default still names the camera setting");
     }

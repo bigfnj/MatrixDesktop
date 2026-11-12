@@ -13,7 +13,7 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace MatrixDesktopConfigurator;
 
-public sealed class ConfiguratorForm : Form
+public sealed class ConfiguratorForm : Form, IConfiguratorWindow
 {
     private const string HostName = "configurator.local";
     private const string HostOrigin = "https://configurator.local/";
@@ -371,40 +371,14 @@ public sealed class ConfiguratorForm : Form
         }
     }
 
+    // ConfiguratorRequests routes each request to the IConfiguratorWindow method of its name
+    // below, and answers renamePreset itself.
     private Task<object?> DispatchAsync(string type, JsonElement payload)
-        => ConfiguratorRequests.DispatchAsync(type, payload, _state, _storage, ServeAsync);
-
-    // The requests ConfiguratorRequests.FormTypes routes here; it answers renamePreset itself.
-    private async Task<object?> ServeAsync(string type, JsonElement payload)
-    {
-        return type switch
-        {
-            "loadState"        => LoadStatePayload(),
-            "saveDraft"        => SaveDraft(payload),
-            "savePreset"       => SavePreset(payload),
-            "deletePreset"     => DeletePreset(payload),
-            "buildCommand"     => BuildCommand(payload),
-            "buildWebQuery"    => await BuildWebQueryAsync(payload),
-            "importCommand"    => ImportCommand(payload),
-            "browseConfig"     => BrowseConfig(),
-            "useScreensaver"   => UseScreensaver(payload),
-            "restoreScreensaver" => RestoreScreensaver(),
-            "randomizeDraft"   => RandomizeDraft(payload),
-            "browseMedia"      => BrowseMedia(payload),
-            "copyCommand"      => CopyCommand(payload),
-            "testCommand"      => TestCommand(payload),
-            "stopTest"         => StopTest(),
-            // v1.0 additions
-            "setTheme"         => SetTheme(payload),
-            "exportPowerShell" => ExportPowerShell(payload),
-            "loadHelp"         => LoadHelp(),
-            _ => throw new InvalidOperationException($"Unknown configurator request: {type}"),
-        };
-    }
+        => ConfiguratorRequests.DispatchAsync(type, payload, _state, _storage, _commandBuilder, this);
 
     // ─── v1.0 dispatchers ───────────────────────────────────────────────────
 
-    private object SetTheme(JsonElement payload)
+    object IConfiguratorWindow.SetTheme(JsonElement payload)
     {
         var theme = ReadOptionalString(payload, "theme");
         if (string.Equals(theme, "light", StringComparison.OrdinalIgnoreCase)
@@ -417,7 +391,7 @@ public sealed class ConfiguratorForm : Form
         return new { saved = false, message = "theme must be 'dark' or 'light'" };
     }
 
-    private object ExportPowerShell(JsonElement payload)
+    object IConfiguratorWindow.ExportPowerShell(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
         var script = _commandBuilder.BuildPowerShellScript(draft, includeDefaults: false);
@@ -428,7 +402,7 @@ public sealed class ConfiguratorForm : Form
         return new { script, copied };
     }
 
-    private object BrowseMedia(JsonElement payload)
+    object IConfiguratorWindow.BrowseMedia(JsonElement payload)
     {
         var field = ReadOptionalString(payload, "field");
         if (field == "musicFile")
@@ -447,7 +421,7 @@ public sealed class ConfiguratorForm : Form
         return new { path = folder.ShowDialog(this) == DialogResult.OK ? folder.SelectedPath : null };
     }
 
-    private object LoadHelp()
+    object IConfiguratorWindow.LoadHelp()
     {
         if (_cachedHelpText is not null)
         {
@@ -473,7 +447,7 @@ public sealed class ConfiguratorForm : Form
         return new { text = "Argument guide is not available in this build." };
     }
 
-    private object LoadStatePayload()
+    object IConfiguratorWindow.LoadState()
     {
         return new
         {
@@ -501,7 +475,9 @@ public sealed class ConfiguratorForm : Form
         return new { saved = true };
     }
 
-    private object SavePreset(JsonElement payload)
+    object IConfiguratorWindow.SaveDraft(JsonElement payload) => SaveDraft(payload);
+
+    object IConfiguratorWindow.SavePreset(JsonElement payload)
     {
         var presetPayload = payload.GetProperty("preset");
         var id = ReadOptionalString(presetPayload, "id");
@@ -539,7 +515,7 @@ public sealed class ConfiguratorForm : Form
         return new { preset = existing, state = _state };
     }
 
-    private object DeletePreset(JsonElement payload)
+    object IConfiguratorWindow.DeletePreset(JsonElement payload)
     {
         var id = ReadOptionalString(payload, "id");
         if (!string.IsNullOrWhiteSpace(id))
@@ -555,7 +531,7 @@ public sealed class ConfiguratorForm : Form
         return new { state = _state };
     }
 
-    private object BuildCommand(JsonElement payload)
+    object IConfiguratorWindow.BuildCommand(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
         var includeDefaults = ReadBool(payload, "includeDefaults");
@@ -567,7 +543,7 @@ public sealed class ConfiguratorForm : Form
     }
 
     // Web-only query string ("?key=val&…") for the embedded preview iframe.
-    private async Task<object> BuildWebQueryAsync(JsonElement payload)
+    async Task<object> IConfiguratorWindow.BuildWebQueryAsync(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
         var query = _commandBuilder.BuildWebQueryString(draft);
@@ -575,7 +551,7 @@ public sealed class ConfiguratorForm : Form
         return new { query };
     }
 
-    private object ImportCommand(JsonElement payload)
+    object IConfiguratorWindow.ImportCommand(JsonElement payload)
     {
         var command = ReadOptionalString(payload, "command") ?? string.Empty;
         var previous = ZMatrixCfgImporter.IsConfiguration(command) && payload.TryGetProperty("draft", out _)
@@ -596,7 +572,7 @@ public sealed class ConfiguratorForm : Form
         };
     }
 
-    private object BrowseConfig()
+    object IConfiguratorWindow.BrowseConfig()
     {
         using var dialog = new OpenFileDialog { Title = "Choose a ZMatrix configuration", Filter = "ZMatrix configuration|*.cfg|Text files|*.txt", CheckFileExists = true };
         if (dialog.ShowDialog(this) != DialogResult.OK) return new { text = (string?)null };
@@ -604,18 +580,18 @@ public sealed class ConfiguratorForm : Form
         return new { text = File.ReadAllText(dialog.FileName) };
     }
 
-    private object UseScreensaver(JsonElement payload)
+    // The argv is built by ConfiguratorRequests from the page's draft, which never reaches here.
+    object IConfiguratorWindow.UseScreensaver(string[] screensaverArguments)
     {
         var renderer = FindMatrixDesktopExe() ?? throw new FileNotFoundException("MatrixDesktop.exe was not found beside the configurator or in the local build output.");
         var saver = Path.Combine(Path.GetDirectoryName(renderer)!, "MatrixDesktop.scr");
         if (!File.Exists(saver)) throw new FileNotFoundException("Publish MatrixDesktop.scr beside MatrixDesktop.exe before selecting it as the screensaver.");
-        var draft = ReadObject(payload, "draft");
-        global::Shared.ScreensaverProfile.Save(ConfiguratorRequests.ScreensaverArguments(_commandBuilder, draft));
+        global::Shared.ScreensaverProfile.Save(screensaverArguments);
         global::Shared.ScreensaverRegistration.Register(saver);
         return new { saved = true, message = "Current visual settings saved and MatrixDesktop selected as the screensaver." };
     }
 
-    private static object RestoreScreensaver()
+    object IConfiguratorWindow.RestoreScreensaver()
     {
         global::Shared.ScreensaverRegistration.Restore();
         return new { restored = true, message = "Previous screensaver restored." };
@@ -629,7 +605,7 @@ public sealed class ConfiguratorForm : Form
         finally { foreach (var family in families) family.Dispose(); }
     }
 
-    private object RandomizeDraft(JsonElement payload)
+    object IConfiguratorWindow.RandomizeDraft(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
         var scope = ReadOptionalString(payload, "scope") ?? "visual";
@@ -641,7 +617,7 @@ public sealed class ConfiguratorForm : Form
         };
     }
 
-    private object CopyCommand(JsonElement payload)
+    object IConfiguratorWindow.CopyCommand(JsonElement payload)
     {
         var command = ReadOptionalString(payload, "command") ?? string.Empty;
         if (string.IsNullOrWhiteSpace(command))
@@ -657,7 +633,7 @@ public sealed class ConfiguratorForm : Form
         };
     }
 
-    private object TestCommand(JsonElement payload)
+    object IConfiguratorWindow.TestCommand(JsonElement payload)
     {
         var draft = ReadObject(payload, "draft");
 
@@ -733,7 +709,7 @@ public sealed class ConfiguratorForm : Form
         }
     }
 
-    private object StopTest()
+    object IConfiguratorWindow.StopTest()
     {
         StopTestProcess();
         return new { stopped = true };
