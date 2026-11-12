@@ -9,7 +9,9 @@
 // lock, display off or suspend hides the WebView first, and a hidden or occluded page stops
 // drawing), after such a gap of a second or more once shader time passes an hour, and
 // unconditionally past six hours. R2-19: a manual, fullscreen-app or battery pause keeps the
-// paused frame on screen, so a gap without a visibility change never moves the origin.
+// paused frame on screen, so a gap without a visibility change never moves the origin. R3-02:
+// nor does one where the page came back into view more than a brief gap before the frame: an
+// unlock during such a pause shows the frozen frame again, and the resume comes later.
 // Shader time restarts at ten minutes, not zero, or later for a slow intro (introSafeLimits):
 // with skipIntro off the intro is a function of time, and restarting it would sweep its
 // cursor wave over a screen already full of rain.
@@ -20,10 +22,11 @@ export const createShaderTime = (limits = rebaseLimits) => {
 	const listeners = new Set();
 	return {
 		// Once per rendered frame, with the clock's active seconds, the frame's wall time in
-		// milliseconds and the page's unseen epoch (js/hostPlayback.js), which moves whenever
-		// the page's visibility changes. Returns the shader time for that frame.
-		frame(seconds, wall, epoch = lastEpoch) {
-			const gap = wall - lastWall, time = seconds - origin, hidden = epoch !== lastEpoch;
+		// milliseconds, the page's unseen epoch (js/hostPlayback.js), which moves whenever
+		// the page's visibility changes, and the wall time the page last came into view
+		// (shownAt; left out, the epoch alone decides). Returns the shader time for that frame.
+		frame(seconds, wall, epoch = lastEpoch, shown = wall) {
+			const gap = wall - lastWall, time = seconds - origin, hidden = epoch !== lastEpoch && wall - shown < limits.briefGapMs;
 			lastWall = wall; lastEpoch = epoch;
 			const unseen = hidden && (gap >= limits.gapMs || (gap >= limits.briefGapMs && time >= limits.softSeconds));
 			if (time > limits.restartSeconds && (unseen || time >= limits.hardSeconds)) {

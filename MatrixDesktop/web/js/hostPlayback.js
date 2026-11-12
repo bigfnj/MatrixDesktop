@@ -27,10 +27,16 @@ const hostEvent = (event) => notify(event.detail?.paused);
 // it, and a hidden or occluded page stops drawing, so nobody saw its last frame; a manual,
 // fullscreen-app or battery pause keeps the frame on screen. Every visibility change moves
 // this epoch, so a hidden-then-visible pair still counts if both arrive at once, and
-// js/shaderTime.js moves its origin only across a gap the epoch moved in.
-let unseen = 0;
-const visibilityChange = () => { unseen++; };
+// js/shaderTime.js moves its origin only across a gap the epoch moved in. R3-02: an unlock
+// during a visible pause shows the frozen frame again while still paused, so shaderTime.js also
+// needs when the page last came into view: shownAt, in performance.now() milliseconds.
+let unseen = 0, shown = -Infinity;
+const visibilityChange = () => {
+  unseen++;
+  if (globalThis.document?.visibilityState === "visible") shown = performance.now();
+};
 export const unseenEpoch = () => unseen;
+export const shownAt = () => shown;
 globalThis.document?.addEventListener?.("visibilitychange", visibilityChange);
 bridge?.addEventListener("message", hostPointerMessage);
 globalThis.window?.addEventListener("matrix-host-state", hostEvent);

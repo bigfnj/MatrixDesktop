@@ -9,7 +9,7 @@ import makeQuiltPass from "./quiltPass.js";
 import makeMirrorPass from "./mirrorPass.js";
 import { setupCamera, stopCamera, cameraCanvas, cameraAspectRatio } from "../camera.js";
 import getLKG from "./lkgHelper.js";
-import { createPlaybackClock, subscribeHostPlayback, unseenEpoch } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback, unseenEpoch, shownAt } from "../hostPlayback.js";
 import { createShaderTime, introSafeLimits, shaderTick } from "../shaderTime.js";
 
 const effects = {
@@ -226,7 +226,7 @@ export default async (canvas, config) => {
 				step.setSize(viewportWidth, viewportHeight);
 			}
 		}
-		shaderSeconds = shaderTime.frame(clock.seconds(), performance.now(), unseenEpoch());
+		shaderSeconds = shaderTime.frame(clock.seconds(), performance.now(), unseenEpoch(), shownAt());
 		withClock(() => fullScreenQuad(() => {
 			for (const step of pipeline) {
 				step.execute(shouldRender);

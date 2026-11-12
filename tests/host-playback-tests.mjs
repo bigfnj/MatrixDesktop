@@ -96,3 +96,27 @@ console.log("PASS host playback clock: pause, between-frame pause, resume, initi
   } finally { delete globalThis.window; delete globalThis.document; }
   console.log("PASS host playback unseen epoch: moves on each visibility change, not on a visible host pause; pagehide removes the listener");
 }
+
+// R3-02: an unlock during a visible pause shows the frozen frame again while still paused, so
+// js/shaderTime.js also takes when the page last came into view, which only a change to visible moves.
+{
+  const window = new EventTarget(), document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  Object.assign(globalThis, { window, document });
+  const now = performance.now;
+  try {
+    const playback = await import("../MatrixDesktop/web/js/hostPlayback.js?shown");
+    const change = (state, at) => { document.visibilityState = state; performance.now = () => at; document.dispatchEvent(new Event("visibilitychange")); };
+    assert.equal(playback.shownAt(), -Infinity, "a page whose visibility never changed was never shown again");
+    change("hidden", 1000);
+    assert.equal(playback.shownAt(), -Infinity, "a change to hidden must not count as shown");
+    change("visible", 2000);
+    assert.equal(playback.shownAt(), 2000, "a change to visible must record when it happened");
+    change("hidden", 3000);
+    assert.equal(playback.shownAt(), 2000, "a later hide must keep the time the page was shown");
+    performance.now = () => 4000;
+    window.dispatchEvent(new CustomEvent("matrix-host-state", { detail: { paused: true } }));
+    window.dispatchEvent(new CustomEvent("matrix-host-state", { detail: { paused: false } }));
+    assert.equal(playback.shownAt(), 2000, "a host pause and resume must not move it");
+  } finally { performance.now = now; delete globalThis.window; delete globalThis.document; }
+  console.log("PASS host playback shownAt: moves only on a change to visible, to the time of that change");
+}

@@ -353,6 +353,8 @@ def check_regl_visible_pause(context, port):
     Lock, display off and suspend hide the WebView first, which the page sees as a visibility
     change; a synthetic visibilitychange stands in for that here. animationSpeed is low, so
     the rain barely moves between the frozen and resumed screenshots unless time jumps.
+    R3-02: a lock early in a visible pause hides the page, and the unlock shows the frozen
+    frame again while still paused, so the resume a minute later must not move time either.
     """
     page = context.new_page()
     errors = []
@@ -367,29 +369,34 @@ def check_regl_visible_pause(context, port):
             page.wait_for_timeout(60)
         page.wait_for_timeout(500)
         results = {}
-        for name, pause_ms, hidden in (("control", 30_000, False), ("visible", 61_000, False), ("hidden", 61_000, True)):
+        for name, pause_ms, lock in (("control", 30_000, None), ("visible", 61_000, None), ("spanned", 61_000, "start"), ("hidden", 61_000, "end")):
             page.evaluate(host, True)
             page.wait_for_timeout(400)
             frames = page.evaluate("matrixRuntimeDiagnostics.frames")
             frozen = capture(page)
+            if lock == "start":  # hidden, then shown again 10 s later, still paused
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 10000; document.dispatchEvent(new Event('visibilitychange'))")
             page.evaluate(f"window.__clockOffset += {pause_ms}")
-            if hidden:
-                page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
             page.wait_for_timeout(200)
             assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames, f"the {name} pause kept drawing, so the check proved nothing"
             before = page.evaluate("window.__shaderUniforms.time.at(-1)")
+            if lock == "end":  # the page comes back into view just before the resumed frame, as at unlock
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
             page.evaluate(host, False)
             page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 2", arg=frames, timeout=10000)
             page.wait_for_timeout(120)
             after = page.evaluate("window.__shaderUniforms.time.at(-1)")
             results[name] = {"changed": changed_fraction(frozen, capture(page)), "before": before, "after": after}
-        control, visible, hidden = results["control"], results["visible"], results["hidden"]
+        control, visible, spanned, hidden = results["control"], results["visible"], results["spanned"], results["hidden"]
         assert control["before"] > 900, f"shader time was {control['before']} s before the pauses, below the restart point, so the check proved nothing"
         # Natural motion between the two screenshots grows with load (a 30 s control measured
         # 0.5% to 4.3%); a move of shader time changes about 27% of pixels.
         assert visible["changed"] <= 3 * control["changed"] + 0.05, (
             f"a visible 61 s pause changed {visible['changed']:.2%} of pixels on resume against {control['changed']:.2%} after a 30 s pause")
         assert visible["after"] > visible["before"], f"a visible 61 s pause moved shader time from {visible['before']} s to {visible['after']} s"
+        assert spanned["changed"] <= 3 * control["changed"] + 0.05, (
+            f"a visible pause that spanned a lock changed {spanned['changed']:.2%} of pixels on resume against {control['changed']:.2%} after a 30 s pause")
+        assert spanned["after"] > spanned["before"], f"a visible pause that spanned a lock moved shader time from {spanned['before']} s to {spanned['after']} s"
         assert hidden["after"] < 650, f"a hidden 61 s pause kept shader time at {hidden['after']} s instead of restarting it"
         assert hidden["changed"] >= 0.1, (
             f"a hidden 61 s pause changed only {hidden['changed']:.2%} of pixels on resume, so this check cannot see a move of shader time")
@@ -427,7 +434,8 @@ def check_regl_intro_rebase(context, port):
         page.wait_for_timeout(1500)
         before = page.evaluate("window.__shaderUniforms.time.at(-1)")
         bright_before = bright_fraction(capture(page))
-        page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 61000")
+        # Hidden, and shown again at the end of the gap, as an unlock brings it back (R3-02).
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 61000; document.dispatchEvent(new Event('visibilitychange'))")
         page.wait_for_timeout(1500)
         after = page.evaluate("window.__shaderUniforms.time.at(-1)")
         bright_after = bright_fraction(capture(page))
@@ -665,8 +673,8 @@ def main():
                         check_regl_time_rebase(context, server.server_port)
                         print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
                         pauses = check_regl_visible_pause(context, server.server_port)
-                        print("PASS original Matrix regl visible 61 s pause resumes where it froze ({:.2%} of pixels changed, 30 s control {:.2%}); a hidden one still restarts shader time ({:.2%})".format(
-                            pauses["visible"]["changed"], pauses["control"]["changed"], pauses["hidden"]["changed"]), flush=True)
+                        print("PASS original Matrix regl visible 61 s pause resumes where it froze ({:.2%} of pixels changed, 30 s control {:.2%}), so does one that spanned a lock ({:.2%}); a hidden one still restarts shader time ({:.2%})".format(
+                            pauses["visible"]["changed"], pauses["control"]["changed"], pauses["spanned"]["changed"], pauses["hidden"]["changed"]), flush=True)
                         intro = check_regl_intro_rebase(context, server.server_port)
                         print("PASS original Matrix regl shader time move with skipIntro=false restarts after the intro ({:.0f} s to {:.0f} s, {:.2%} to {:.2%} bright pixels)".format(
                             intro["before"], intro["after"], intro["brightBefore"], intro["brightAfter"]), flush=True)
