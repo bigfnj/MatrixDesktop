@@ -28,6 +28,10 @@ internal static class PowerShellExportTests
     // R2-12: removing the apostrophe, ';', the braces or '#' from CommandBuilder.NeedsQuoting
     // fails only draft F, G, H or I under both PowerShells; removing '@' fails J under
     // PowerShell 7 and makes Windows PowerShell refuse the whole script.
+    // R3-07: removing U+2019, U+2018, U+201A or U+201B from NeedsQuoting fails only K, N, O or
+    // P under both PowerShells; removing U+201C and U+201D from TextNeedsEncoding fails L, M, Q
+    // and R, and removing U+201E fails S. cmd passes each. Writing the .ps1 without its BOM
+    // fails Windows PowerShell's K and N to P, and dropping chcp 65001 fails cmd's.
     private static readonly string[] Shells = ["cmd.exe", "powershell.exe", "pwsh.exe"];
     private static readonly Lazy<Dictionary<string, string[]>> TextCaptures = new(CaptureCopiedTextCommands);
 
@@ -71,8 +75,40 @@ internal static class PowerShellExportTests
         var j = builder.CreateDefaultDraft();
         j["effect"] = "image";
         j["url"] = "@home.png";
+        // R3-07: PowerShell reads U+2018 to U+201B as apostrophes and U+201C to U+201E as
+        // double quotes. K and N to P pair one apostrophe across a picture folder and a music
+        // file, as F does; L, M (a backslash path) and Q to S hold double quotes beside a space,
+        // and Q to S one code point each, so dropping any one code point fails one draft.
+        var m = builder.CreateSceneDefaultDraft("uc3d");
+        m["showPictures"] = true;
+        m["pictureSource"] = "custom";
+        m["pictureDirectory"] = $@"C:\Pics\{(char)0x201C}Summer{(char)0x201D} 2024";
         return [("A", a, "url"), ("B", b, "pictureDirectory"), ("C", c, "url"), ("D", d, "musicFile"), ("E", e, "url"),
-            ("F", f, "musicFile"), ("G", g, "url"), ("H", h, "url"), ("I", i, "musicFile"), ("J", j, "url")];
+            ("F", f, "musicFile"), ("G", g, "url"), ("H", h, "url"), ("I", i, "musicFile"), ("J", j, "url"),
+            ("K", ApostrophePaths(builder, (char)0x2019), "musicFile"), ("L", QuotedUrl(builder, (char)0x201C, (char)0x201D), "url"),
+            ("M", m, "pictureDirectory"), ("N", ApostrophePaths(builder, (char)0x2018), "musicFile"),
+            ("O", ApostrophePaths(builder, (char)0x201A), "musicFile"), ("P", ApostrophePaths(builder, (char)0x201B), "musicFile"),
+            ("Q", QuotedUrl(builder, (char)0x201C, (char)0x201C), "url"), ("R", QuotedUrl(builder, (char)0x201D, (char)0x201D), "url"),
+            ("S", QuotedUrl(builder, (char)0x201E, (char)0x201E), "url")];
+    }
+
+    private static JsonObject ApostrophePaths(CommandBuilder builder, char apostrophe)
+    {
+        var draft = builder.CreateSceneDefaultDraft("uc3d");
+        draft["showPictures"] = true;
+        draft["pictureSource"] = "custom";
+        draft["pictureDirectory"] = $@"C:\Users\O{apostrophe}Neil\Pictures";
+        draft["sound"] = "music";
+        draft["musicFile"] = $@"C:\Users\O{apostrophe}Neil\Music\a.mp3";
+        return draft;
+    }
+
+    private static JsonObject QuotedUrl(CommandBuilder builder, char open, char close)
+    {
+        var draft = builder.CreateDefaultDraft();
+        draft["effect"] = "image";
+        draft["url"] = $"https://example.test/{open}x y{close}.png";
+        return draft;
     }
 
     private static void CopiedTextTransport()
@@ -141,7 +177,10 @@ internal static class PowerShellExportTests
             foreach (var shell in Shells)
             {
                 var batch = shell == "cmd.exe";
-                var script = new StringBuilder(batch ? "@echo off\r\n" : string.Empty);
+                // R3-07: the drafts hold typographic quotes, so the scripts are UTF-8: the .bat
+                // switches its console to code page 65001 before cmd reads the next line, and the
+                // .ps1 carries a BOM, without which Windows PowerShell reads it as ANSI.
+                var script = new StringBuilder(batch ? "@echo off\r\nchcp 65001 >nul\r\n" : string.Empty);
                 foreach (var (name, draft, _) in drafts)
                 {
                     var command = builder.BuildCommand(draft, false, false);
@@ -153,7 +192,8 @@ internal static class PowerShellExportTests
                     script.Append(@".\").Append(command).Append("\r\n");
                 }
                 var path = Path.Combine(fixture, batch ? "copied.bat" : "copied-" + shell + ".ps1");
-                File.WriteAllText(path, script.ToString(), Encoding.ASCII);
+                File.WriteAllText(path, script.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: !batch));
+                Check.True(File.ReadAllBytes(path).Skip(batch ? 0 : 3).Any(static value => value >= 0x80), shell + "'s script must carry the typographic quotes as UTF-8, not an ASCII '?'");
                 var start = new ProcessStartInfo(shell)
                 {
                     UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = fixture,

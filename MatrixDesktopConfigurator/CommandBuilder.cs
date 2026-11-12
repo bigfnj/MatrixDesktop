@@ -484,16 +484,18 @@ internal sealed partial class CommandBuilder
     // '|', '<', '>', '^' and parentheses literal in both shells, and in PowerShell
     // an apostrophe (which pairs with the next one across arguments), ';' (which
     // ends the statement), braces (a script block), '@' (splatting) and '#' (a
-    // comment) (R2-12). They do not keep '%' (cmd and batch files expand it), '!'
-    // (delayed expansion), '$' or a backtick (PowerShell expands both). Text values
-    // holding those travel as json64 instead (AddWebTokens), as structured values
-    // always do.
+    // comment) (R2-12), and the typographic apostrophes U+2018 to U+201B, which
+    // PowerShell reads as apostrophes (R3-07). They do not keep '%' (cmd and batch
+    // files expand it), '!' (delayed expansion), '$' or a backtick (PowerShell
+    // expands both), or the typographic double quotes U+201C to U+201E, which end a
+    // PowerShell double-quoted string. Text values holding those travel as json64
+    // instead (AddWebTokens), as structured values always do.
     private static bool NeedsQuoting(string token)
     {
         foreach (var c in token)
         {
             if (char.IsWhiteSpace(c) || c is '"' or '&' or '|' or '<' or '>' or '^' or '(' or ')' or '%' or '!'
-                or '\'' or ';' or '{' or '}' or '@' or '#')
+                or '\'' or ';' or '{' or '}' or '@' or '#' or '\u2018' or '\u2019' or '\u201A' or '\u201B')
             {
                 return true;
             }
