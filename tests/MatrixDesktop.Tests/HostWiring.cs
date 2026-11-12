@@ -470,15 +470,21 @@ internal static class HostWiring
             var decided = Find(helper, "MatrixDesktop.HostPermissionPolicy::ForgetsSavedState");
             Check.True(read >= 0 && decided > read, "the helper must read the saved settings and ask HostPermissionPolicy which to clear");
             var reset = Find(helper, profile + "SetPermissionStateAsync", decided + 1);
-            Check.True(reset > decided && helper[reset - 1].Code == OpCodes.Ldc_I4_0,
+            // Every reset the helper makes, not only the first after the question: one added before
+            // the question, before the loop or on its false edge reset what the policy keeps.
+            var resets = Enumerable.Range(0, helper.Count).Where(index => IsCall(helper[index]) && helper[index].Name == profile + "SetPermissionStateAsync").ToList();
+            Check.True(reset > decided && resets.All(index => helper[index - 1].Code == OpCodes.Ldc_I4_0),
                 "the helper must reset what the policy picks to CoreWebView2PermissionState.Default (0), which erases the saved state");
             var branch = helper[decided + 1];
             Check.True(branch.Code.Name!.StartsWith("brtrue", StringComparison.Ordinal) || branch.Code.Name.StartsWith("brfalse", StringComparison.Ordinal),
                 $"the helper must branch on ForgetsSavedState's answer (next {branch.Code.Name})");
             var target = helper.FindIndex(instruction => instruction.Offset == branch.Value);
             var (whenTrue, whenFalse) = branch.Code.Name.StartsWith("brtrue", StringComparison.Ordinal) ? (target, decided + 2) : (decided + 2, target);
-            Check.True(Flows(helper, whenTrue, reset, decided) && !Flows(helper, whenFalse, reset, decided),
-                "the helper must reset a saved setting only when ForgetsSavedState answers true, and keep it (a saved Allow, another origin's state) otherwise");
+            var ungated = resets.Where(index => Flows(helper, 0, index, decided) || Flows(helper, whenFalse, index, decided))
+                .Select(index => $"IL_{helper[index].Offset:X4}").ToList();
+            Check.True(Flows(helper, whenTrue, reset, decided) && ungated.Count == 0,
+                "the helper must reset a saved setting only when ForgetsSavedState answers true, and keep it (a saved Allow, another origin's state) otherwise"
+                + (ungated.Count > 0 ? "; reached without its true answer: " + string.Join(", ", ungated) : ""));
         });
         // R2-01, R3-18. OnFormClosing hands HostClosePolicy _sessionEndQuery; WndProc must set it
         // to true for WM_QUERYENDSESSION (0x11) alone, before the base dispatch, and reset it in a
