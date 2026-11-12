@@ -91,24 +91,6 @@ internal static class HostWiring
             Check.True(release!.Offset < close!.Offset && release.Offset < rebuild!.Offset,
                 "RecoverSurface must release the hook before it closes the old surface and builds the new one");
         });
-        // R2-52. HostPermissionPolicy.ForgetsSavedState has its own native test; this proves each
-        // WebView2 initialisation clears what it picks, to the Default state, before navigating.
-        failures += Run($"MainForm clears a saved camera denial before it navigates: {path}", () =>
-        {
-            const string profile = "Microsoft.Web.WebView2.Core.CoreWebView2Profile::";
-            const string forget = "MatrixDesktop.MainForm::ForgetSavedCameraDenialAsync";
-            var init = calls.Where(call => call.Caller.StartsWith("MatrixDesktop.MainForm/<InitializeCurrentWebViewAsync>", StringComparison.Ordinal)).ToList();
-            var navigate = init.FirstOrDefault(call => call.Callee == "Microsoft.Web.WebView2.Core.CoreWebView2::Navigate");
-            Check.True(navigate is not null, "witness: the scan must see InitializeCurrentWebViewAsync navigate");
-            var cleared = init.FirstOrDefault(call => call.Callee == forget);
-            Check.True(cleared is not null && cleared.Offset < navigate!.Offset, "InitializeCurrentWebViewAsync must clear a saved camera denial before it navigates");
-            var helper = calls.Where(call => call.Caller.StartsWith("MatrixDesktop.MainForm/<ForgetSavedCameraDenialAsync>", StringComparison.Ordinal)).ToList();
-            var read = helper.FirstOrDefault(call => call.Callee == profile + "GetNonDefaultPermissionSettingsAsync");
-            var decided = helper.FirstOrDefault(call => call.Callee == "MatrixDesktop.HostPermissionPolicy::ForgetsSavedState");
-            Check.True(read is not null && decided is not null && decided.Offset > read.Offset, "the helper must read the saved settings and ask HostPermissionPolicy which to clear");
-            Check.True(helper.Any(call => call.Callee == profile + "SetPermissionStateAsync" && call.PreviousOpcode == OpCodes.Ldc_I4_0.Value && call.Offset > decided!.Offset),
-                "the helper must reset what the policy picks to CoreWebView2PermissionState.Default (0), which erases the saved state");
-        });
         failures += Run($"SystemEvents session and power subscriptions have one owner: {path}", () =>
         {
             foreach (var subscribe in new[] { "Microsoft.Win32.SystemEvents::add_SessionSwitch", "Microsoft.Win32.SystemEvents::add_PowerModeChanged" })
@@ -446,6 +428,39 @@ internal static class HostWiring
             Check.True(handled is [var only] && only == $"set_State={state} set_SavesInProfile={saves}",
                 $"a Handled answer must set the request's State and SavesInProfile to the answer's ({state}, {saves}), got '" + string.Join("' or '", handled) + "'");
         });
+        // R2-52, R3-23. HostPermissionPolicy.ForgetsSavedState has its own native test; this proves
+        // each WebView2 initialisation awaits, before it navigates, a helper that resets to the
+        // Default state only the settings the policy picks. A discarded task let Navigate race the
+        // reset; an unconditional reset erased a saved camera Allow and every other origin's state.
+        failures += Run($"MainForm clears a saved camera denial before it navigates: {path}", () =>
+        {
+            const string profile = "Microsoft.Web.WebView2.Core.CoreWebView2Profile::";
+            static int Find(List<Instruction> code, string callee, int from = 0) => code.FindIndex(from, instruction => IsCall(instruction) && instruction.Name == callee);
+            var init = Body(bodies, StateMachine(bodies, "MatrixDesktop.MainForm/<InitializeCurrentWebViewAsync>"));
+            var navigate = Find(init, "Microsoft.Web.WebView2.Core.CoreWebView2::Navigate");
+            Check.True(navigate >= 0, "witness: the scan must see InitializeCurrentWebViewAsync navigate");
+            var cleared = Find(init, "MatrixDesktop.MainForm::ForgetSavedCameraDenialAsync");
+            Check.True(cleared >= 0 && cleared < navigate, "InitializeCurrentWebViewAsync must clear a saved camera denial before it navigates");
+            var awaited = init[cleared + 1];
+            Check.True(IsCall(awaited) && awaited.Name == "System.Threading.Tasks.Task::GetAwaiter",
+                $"InitializeCurrentWebViewAsync must await the clear, not discard its task (next {awaited.Code.Name} {awaited.Name})");
+            var result = Find(init, "System.Runtime.CompilerServices.TaskAwaiter::GetResult", cleared);
+            Check.True(result >= 0 && result < navigate, "the clear's await must complete before InitializeCurrentWebViewAsync navigates");
+            var helper = Body(bodies, StateMachine(bodies, "MatrixDesktop.MainForm/<ForgetSavedCameraDenialAsync>"));
+            var read = Find(helper, profile + "GetNonDefaultPermissionSettingsAsync");
+            var decided = Find(helper, "MatrixDesktop.HostPermissionPolicy::ForgetsSavedState");
+            Check.True(read >= 0 && decided > read, "the helper must read the saved settings and ask HostPermissionPolicy which to clear");
+            var reset = Find(helper, profile + "SetPermissionStateAsync", decided + 1);
+            Check.True(reset > decided && helper[reset - 1].Code == OpCodes.Ldc_I4_0,
+                "the helper must reset what the policy picks to CoreWebView2PermissionState.Default (0), which erases the saved state");
+            var branch = helper[decided + 1];
+            Check.True(branch.Code.Name!.StartsWith("brtrue", StringComparison.Ordinal) || branch.Code.Name.StartsWith("brfalse", StringComparison.Ordinal),
+                $"the helper must branch on ForgetsSavedState's answer (next {branch.Code.Name})");
+            var target = helper.FindIndex(instruction => instruction.Offset == branch.Value);
+            var (whenTrue, whenFalse) = branch.Code.Name.StartsWith("brtrue", StringComparison.Ordinal) ? (target, decided + 2) : (decided + 2, target);
+            Check.True(Flows(helper, whenTrue, reset, decided) && !Flows(helper, whenFalse, reset, decided),
+                "the helper must reset a saved setting only when ForgetsSavedState answers true, and keep it (a saved Allow, another origin's state) otherwise");
+        });
         failures += Run($"OnRendererFailed reloads, rebuilds or exits as RendererFailurePolicy decides: {path}", () =>
         {
             Check.True(actions.Keys.Order().SequenceEqual(["Exit", "LogOnly", "Recreate", "Reload"]),
@@ -572,6 +587,35 @@ internal static class HostWiring
                     && code.Take(index).TakeLast(8).LastOrDefault(instruction => instruction.Code == OpCodes.Ldftn) is { Name: string method })
                     built.Add(method);
         return built;
+    }
+
+    // The MoveNext of the one async state machine whose type name starts with prefix.
+    private static string StateMachine(Dictionary<string, List<Instruction>?> bodies, string prefix)
+    {
+        var found = bodies.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal) && key.EndsWith("::MoveNext", StringComparison.Ordinal)).ToList();
+        Check.Equal(1, found.Count, "witness: the scan must find one state machine " + prefix);
+        return found[0];
+    }
+
+    // True when control can flow from index from to index to without passing index stop, every
+    // branch followed both ways; exception handlers are not entered.
+    private static bool Flows(List<Instruction> code, int from, int to, int stop)
+    {
+        var at = code.Select((instruction, index) => (instruction.Offset, index)).ToDictionary(pair => pair.Offset, pair => pair.index);
+        var seen = new HashSet<int>();
+        var work = new Stack<int>([from]);
+        while (work.Count > 0)
+        {
+            var index = work.Pop();
+            if (index < 0 || index == stop || !seen.Add(index)) continue;
+            if (index == to) return true;
+            var op = code[index].Code;
+            if (op == OpCodes.Ret || op == OpCodes.Throw || op == OpCodes.Rethrow || op == OpCodes.Endfinally) continue;
+            if (op == OpCodes.Switch) foreach (var target in code[index].Targets!) work.Push(at[target]);
+            if (op.FlowControl is FlowControl.Branch or FlowControl.Cond_Branch) work.Push(at[(int)code[index].Value]);
+            if (op.FlowControl != FlowControl.Branch) work.Push(index + 1);
+        }
+        return false;
     }
 
     private static List<Instruction> Body(Dictionary<string, List<Instruction>?> bodies, string method) =>
