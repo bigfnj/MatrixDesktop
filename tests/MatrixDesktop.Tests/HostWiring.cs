@@ -342,13 +342,14 @@ internal static class HostWiring
     private static int VerifyDecisions(string path)
     {
         Dictionary<string, List<Instruction>?> bodies;
+        var every = new List<(string Method, List<Instruction> Code)>();
         Dictionary<string, long> actions, kinds, outcomes, autostart;
         try
         {
             using var stream = File.OpenRead(path);
             using var pe = new PEReader(stream);
             var reader = pe.GetMetadataReader();
-            bodies = ReadBodies(pe, reader);
+            bodies = ReadBodies(pe, reader, every);
             actions = EnumValues(reader, "MatrixDesktop.RendererFailureAction");
             kinds = EnumValues(reader, "MatrixDesktop.RendererFailureKind");
             outcomes = EnumValues(reader, "MatrixDesktop.WallpaperInstanceGuard/Outcome");
@@ -494,17 +495,19 @@ internal static class HostWiring
         {
             const string flag = "MatrixDesktop.MainForm::_sessionEndQuery";
             const string dispatch = "System.Windows.Forms.Form::WndProc";
-            var code = Body(bodies, "MatrixDesktop.MainForm::WndProc");
+            const string wndProc = "MatrixDesktop.MainForm::WndProc";
+            var code = Body(bodies, wndProc);
             string Seen(List<Step> steps) => string.Join(" ", steps.Where(step => step.Store ? step.Name == flag : step.Name == dispatch)
                 .Select(step => step.Store ? "flag=" + (step.Values[0]?.ToString() ?? "?") : "dispatch"));
             // Every message id, not two samples: 'm.Msg != 0x0011 && m.Msg != 0x0112' also set the
             // flag while WM_SYSCOMMAND was dispatched, so the WM_CLOSE that Alt+F4 nests inside it
             // reached OnFormClosing with the flag set and TearsDownOnClosing(true) skipped teardown.
             // Each constant WndProc loads, and its neighbours, covers an id compared past 0xFFFF.
+            // Message.Msg is an int, so each id is wrapped to one as the walk holds it.
             var messages = Enumerable.Range(0, 0x10000).Select(message => (long)message)
                 .Concat(code.Where(instruction => instruction.Code.Name!.StartsWith("ldc.i", StringComparison.Ordinal))
                     .SelectMany(instruction => new[] { instruction.Value - 1, instruction.Value, instruction.Value + 1 }))
-                .Distinct().ToList();
+                .Select(message => (long)unchecked((int)message)).Distinct().ToList();
             var offending = messages
                 .Select(message => (Message: message, Expected: message == 0x11 ? "flag=1 dispatch" : "dispatch",
                     Got: Paths(code, new() { ["System.Windows.Forms.Message::get_Msg"] = message }).Select(Seen).Distinct().ToList()))
@@ -519,9 +522,28 @@ internal static class HostWiring
             var guarded = FinallyRegions(path, "MatrixDesktop.MainForm::WndProc")
                 .Where(region => code[query].Offset >= region.TryOffset && code[query].Offset < region.TryOffset + region.TryLength).ToList();
             Check.Equal(1, guarded.Count, $"WndProc must dispatch WM_QUERYENDSESSION (the call at IL_{code[query].Offset:X4}, after the flag's store of true) inside one try/finally");
+            // Every dispatch the store of true reaches, not only the first: a guarded one when
+            // _isShuttingDown is false and a bare one otherwise left the flag set after the query.
+            // The sweep cannot see that shape, since the walk leaves the try past its handler.
+            var unguarded = Enumerable.Range(0, code.Count)
+                .Where(index => IsCall(code[index]) && code[index].Name == dispatch && Flows(code, sets[0], index, -1)
+                    && !(code[index].Offset >= guarded[0].TryOffset && code[index].Offset < guarded[0].TryOffset + guarded[0].TryLength))
+                .Select(index => $"IL_{code[index].Offset:X4}").ToList();
+            Check.True(unguarded.Count == 0, $"every dispatch reachable from the flag's store of true must be inside the try/finally around IL_{code[query].Offset:X4}; unguarded: "
+                + string.Join(", ", unguarded));
             var handler = code.Where(instruction => instruction.Offset >= guarded[0].HandlerOffset && instruction.Offset < guarded[0].HandlerOffset + guarded[0].HandlerLength).ToList();
             var reset = Paths(handler, new()).Select(Seen).Distinct().ToList();
             Check.True(reset is ["flag=0"], "the finally around the dispatch must reset the flag to false, got '" + string.Join("' or '", reset) + "'");
+            // Every write of the flag in the assembly, overloads, lambdas and state machines
+            // included: the walk reads WndProc alone, so 'if (m.Msg == 0x0112) MarkSessionEnd();'
+            // with the store of true in a helper left the flag set after any WM_SYSCOMMAND. Taking
+            // the field's address (ldflda) can write it too, so that counts wherever it is.
+            var writes = every.SelectMany(body => body.Code.Where(instruction => (instruction.Code == OpCodes.Stfld || instruction.Code == OpCodes.Ldflda) && instruction.Name == flag)
+                .Select(instruction => (body.Method, instruction.Code))).ToList();
+            var elsewhere = writes.Where(write => write.Method != wndProc || write.Code != OpCodes.Stfld)
+                .Select(write => write.Code == OpCodes.Ldflda ? write.Method + " (its address)" : write.Method).Distinct().ToList();
+            Check.True(elsewhere.Count == 0 && writes.Count == 2, $"only WndProc may write the flag, with its store of true and the finally's reset; {writes.Count} writes, also written by: "
+                + (elsewhere.Count == 0 ? "none" : string.Join(", ", elsewhere)));
             const long sentinel = 7;
             var read = Paths(Body(bodies, "MatrixDesktop.MainForm::OnFormClosing"), new() { [flag] = sentinel })
                 .Select(steps => steps.FirstOrDefault(step => !step.Store && step.Name == "MatrixDesktop.HostClosePolicy::TearsDownOnClosing")).ToList();
@@ -780,11 +802,7 @@ internal static class HostWiring
                     {
                         var right = Pop();
                         var left = Pop();
-                        taken = left is long a && right is long b ? name.Split('.')[0] switch
-                        {
-                            "beq" => a == b, "bne" => a != b, "bge" => a >= b, "bgt" => a > b, "ble" => a <= b, "blt" => a < b,
-                            _ => throw new InvalidOperationException("the IL walk cannot follow " + name),
-                        } : null;
+                        taken = left is long a && right is long b ? Compare(name.Split('.')[0][1..], name.Contains(".un", StringComparison.Ordinal), a, b) : null;
                     }
                     if (taken is null) { Fork((int)instruction.Value); index++; }
                     else index = taken.Value ? at[(int)instruction.Value] : index + 1;
@@ -814,9 +832,9 @@ internal static class HostWiring
                 {
                     var right = Pop();
                     var left = Pop();
-                    stack.Add(left is long a && right is long b ? ((name[1..3] switch { "eq" => a == b, "gt" => a > b, _ => a < b }) ? 1 : 0) : null);
+                    stack.Add(left is long a && right is long b ? (Compare(name[1..3], name.EndsWith(".un", StringComparison.Ordinal), a, b) ? 1 : 0) : null);
                 }
-                else if (name.StartsWith("conv.", StringComparison.Ordinal)) stack.Add(Pop());
+                else if (name.StartsWith("conv.", StringComparison.Ordinal)) stack.Add(Pop() is long value ? Converted(name, value) : null);
                 else
                 {
                     for (var count = PopCount(op.StackBehaviourPop); count > 0; count--) Pop();
@@ -827,6 +845,38 @@ internal static class HostWiring
         }
         return done;
     }
+
+    // The walk keeps a 32-bit stack value sign-extended in a long, as ldc.i4 loads it. Reading
+    // both sides as ulong then orders two 32-bit values exactly as uint does (sign extension
+    // keeps unsigned order), so the .un forms compare unsigned at either operand width.
+    private static bool Compare(string relation, bool unsigned, long a, long b) => relation switch
+    {
+        "eq" => a == b, "ne" => a != b,
+        "ge" => unsigned ? unchecked((ulong)a >= (ulong)b) : a >= b,
+        "gt" => unsigned ? unchecked((ulong)a > (ulong)b) : a > b,
+        "le" => unsigned ? unchecked((ulong)a <= (ulong)b) : a <= b,
+        "lt" => unsigned ? unchecked((ulong)a < (ulong)b) : a < b,
+        _ => throw new InvalidOperationException("the IL walk cannot compare " + relation),
+    };
+
+    // A conversion as the CLR does it, in the walk's sign-extended form; null where the walk
+    // cannot tell. It was identity: '(byte)m.Msg != 0x11' then set the session-end flag for
+    // 0x111 while the walk carried 0x111 through the cast and saw only a dispatch. conv.u4
+    // truncates like conv.i4 because the result is a 32-bit stack value; conv.u8 and conv.u
+    // zero-extend a 32-bit value but not a 64-bit one, so only a value both read alike is known;
+    // a checked conversion is known only where it cannot throw; a float is not modelled.
+    private static long? Converted(string name, long value) => name switch
+    {
+        "conv.i1" => unchecked((sbyte)value),
+        "conv.u1" => unchecked((byte)value),
+        "conv.i2" => unchecked((short)value),
+        "conv.u2" => unchecked((ushort)value),
+        "conv.i4" or "conv.u4" => unchecked((int)value),
+        "conv.i8" or "conv.i" => value,
+        "conv.u8" or "conv.u" => value is >= 0 and <= int.MaxValue ? value : null,
+        _ when name.StartsWith("conv.ovf.", StringComparison.Ordinal) => value is >= 0 and <= sbyte.MaxValue ? value : null,
+        _ => null,
+    };
 
     private static int PopCount(StackBehaviour behaviour) => behaviour switch
     {
@@ -840,7 +890,8 @@ internal static class HostWiring
     };
 
     // Each method body as instructions, keyed "Type::Method"; a name two bodies share maps to null.
-    private static Dictionary<string, List<Instruction>?> ReadBodies(PEReader pe, MetadataReader reader)
+    // every, when given, also receives each body by itself, overloads included.
+    private static Dictionary<string, List<Instruction>?> ReadBodies(PEReader pe, MetadataReader reader, List<(string Method, List<Instruction> Code)>? every = null)
     {
         var bodies = new Dictionary<string, List<Instruction>?>();
         foreach (var typeHandle in reader.TypeDefinitions)
@@ -892,6 +943,7 @@ internal static class HostWiring
                 }
                 var key = TypeName(reader, type) + "::" + reader.GetString(method.Name);
                 bodies[key] = bodies.ContainsKey(key) ? null : code;
+                every?.Add((key, code));
             }
         }
         return bodies;
