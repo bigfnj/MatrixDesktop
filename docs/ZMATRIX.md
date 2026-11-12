@@ -27,10 +27,12 @@ Explorer recovery rediscovers the shell host. A missing host is reported instead
 of opening a fullscreen window over the owner's applications.
 
 The tray menu controls pause, settings, exit and startup. For a ZMatrix wallpaper it
-also offers **Refresh desktop**, which re-reads the wallpaper and font-smoothing
-settings. The same refresh runs about 400 ms after a wallpaper, desktop pattern,
-high-contrast, font-smoothing, system color or theme change, and waits for resume
-while paused. A refresh that finds nothing changed keeps the accumulated rain.
+also offers **Refresh desktop**, which re-reads the wallpaper, the font-smoothing
+settings and the installed fonts. The same refresh runs about 400 ms after a
+wallpaper, desktop pattern, high-contrast, font-smoothing, system color or theme
+change, and waits for resume while paused. A refresh that finds nothing changed
+keeps the accumulated rain. The configurator preview uses a newly installed font
+from its next update.
 Startup is an explicit per-user choice. Fullscreen pause defaults on; battery
 pause defaults off. Pause reasons combine, so resuming manually does not override
 a session lock or another automatic pause. Renderers use active time and exclude
@@ -135,7 +137,9 @@ personal media or changing the owner's saved screensaver profile.
 `tests/zmatrix-tests.mjs` checks deterministic simulation and literal raster
 results. `tests/host-playback-tests.mjs` checks paused-time exclusion, including
 pause/resume between rendered frames. `tests/zmatrix-browser.py` exercises actual
-WebGL/WebGPU presentation, animation, pause/resume, resize and disposal.
+WebGL/WebGPU presentation, animation, pause/resume, resize and disposal, and on
+WebGL that the pass reads `gl.getError` about once a second while a recorded
+error still fails the scene visibly.
 Windows host tests additionally verify shell parenting and native resource use.
 The normal gate retains existing Matrix/UC3D regressions and publishes the complete
 application before runtime verification. Environment-dependent checks report
