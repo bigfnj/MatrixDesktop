@@ -672,37 +672,42 @@ If Playwright is not installed for the interpreter it finds, the gate reports th
 not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific
 interpreter to override the search.
 
-Every Chromium the browser suites start goes through `tests/browser_launch.py`; the native
-suites attach to the real app's WebView2 instead. The helper reads the one
-`--disable-features` switch Playwright passes from a probe launch, adds
+Every Chromium the browser suites start goes through `tests/browser_launch.py`, apart from
+the helper's own self-test; the native suites attach to the real app's WebView2 instead. The
+helper reads the one `--disable-features` switch Playwright passes from a probe launch, adds
 `TcpPortRandomizationWin` to it, which turns off Chromium's randomized local port pick on
 Windows, and checks the launched browser's own command line for exactly one such switch
 holding that feature and every token Playwright passed. Each verified launch prints an
 argument-verification PASS line. A launch that fails verification raises
 `LaunchArgumentsError`, which the web smoke and the configurator suite report as a harness
-error (exit 3), and a launch whose command line cannot be read goes ahead unverified and
-prints a DEGRADED line. Tier 1 runs `tests/browser-launch.test.py`, which proves the check
-names each wrong shape of the switch.
+error (exit 3). A launch whose browser command line cannot be read prints a DEGRADED line
+and goes ahead unverified. When the probe's command line cannot be read, the helper has no
+Playwright switch to merge with, so the suite runs on its own arguments without the
+helper's `TcpPortRandomizationWin` disable; when only the real launch's command line cannot
+be read, the disable was requested but is not confirmed. Tier 1 runs
+`tests/browser-launch.test.py`, which proves the check names each wrong shape of the switch.
 
 The helper turns the feature off because of the smoke's one captured stall: 72 ms after
 navigation, a module request to its own loopback server failed with
 `net::ERR_NO_BUFFER_SPACE`, Chromium's name for Windows error 10055 (WSAENOBUFS). Windows
 can return 10055 when a socket cannot get a local port, and Chromium's randomized local
 port pick on Windows (`TcpPortRandomizationWin`; microsoft/playwright#43545, #43605) can
-return it while ports are free. A bounded A/B run on one machine saw the failed connect only with the pick on,
-which strongly supports it as the cause but does not prove it.
+return it while ports are free. A bounded A/B run on one machine saw the failed connect
+only with the pick on, which strongly supports it as the cause but does not prove it.
 
-A renderer that never starts is reported as soon as its page shows a notice, with the
-diagnostics, notices, failed requests, HTTP error statuses, and page and console errors
-the page recorded. `tests/web-smoke.py` exits 3, a harness error, when its own
+In the web smoke, a renderer that never starts is reported as soon as its page shows a
+notice, with the diagnostics, notices, failed requests, HTTP error statuses, and page and
+console errors the page recorded. `tests/web-smoke.py` exits 3, a harness error, when its own
 infrastructure broke and nothing failed: a smoke server that does not answer, or a request
 to that server that failed with `net::ERR_NO_BUFFER_SPACE`. A missing `loadState` fixture,
 or an exception that ends the run, such as a browser launch that fails argument
 verification, also exits 3. In a run that reaches its verdict, any FAIL keeps exit 1,
 including one in another leg of the same check or, on the page the harness fault hit, an
-unexpected HTTP status of 400 or more or failed request to another origin. The gate records
-the smoke's exit 3 as a HARNESS line naming the broken checks and ends in exit 3 unless
-another check failed.
+unexpected HTTP status of 400 or more or a failed request to another origin. The gate
+records the smoke's exit 3 as a HARNESS line of its own, which quotes up to three of the
+smoke's HARNESS lines or, when the smoke printed none, as after a failed launch verification,
+the first three non-blank lines of its error output. The gate ends in exit 3 unless another
+check failed.
 
 Installed Edge can exercise both UC3D rendering backends with
 `python tests\uc3d-browser.py --renderer both --channel msedge`. Original-control
