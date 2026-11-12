@@ -25,6 +25,8 @@ internal static class StorageTests
         ("Probing an existing store neither yields to nor disturbs a launch reading it", ProbingLeavesReadersAlone),
         ("A portable store that refuses writes falls back to AppData and says so", DeniedStoreFallsBack),
         ("A portable folder that refuses new files falls back to AppData", DeniedFolderFallsBack),
+        ("A launch overlapping the owner's Save resolves the portable store", SaveGapResolvesPortable),
+        ("A portable store at or past MAX_PATH still resolves portable", LongPathStoreResolvesPortable),
     ];
 
     private static void Cleanup(StorageService storage)
@@ -511,4 +513,124 @@ internal static class StorageTests
             DeleteResolverRoot(root);
         }
     }
+
+    private static void SaveGapResolvesPortable()
+    {
+        // R3-10. Save swaps an existing store in with File.Replace, which renames the live store
+        // to .bak and then the new copy onto its name, so a launch can find the name gone after
+        // File.Exists said it was there. Each leg holds the name absent across one check.
+        // Killing mutations: let GetAttributes' FileNotFoundException reach the outer catch (the
+        // "exists" leg resolves AppData); treat every failed ACL open as a refusal (the
+        // "attributes" leg resolves AppData).
+        var root = NewResolverRoot();
+        try
+        {
+            var portable = Path.Combine(root, "portable", "presets.json");
+            var renamed = portable + ".bak";
+            var appData = Path.Combine(root, "appdata", "presets.json");
+            new StorageService(portable).Save(StateWith("live"));
+
+            foreach (var gapAt in new[] { "exists", "attributes" })
+            {
+                var warnings = new List<string>();
+                var steps = new List<string>();
+                var restored = false;
+                var resolved = StorageService.ResolveStoragePath(portable, appData,
+                    whileProbeOpen: _ =>
+                    {
+                        // The owner's second rename lands while this launch probes the folder.
+                        if (!File.Exists(renamed)) return;
+                        File.Move(renamed, portable);
+                        restored = true;
+                    },
+                    warn: warnings.Add,
+                    afterStoreStep: step =>
+                    {
+                        steps.Add(step);
+                        if (step == gapAt) File.Move(portable, renamed);
+                    });
+                if (File.Exists(renamed)) File.Move(renamed, portable);
+
+                Check.True(steps.Contains(gapAt), $"the '{gapAt}' leg must reach its step with the store present; steps were [{string.Join(", ", steps)}]");
+                Check.True(resolved == (portable, true) && warnings.Count == 0,
+                    $"a launch that finds the store's name gone after '{gapAt}' must resolve the portable store without a warning; got '{resolved.Path}' with {warnings.Count} warning(s)");
+                Check.True(restored, $"and its folder probe runs, which is where the '{gapAt}' leg puts the name back");
+            }
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    private static void LongPathStoreResolvesPortable()
+    {
+        // R3-11. The ACL check opens the store with a raw CreateFileW, which needs the
+        // extended-length prefix that .NET's file APIs add for themselves; without it a store
+        // path of MAX_PATH or more reads as not found. Killing mutation: pass the plain path to
+        // CreateFileW again; the denied 270-character leg then resolves portable because the
+        // ACL is never consulted.
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("NOTE  long-path store case UNCHECKED: not Windows");
+            return;
+        }
+
+        Check.Equal(@"\\?\C:\a\presets.json", StorageService.ExtendedLengthPath(@"C:\a\presets.json"), "a drive path gains the extended-length prefix");
+        Check.Equal(@"\\?\UNC\server\share\presets.json", StorageService.ExtendedLengthPath(@"\\server\share\presets.json"), "a UNC path gains the extended UNC prefix");
+        Check.Equal(@"\\?\C:\a\presets.json", StorageService.ExtendedLengthPath(@"\\?\C:\a\presets.json"), "an extended path is kept as it is");
+
+        var root = NewResolverRoot();
+        var appData = Path.Combine(root, "appdata", "presets.json");
+        try
+        {
+            foreach (var length in new[] { 250, 270 })
+            {
+                var portable = StoreOfLength(root, length);
+                Check.Equal(length, portable.Length, "the padded store path has the length this leg names");
+                new StorageService(portable).Save(StateWith("long"));
+                var warnings = new List<string>();
+                var resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add);
+                Check.True(resolved == (portable, true) && warnings.Count == 0,
+                    $"a writable {length}-character store must resolve to itself without a warning; got '{resolved.Path}' with {warnings.Count} warning(s)");
+            }
+
+            var longest = StoreOfLength(root, 270);
+            Check.True(longest.Length >= 260, "the denied leg's store must be at least MAX_PATH long, or it cannot catch a missing prefix");
+            var deniedWarnings = new List<string>();
+            (string Path, bool Portable) refused;
+            DenyCurrentUser(longest, System.Security.AccessControl.FileSystemRights.Write, deny: true);
+            try { refused = StorageService.ResolveStoragePath(longest, appData, warn: deniedWarnings.Add); }
+            finally { DenyCurrentUser(longest, System.Security.AccessControl.FileSystemRights.Write, deny: false); }
+            Check.True(refused == (appData, false), $"a {longest.Length}-character store whose ACL refuses writes must fall back to AppData; got '{refused.Path}'");
+            Check.True(deniedWarnings.Count == 1 && deniedWarnings[0].Contains(longest, StringComparison.Ordinal),
+                "and the fallback is reported, naming the long store");
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    // A store path of exactly `length` characters under the owned root, padded with nested
+    // folders of at most 100 characters each, created on disk.
+    private static string StoreOfLength(string root, int length)
+    {
+        const string name = "presets.json";
+        var folder = Path.Combine(root, "portable");
+        var remaining = length - name.Length - 1 - folder.Length;
+        Check.True(remaining >= 2, $"the owned root '{root}' is too deep for a {length}-character store");
+        var segments = (remaining + 100) / 101;
+        var characters = remaining - segments;
+        for (var i = 0; i < segments; i++)
+        {
+            var size = characters / segments + (i < characters % segments ? 1 : 0);
+            folder = Path.Combine(folder, (length + new string('p', size))[..size]);
+        }
+        Directory.CreateDirectory(folder);
+        return Path.Combine(folder, name);
+    }
+
 }

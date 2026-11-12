@@ -236,13 +236,16 @@ internal sealed class StorageService
     // Program.cs takes the store-keyed single-instance guard AFTER this runs, so two launches
     // started together must resolve the same store here; otherwise each takes a different
     // store's guard, both open, and one saves to AppData (R2-18, MDR-04). Only a real refusal
-    // falls back: neither check below can fail because another launch is probing or loading
-    // the store at the same moment. whileProbeOpen is a test seam that runs while the folder
-    // probe is held.
+    // falls back: no check below fails because another launch is probing or loading the
+    // store at the same moment, or because the owner's Save has the store's name briefly
+    // absent (R3-10). whileProbeOpen is a test seam that runs while the folder probe is held;
+    // afterStoreStep runs after the existence check ("exists") and after the attribute check
+    // ("attributes") of an existing store.
     internal static (string Path, bool Portable) ResolveStoragePath(
-        string portablePath, string appDataPath, Action<string>? whileProbeOpen = null, Action<string>? warn = null)
+        string portablePath, string appDataPath, Action<string>? whileProbeOpen = null, Action<string>? warn = null,
+        Action<string>? afterStoreStep = null)
     {
-        if (CanWriteStorageFile(portablePath, whileProbeOpen))
+        if (CanWriteStorageFile(portablePath, whileProbeOpen, afterStoreStep))
         {
             return (portablePath, true);
         }
@@ -257,7 +260,7 @@ internal sealed class StorageService
         return (appDataPath, false);
     }
 
-    private static bool CanWriteStorageFile(string path, Action<string>? whileProbeOpen)
+    private static bool CanWriteStorageFile(string path, Action<string>? whileProbeOpen, Action<string>? afterStoreStep)
     {
         try
         {
@@ -279,9 +282,7 @@ internal sealed class StorageService
             // launch to AppData, and while it was held that Load failed, took the live store
             // for corrupt and moved it aside. The attribute and ACL checks answer the same
             // question without taking part in file sharing.
-            if (File.Exists(path)
-                && ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0
-                    || (OperatingSystem.IsWindows() && !AclAllowsWrites(path))))
+            if (File.Exists(path) && !ExistingStoreAllowsSaving(path, afterStoreStep))
             {
                 return false;
             }
@@ -308,18 +309,69 @@ internal sealed class StorageService
         }
     }
 
+    // An existing store is refused only for the ReadOnly attribute or an ACL that refuses
+    // writes. A name that is gone by the time it is examined is the owner's Save between
+    // File.Replace's two renames (the live store moved to .bak, the new copy not yet on its
+    // name): that is a missing store, which the folder probe decides (R3-10).
+    private static bool ExistingStoreAllowsSaving(string path, Action<string>? afterStoreStep)
+    {
+        afterStoreStep?.Invoke("exists");
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        if ((attributes & FileAttributes.ReadOnly) != 0)
+        {
+            return false;
+        }
+
+        afterStoreStep?.Invoke("attributes");
+        return !OperatingSystem.IsWindows() || AclAllowsWrites(path);
+    }
+
     // FILE_WRITE_ATTRIBUTES is granted by the same ACL entries as writing the data (the
     // standard Write and Modify permissions carry both), but unlike data access it takes no
-    // part in file sharing, so this open neither waits for a reader nor makes one fail.
+    // part in file sharing, so this open neither waits for a reader nor makes one fail. The
+    // raw call gets the extended-length path that .NET's own file APIs add for themselves, or
+    // a store path of MAX_PATH or more reads as not found (R3-11). A name that is not found is
+    // R3-10's rename gap, not a refusal; every other failure still is, so an open that did
+    // take part in sharing would send a launch to AppData while the store is being read, which
+    // ProbingLeavesReadersAlone catches.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static bool AclAllowsWrites(string path)
     {
-        using var handle = CreateFile(path, FileWriteAttributes, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
-        return !handle.IsInvalid;
+        using var handle = CreateFile(ExtendedLengthPath(path), FileWriteAttributes, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            return Marshal.GetLastPInvokeError() is ErrorFileNotFound or ErrorPathNotFound;
+        }
+
+        return true;
+    }
+
+    // The extended-length form of a path, for raw Win32 calls that do not add it themselves.
+    internal static string ExtendedLengthPath(string path)
+    {
+        var full = Path.GetFullPath(path);
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal) || full.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            return full;
+        }
+
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
     private const int FileWriteAttributes = 0x0100;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
 
-    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode)]
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(
         string fileName, int desiredAccess, FileShare shareMode, IntPtr securityAttributes,
         FileMode creationDisposition, int flagsAndAttributes, IntPtr templateFile);
