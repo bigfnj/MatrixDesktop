@@ -765,6 +765,87 @@ try {
         if ($verdict.Detail -notlike 'UNVERIFIED: chromium is unavailable: *') { throw "the reason does not say chromium is unavailable ($($verdict.Detail))" }
     }
 
+    # ------------------------------------------------------------ R3-26 web smoke harness errors
+
+    Invoke-TestCase 'R3-26 (a) the web smoke''s exit 3 is a HARNESS line naming its checks, not a FAIL, and its HARNESS lines are echoed' {
+        if (-not $Python) { return 'CANNOT VERIFY R3-26 (a): no Python interpreter for the stubs' }
+        # The real block of run-gate.ps1 that starts web-smoke.py, echoes its lines and classifies
+        # its exit code, run against stub scripts with recording stand-ins for the report functions.
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $starts = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$smokeRun' }, $true))
+        Assert-Equal 1 $starts.Count 'run-gate.ps1 starts the web smoke once'
+        $body = $starts[0].Parent.Extent.Text
+        $block = [scriptblock]::Create($body.Substring(1, $body.Length - 2))
+        $script:Reported = New-Object 'Collections.Generic.List[string]'
+        $script:Echoed = New-Object 'Collections.Generic.List[string]'
+        function Test-Ok { param([string]$Msg) $script:Reported.Add("ok|$Msg") }
+        function Test-Fail { param([string]$Msg, [string]$Detail) $script:Reported.Add("FAIL|$Msg|$Detail") }
+        function Test-Unchecked { param([string]$Msg, [string]$Why) $script:Reported.Add("UNCHECKED|$Msg|$Why") }
+        function Test-Harness { param([string]$Msg, [string]$Detail) $script:Reported.Add("HARNESS|$Msg|$Detail") }
+        function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor) $script:Echoed.Add([string]$Object) }
+        $harnessLine = '  HARNESS  a renderer starts: matrix: GET http://127.0.0.1:9/js/main.js net::ERR_NO_BUFFER_SPACE'
+        $legs = @(
+            @{ Label = 'harness'; Exit = 3; Out = @('  ok    the static server answers', $harnessLine, 'WEB SMOKE HARNESS ERROR: 1 check(s) could not run; 1 passed')
+                Err = @('  harness error: a renderer starts: matrix: GET'); Want = 'HARNESS|headless web smoke|a renderer starts: matrix: GET http://127.0.0.1:9/js/main.js net::ERR_NO_BUFFER_SPACE; see *'; Echo = $harnessLine.Trim() }
+            # An exception before any verdict prints only to stderr.
+            @{ Label = 'crash'; Exit = 3; Out = @('=== web smoke: harness ==='); Err = @('  harness error: RuntimeError: the stub broke')
+                Want = 'HARNESS|headless web smoke|harness error: RuntimeError: the stub broke; see *'; Echo = $null }
+            # A FAIL beside a harness error stays the FAIL, and the HARNESS line is still shown.
+            @{ Label = 'fail-beside-harness'; Exit = 1; Out = @($harnessLine, '  FAIL  a check: it broke', 'WEB SMOKE FAILED: 1 of 1 checks, and 1 harness error(s)'); Err = @()
+                Want = 'FAIL|headless web smoke|a check: it broke*'; Echo = $harnessLine.Trim() }
+        )
+        $savedTemp = $env:TEMP
+        $wrong = @()
+        try {
+            foreach ($leg in $legs) {
+                $script:Reported.Clear()
+                $script:Echoed.Clear()
+                $env:TEMP = Join-Path $scratch ('r3-26-' + $leg.Label)
+                New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+                $code = "import sys`n" + (@($leg.Out | ForEach-Object { "print('$_')`n" }) -join '') +
+                    (@($leg.Err | ForEach-Object { "print('$_', file=sys.stderr)`n" }) -join '') + "raise SystemExit($($leg.Exit))`n"
+                $smokeScript = New-StubFile ('r3_26_' + ($leg.Label -replace '-', '_') + '.py') $code
+                $py = $Python
+                . $block
+                $all = @($script:Reported)
+                if ($all.Count -ne 1 -or $all[0] -notlike $leg.Want) { $wrong += "$($leg.Label): reported '$($all -join ' / ')', expected one '$($leg.Want)'" }
+                if ($leg.Echo -and -not ($script:Echoed -contains ('  ' + $leg.Echo))) { $wrong += "$($leg.Label): the HARNESS line was not echoed (echoed: $(@($script:Echoed) -join ' / '))" }
+            }
+        } finally {
+            $env:TEMP = $savedTemp
+        }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
+    Invoke-TestCase 'R3-26 (b) the gate''s summary exits 3 for a harness error with nothing failed, and 1 when something failed beside it' {
+        # The real summary statements of run-gate.ps1, from its summary rule to the end of the
+        # main try, run in a child shell with the counters preset, because they end in exit.
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $from = $gateAst.Extent.Text.IndexOf('# ------------------------------------------------------------ summary')
+        $tries = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.TryStatementAst] -and $n.Body.Extent.StartOffset -lt $from -and $n.Body.Extent.EndOffset -gt $from }, $false))
+        if ($from -lt 0 -or $tries.Count -ne 1) { throw "run-gate.ps1's summary was not found inside one try ($from, $($tries.Count))" }
+        $summary = @($tries[0].Body.Statements | Where-Object { $_.Extent.StartOffset -gt $from } | ForEach-Object { $_.Extent.Text }) -join "`n"
+        if ($summary -notlike '*GATE PASSED*') { throw 'the summary statements do not reach GATE PASSED' }
+        $wrong = @()
+        foreach ($leg in @(
+            @{ Fail = 0; Harness = 1; Unchecked = 0; Want = 3 }, @{ Fail = 0; Harness = 1; Unchecked = 1; Want = 3 },
+            @{ Fail = 1; Harness = 1; Unchecked = 0; Want = 1 }, @{ Fail = 0; Harness = 0; Unchecked = 1; Want = 2 },
+            @{ Fail = 0; Harness = 0; Unchecked = 0; Want = 0 })) {
+            $label = "fail$($leg.Fail)-harness$($leg.Harness)-unchecked$($leg.Unchecked)"
+            $preset = "`$script:Pass = 1; `$script:Fail = $($leg.Fail); `$script:Unchecked = $($leg.Unchecked); `$script:Harness = $($leg.Harness)`n" +
+                "`$script:Failures = New-Object 'Collections.Generic.List[string]'; if (`$script:Fail) { `$script:Failures.Add('a stub failure') }`n" +
+                "`$script:Uncheckables = New-Object 'Collections.Generic.List[string]'; if (`$script:Unchecked) { `$script:Uncheckables.Add('a stub gap') }`n" +
+                "`$script:HarnessErrors = New-Object 'Collections.Generic.List[string]'; if (`$script:Harness) { `$script:HarnessErrors.Add('headless web smoke (a stub harness error)') }`n"
+            $stub = New-StubFile ("r3_26_summary_$label.ps1") ($preset + $summary)
+            $log = New-LogPath "r3-26-summary-$label"
+            $verdict = Invoke-GateChildCase -FilePath (Get-Process -Id $PID).Path -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + $stub + '"') -Log $log
+            if ($verdict.ExitCode -ne $leg.Want) { $wrong += "${label}: exit $($verdict.ExitCode), expected $($leg.Want)" }
+            $text = [IO.File]::ReadAllText($log)
+            if ($leg.Harness -and $text -notlike '*headless web smoke (a stub harness error)*') { $wrong += "${label}: the summary does not list the harness error" }
+        }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
     # ------------------------------------------------------------ R2-33 release publish parity
 
     # The gate's own publish arguments, read back from run-gate.ps1 as AUD-63 (b) reads them.

@@ -80,6 +80,8 @@ $script:Fail = 0
 $script:Unchecked = 0
 $script:Failures = New-Object 'Collections.Generic.List[string]'
 $script:Uncheckables = New-Object 'Collections.Generic.List[string]'
+$script:Harness = 0
+$script:HarnessErrors = New-Object 'Collections.Generic.List[string]'
 $script:DisplayHeld = $false
 
 function Test-Hdr { param([string]$Msg) Write-Host ''; Write-Host "=== $Msg" -ForegroundColor Cyan }
@@ -97,6 +99,15 @@ function Test-Unchecked {
     $script:Uncheckables.Add("$Msg ($Why)")
     Write-Host "  UNCHECKED  $Msg" -ForegroundColor Yellow
     Write-Host "               $Why" -ForegroundColor Yellow
+}
+# A check whose own harness broke (web-smoke.py's exit 3). The run continues, and the gate ends
+# in exit 3 unless a check failed, because a broken harness is never a verdict on the app (R3-26).
+function Test-Harness {
+    param([string]$Msg, [string]$Detail)
+    $script:Harness++
+    $script:HarnessErrors.Add("$Msg ($Detail)")
+    Write-Host "  HARNESS    $Msg" -ForegroundColor Magenta
+    if ($Detail) { Write-Host "               $Detail" -ForegroundColor Magenta }
 }
 function Stop-Harness {
     param([string]$Why)
@@ -679,7 +690,7 @@ try {
             $smokeOut = Get-Content -LiteralPath $smokeLog, "$smokeLog.err" | Out-String
             $smokeExit = $smokeRun.ExitCode
             foreach ($line in ($smokeOut -split "`r?`n")) {
-                if ($line -match '^\s{2}(ok|FAIL)\s') {
+                if ($line -match '^\s{2}(ok|FAIL|HARNESS)\s') {
                     Write-Host ('  ' + $line.Trim()) -ForegroundColor DarkGray
                 }
             }
@@ -699,6 +710,15 @@ try {
                     $smokeVerdict = Get-GateCaseVerdict -ExitCode 2 -Log $smokeLog
                     if ($smokeVerdict.Outcome -eq 'unchecked') { Test-Unchecked 'headless web smoke' $smokeVerdict.Detail }
                     else { Test-Fail 'headless web smoke' $smokeVerdict.Detail }
+                }
+                # web-smoke.py exits 3 only when its own harness broke and nothing failed: a loopback
+                # error on its server's origin, a server that stops answering, a missing fixture or
+                # an exception before a verdict. That is the gate's harness error, not a product
+                # FAIL (R3-26). The HARNESS lines name each check; a crash prints only to stderr.
+                3 {
+                    $broken = @([regex]::Matches($smokeOut, '(?m)^\s+HARNESS\s+(.+)$') | ForEach-Object { $_.Groups[1].Value.Trim() })
+                    if ($broken.Count -eq 0) { $broken = @(Get-Content -LiteralPath "$smokeLog.err" -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }) }
+                    Test-Harness 'headless web smoke' ((@($broken | Select-Object -First 3) -join ' | ') + "; see $smokeLog and $smokeLog.err")
                 }
                 default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
             }
@@ -1444,18 +1464,35 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
     Write-Host ''
     Write-Host ('=' * 74)
-    Write-Host (" PASS {0}    FAIL {1}    UNCHECKED {2}" -f $script:Pass, $script:Fail, $script:Unchecked)
+    Write-Host ((" PASS {0}    FAIL {1}    UNCHECKED {2}" -f $script:Pass, $script:Fail, $script:Unchecked) + $(if ($script:Harness -gt 0) { "    HARNESS $($script:Harness)" } else { '' }))
     Write-Host ('=' * 74)
 
     if ($script:Fail -gt 0) {
         Write-Host ''
         Write-Host 'GATE FAILED:' -ForegroundColor Red
         foreach ($f in $script:Failures) { Write-Host "  - $f" -ForegroundColor Red }
+        if ($script:Harness -gt 0) {
+            Write-Host 'and the harness broke in:' -ForegroundColor Magenta
+            foreach ($h in $script:HarnessErrors) { Write-Host "  - $h" -ForegroundColor Magenta }
+        }
         if ($script:Unchecked -gt 0) {
             Write-Host 'and could not verify:' -ForegroundColor Yellow
             foreach ($u in $script:Uncheckables) { Write-Host "  - $u" -ForegroundColor Yellow }
         }
         exit 1
+    }
+
+    # Nothing failed, but a check's own harness broke: exit 3 as the header defines it (R3-26).
+    if ($script:Harness -gt 0) {
+        Write-Host ''
+        Write-Host 'HARNESS ERROR:' -ForegroundColor Magenta
+        foreach ($h in $script:HarnessErrors) { Write-Host "  - $h" -ForegroundColor Magenta }
+        if ($script:Unchecked -gt 0) {
+            Write-Host 'and could not verify:' -ForegroundColor Yellow
+            foreach ($u in $script:Uncheckables) { Write-Host "  - $u" -ForegroundColor Yellow }
+        }
+        Write-Host 'This is a defect in the gate, not a verdict on the application.' -ForegroundColor Magenta
+        exit 3
     }
 
     if ($script:Unchecked -gt 0) {
