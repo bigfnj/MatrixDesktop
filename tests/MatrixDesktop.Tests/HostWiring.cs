@@ -497,12 +497,20 @@ internal static class HostWiring
             var code = Body(bodies, "MatrixDesktop.MainForm::WndProc");
             string Seen(List<Step> steps) => string.Join(" ", steps.Where(step => step.Store ? step.Name == flag : step.Name == dispatch)
                 .Select(step => step.Store ? "flag=" + (step.Values[0]?.ToString() ?? "?") : "dispatch"));
-            foreach (var message in new long[] { 0x11, 0x10 })
-            {
-                var expected = message == 0x11 ? "flag=1 dispatch" : "dispatch";
-                var seen = Paths(code, new() { ["System.Windows.Forms.Message::get_Msg"] = message }).Select(Seen).Distinct().ToList();
-                Check.True(seen is [var only] && only == expected, $"WndProc must turn message 0x{message:X2} into '{expected}', got '{string.Join("' or '", seen)}'");
-            }
+            // Every message id, not two samples: 'm.Msg != 0x0011 && m.Msg != 0x0112' also set the
+            // flag while WM_SYSCOMMAND was dispatched, so the WM_CLOSE that Alt+F4 nests inside it
+            // reached OnFormClosing with the flag set and TearsDownOnClosing(true) skipped teardown.
+            // Each constant WndProc loads, and its neighbours, covers an id compared past 0xFFFF.
+            var messages = Enumerable.Range(0, 0x10000).Select(message => (long)message)
+                .Concat(code.Where(instruction => instruction.Code.Name!.StartsWith("ldc.i", StringComparison.Ordinal))
+                    .SelectMany(instruction => new[] { instruction.Value - 1, instruction.Value, instruction.Value + 1 }))
+                .Distinct().ToList();
+            var offending = messages
+                .Select(message => (Message: message, Expected: message == 0x11 ? "flag=1 dispatch" : "dispatch",
+                    Got: Paths(code, new() { ["System.Windows.Forms.Message::get_Msg"] = message }).Select(Seen).Distinct().ToList()))
+                .Where(probe => !(probe.Got is [var only] && only == probe.Expected)).ToList();
+            Check.True(offending.Count == 0, $"WndProc must turn message 0x11 alone into 'flag=1 dispatch' and every other message into 'dispatch'; {offending.Count} of {messages.Count} wrong: "
+                + string.Join(", ", offending.Take(4).Select(probe => $"0x{probe.Message:X} got '{string.Join("' or '", probe.Got)}'")));
             // The finally must cover the dispatch that follows the store of true, not any dispatch:
             // one around the other branch's left the flag set after the query.
             var sets = Enumerable.Range(1, code.Count - 1).Where(index => code[index].Code == OpCodes.Stfld && code[index].Name == flag && code[index - 1].Code == OpCodes.Ldc_I4_1).ToList();
