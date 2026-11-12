@@ -1047,7 +1047,8 @@ def check_matrix_web(page, origin):
     except NotReady as stall:
         stalled = stall
 
-    # A harness failure explains the console errors it caused, so it is the one verdict.
+    # A harness failure explains the console errors it caused, so its verdict (with any product
+    # failure that does not follow from it) replaces the console-error check.
     if stalled is not None and stalled.cause:
         report_not_ready("matrix web bundle sizes its canvas", stalled)
         return
@@ -1202,11 +1203,12 @@ class PageEvidence:
 
     Attached before page.goto, so a module request that fails in the first milliseconds is
     seen. A readiness failure reads it before the check closes the page and stops recording,
-    so the transfers page.close() aborts never reach a verdict.
+    so the transfers page.close() aborts never reach a verdict. expected holds the other-origin
+    URLs the check itself blocks, which are not a product failure beside a harness fault.
     """
 
-    def __init__(self, page, origin):
-        self.origin = origin
+    def __init__(self, page, origin, expected=()):
+        self.origin, self.expected = origin, set(expected)
         self.failed, self.statuses, self.console, self.page_errors = [], [], [], []
         self.recording = True
         page.on("requestfailed", self._request_failed)
@@ -1258,20 +1260,54 @@ def server_unreachable(origin):
     return None
 
 
+# Error texts that only report a failed import or resource load. On a page the harness broke they
+# are its fault's import cascade, and a bad status or another origin's request behind one is
+# counted from the request itself.
+CASCADE_ERRORS = ("Failed to fetch dynamically imported module", "Failed to load resource")
+
+
+class HarnessCause(str):
+    """harness_cause()'s answer: why the harness stopped a renderer. product holds the page's
+    product failures that do not follow from that fault, which stay a FAIL beside it."""
+
+    def __new__(cls, text, product):
+        cause = super().__new__(cls, text)
+        cause.product = product
+        return cause
+
+
+def independent_failures(evidence, broken):
+    """A page's product failures that do not follow from a harness fault: an HTTP status >= 400
+    (a shipped file missing or broken), a request to another origin the check did not block on
+    purpose, and a page or console error that is neither an import cascade (CASCADE_ERRORS) nor
+    names a URL the fault broke (broken)."""
+    found = [f"{url} {status}" for url, status in evidence.statuses if url not in evidence.expected]
+    found += [f"{url} {error}" for url, error in evidence.failed
+              if not evidence.own(url) and url not in evidence.expected]
+    found += ["error: " + (text.splitlines() or [""])[0] for text in evidence.page_errors + evidence.console
+              if not any(marker in text for marker in CASCADE_ERRORS) and not any(url in text for url in broken)]
+    return found
+
+
 def harness_cause(evidence):
-    """The infrastructure failure behind a renderer that did not start, or None.
+    """The infrastructure failure behind a renderer that did not start, as a HarnessCause, or None.
 
     Only two causes belong to the harness: a smoke server that does not answer, and a request
     to its own origin that failed with a loopback resource error. Everything else stays the
     product's FAIL: an HTTP 404 of a shipped module, a request to another origin, a renderer
-    that initializes and draws nothing, a wrong app URL.
+    that initializes and draws nothing, a wrong app URL. On a page the harness broke, those stay
+    a FAIL too (the cause's product list): any harness hit used to make the whole page HARNESS,
+    so a 404 of one module beside a loopback error on its sibling was never a FAIL (MDST-01).
     """
     dead = server_unreachable(evidence.origin)
     if dead:
-        return f"the smoke server at {evidence.origin} does not answer ({dead})"
-    hits = [f"{url} {error}" for url, error in evidence.failed if evidence.own(url) and error in HARNESS_NET_ERRORS]
+        return HarnessCause(f"the smoke server at {evidence.origin} does not answer ({dead})",
+                            independent_failures(evidence, [url for url, _ in evidence.failed if evidence.own(url)]))
+    hits = [(url, error) for url, error in evidence.failed if evidence.own(url) and error in HARNESS_NET_ERRORS]
     if hits:
-        return "a request to the smoke server's own origin failed with a loopback resource error: " + ", ".join(hits[:3])
+        return HarnessCause("a request to the smoke server's own origin failed with a loopback resource error: "
+                            + ", ".join(f"{url} {error}" for url, error in hits[:3]),
+                            independent_failures(evidence, [url for url, _ in hits]))
     return None
 
 
@@ -1285,13 +1321,22 @@ class NotReady(Exception):
 
 
 def verdict(stall):
-    """('HARNESS', detail) when the harness caused the stall, else ('FAIL', detail)."""
+    """('HARNESS', detail) when the harness caused the stall, else ('FAIL', detail). A harness
+    cause's independent product failures are reported beside it, as independent() words them."""
     return ("HARNESS", f"{stall.cause}; {stall}") if stall.cause else ("FAIL", str(stall))
+
+
+def independent(cause):
+    """The FAIL detail for a harness cause's independent product failures, or None."""
+    product = getattr(cause, "product", None)
+    return "independent of that harness fault: " + ", ".join(product) if product else None
 
 
 def report_not_ready(name, stall):
     kind, detail = verdict(stall)
     (harness if kind == "HARNESS" else fail)(name, detail)
+    if kind == "HARNESS" and independent(stall.cause):
+        fail(name, f"{independent(stall.cause)}; {stall}")
 
 
 def report_legs(name, legs, passed):
@@ -1300,10 +1345,12 @@ def report_legs(name, legs, passed):
 
     The legs the harness broke make one HARNESS line naming each leg, and every other leg's
     problem is still this check's FAIL, so main() exits 1. A check used to report only its
-    first harness-caused leg, which hid a product failure in another leg of the same check.
+    first harness-caused leg, which hid a product failure in another leg of the same check. A
+    broken leg's independent product failures are this check's FAIL as well.
     """
     broken = [f"{leg}: {cause}; {problem}" for leg, problem, cause in legs if cause]
-    failed = [f"{leg}: {problem}" for leg, problem, cause in legs if not cause]
+    failed = [f"{leg}: " + (f"{independent(cause)}; " if cause else "") + problem
+              for leg, problem, cause in legs if not cause or independent(cause)]
     if broken:
         harness(name, " | ".join(broken))
     if failed:
@@ -1638,7 +1685,7 @@ def image_offline_case(browser, origin, query, expected_block, init_script=None)
     the smoke server failing, and a request to an origin the case did not expect is a problem.
     """
     page = browser.new_page(viewport={"width": 480, "height": 360})
-    evidence = PageEvidence(page, origin)
+    evidence = PageEvidence(page, origin, expected=[expected_block] if expected_block else [])
     blocked, warnings = [], []
     page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
 
@@ -2015,6 +2062,42 @@ def check_readiness_reporting(browser, origin):
                 problems.append(f"no printed line starts {start.strip()!r}")
         return "; ".join(problems), "FAIL names effect=toString's 404, HARNESS names effect=constructor"
 
+    def harness_fault_beside_missing_module():
+        # One page, two faults in one module graph: regl/main.js's sibling imports bloomPass.js
+        # answered 404 and rainPass.js failed with the stand-in network error made the harness's
+        # for this run, as in the control above (ERR_NO_BUFFER_SPACE cannot be injected).
+        # Siblings, because the graph fails at its first failed fetch: with the 404 on
+        # hostPointer.js, a level deeper, it was never requested in 3 of 3 runs. The verdict goes
+        # through report_not_ready, whose lines are captured and taken back.
+        global HARNESS_NET_ERRORS
+        stand_in, name = "net::ERR_ADDRESS_UNREACHABLE", "a page with a missing module beside a harness fault"
+        missing, broken = "/js/regl/bloomPass.js", "/js/regl/rainPass.js"
+        page = browser.new_page(viewport={"width": 320, "height": 240})
+        evidence = PageEvidence(page, origin)
+        marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+        HARNESS_NET_ERRORS = saved + (stand_in,)
+        try:
+            page.route("**" + missing, lambda route: route.fulfill(status=404, content_type="text/plain", body="missing"))
+            page.route("**" + broken, lambda route: route.abort("addressunreachable"))
+            with contextlib.redirect_stdout(printed):
+                try:
+                    open_page(page, evidence, app)
+                    wait_ready(page, evidence, timeout=20000, errors_fatal=True)
+                    ok(name)
+                except NotReady as stall:
+                    report_not_ready(name, stall)
+        finally:
+            HARNESS_NET_ERRORS = saved
+            page.close()
+            failed, flagged = failures[marks[0]:], harness_errors[marks[1]:]
+            del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+        problems = []
+        if len(failed) != 1 or not failed[0][1].startswith(f"independent of that harness fault: {origin}{missing} 404; "):
+            problems.append(f"not one FAIL naming only the 404 of {missing}: {failed}")
+        if len(flagged) != 1 or f"{origin}{broken} {stand_in}" not in flagged[0][1].split("; ")[0]:
+            problems.append(f"not one HARNESS line naming {broken}: {flagged}")
+        return "; ".join(problems), f"FAIL names the 404 of {missing}, HARNESS names {broken}"
+
     for name, control in (
             ("readiness: a renderer dependency that fails is reported in seconds, naming it", failed_dependency),
             ("readiness: an initialized renderer that draws no frame is a FAIL naming ready and frames", zero_frames),
@@ -2023,7 +2106,8 @@ def check_readiness_reporting(browser, origin):
             ("readiness: a shipped module answered 404 is a product FAIL", missing_module),
             ("readiness: a smoke server that does not answer is a harness error", dead_server),
             ("readiness: a page that cannot be read keeps the readiness error", unreadable_page),
-            ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg)):
+            ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg),
+            ("readiness: a harness fault does not hide a 404 on the same page", harness_fault_beside_missing_module)):
         try:
             problem, detail = control()
         except Exception as error:  # a broken control is this check's FAIL, not exit 3
