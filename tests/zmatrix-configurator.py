@@ -1489,6 +1489,60 @@ def check_sorted_store_retarget(page, fixture):
         fresh.close()
 
 
+class Unverified(Exception):
+    """A check that cannot run here: reported UNVERIFIED, and the run exits 2 unless another check failed."""
+
+
+def check_no_favicon_request(browser, origin, fixture):
+    # R3-17: R2-56 gave web/index.html an empty icon, but the configurator's own page declared
+    # none, so every configurator launch requested https://configurator.local/favicon.ico from a
+    # folder that holds no such file. The headless shell never fetches favicons and Playwright's
+    # request events miss the browser's own fetch, so, as web-smoke's R2-56 check does, this starts
+    # the full Chromium build headless and reads CDP. The same page with its icon link stripped
+    # must make the request, or a pass means nothing. The shipped page runs first: a favicon that
+    # failed once may not be fetched again.
+    try:
+        full = browser_launch.launch(browser.browser_type, channel="chromium")
+    except browser_launch.LaunchArgumentsError:
+        raise
+    except Exception as error:
+        raise Unverified("the full Chromium build would not start (" + type(error).__name__ + "), and the headless shell never "
+                         "requests a favicon; install it with: python -m playwright install chromium") from error
+
+    def strip_icon(route):
+        response = route.fetch()
+        route.fulfill(response=response, body=re.sub(r'\s*<link rel="icon"[^>]*>', "", response.text()))
+
+    requested = {}
+    try:
+        for label in ("as shipped", "icon link stripped"):
+            page = full.new_page(viewport={"width": 1280, "height": 860})
+            seen = requested[label] = []
+            try:
+                page.add_init_script(STUB.replace("__STATE__", json.dumps(fixture, ensure_ascii=False)))
+                if label == "as shipped":
+                    served = page.request.get(origin + "/index.html").body()
+                    assert served == (CONFIGURATOR / "index.html").read_bytes(), "served index.html witness mismatch"
+                else:
+                    page.route("**/index.html*", strip_icon)
+                cdp = page.context.new_cdp_session(page)
+                cdp.on("Network.requestWillBeSent", lambda event, seen=seen: seen.append(event["request"]["url"])
+                       if event["request"]["url"].split("?")[0].endswith("/favicon.ico") else None)
+                cdp.send("Network.enable")
+                page.goto(origin + "/index.html", wait_until="load")
+                page.wait_for_function("document.querySelectorAll('.field').length>40")
+                for _ in range(12):  # the fetch follows the load event within milliseconds
+                    if seen:
+                        break
+                    page.wait_for_timeout(250)
+            finally:
+                page.close()
+    finally:
+        full.close()
+    assert not requested["as shipped"], "the shipped page requested " + requested["as shipped"][0]
+    assert requested["icon link stripped"], "witness failed: without its icon link the page made no /favicon.ico request either"
+
+
 CHECKS = [
     ("Effect and version switches keep untouched editors on what renders", check_effective_defaults),
     ("Stub replies in the host's arrival order, so a slow earlier build never replaces the latest command", check_host_reply_order),
@@ -1528,8 +1582,11 @@ CHECKS = [
     ("Checkboxes, range sliders, summaries, a jumped-to heading and the help guide show a visible keyboard focus ring in both themes", check_focus_ring_sweep),
     ("Colour popover content stays inside its box", check_popover_fits),
     ("A reopened store's sorted colour keys still follow a version switch", check_sorted_store_retarget),
+    ("Configurator page makes no /favicon.ico request", check_no_favicon_request),
 ]
 PRESET_CHECKS = {check_rename, check_scratch_draft, check_pending_save_delete, check_pending_save_save_as, check_settled_save}
+# Checks that start their own browser from the shell browser's type, rather than taking a page.
+BROWSER_CHECKS = {check_no_favicon_request}
 
 
 def main():
@@ -1561,7 +1618,7 @@ def main():
         print("UNVERIFIED:", error)
         return 2
     server, origin = serve(args.app_js)
-    failures = 0
+    failures = unverified = 0
     try:
         with sync_playwright() as playwright:
             try:
@@ -1572,6 +1629,20 @@ def main():
                 print("UNVERIFIED: Chromium unavailable:", error)
                 return 2
             for name, function in checks:
+                if function in BROWSER_CHECKS:
+                    try:
+                        function(browser, origin, fixture)
+                        print("PASS", name, flush=True)
+                    except browser_launch.LaunchArgumentsError:
+                        raise
+                    except Unverified as error:
+                        unverified += 1
+                        print("UNVERIFIED:", name + ":", str(error), flush=True)
+                    except Exception as error:
+                        failures += 1
+                        print("FAIL", name + ":", str(error), flush=True)
+                        traceback.print_exc()
+                    continue
                 page = browser.new_page(viewport={"width": 1280, "height": 860})
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
@@ -1603,8 +1674,9 @@ def main():
     finally:
         server.shutdown()
         server.server_close()
-    print(str(len(checks) - failures) + "/" + str(len(checks)) + " ZMatrix configurator checks passed.", flush=True)
-    return 1 if failures else 0
+    print(str(len(checks) - failures - unverified) + "/" + str(len(checks)) + " ZMatrix configurator checks passed."
+          + (" " + str(unverified) + " could not run." if unverified else ""), flush=True)
+    return 1 if failures else 2 if unverified else 0
 
 
 if __name__ == "__main__":
