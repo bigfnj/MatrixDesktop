@@ -65,8 +65,8 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
     HTTP/1.1, so a page reuses a few keep-alive connections. As HTTP/1.0 every one of the
     ~25 module requests of a renderer start was its own loopback connection, and the one
-    captured renderer stall was a module GET whose connect failed (net::ERR_NO_BUFFER_SPACE,
-    2026-11-12). timeout bounds every read and write on a connection, so a client that holds
+    captured renderer stall was a module GET that failed with net::ERR_NO_BUFFER_SPACE
+    (2026-11-12). timeout bounds every read and write on a connection, so a client that holds
     one open and idle cannot keep close_server() waiting: StreamRequestHandler applies it per
     connection, and handle_one_request ends a connection that expires through log_error, which
     is suppressed here, so an expired wait is silent. It must stay above the 0.5 s the
@@ -94,11 +94,11 @@ class _QuietServer(http.server.ThreadingHTTPServer):
     anything else is recorded. Handler threads are not daemons, so server_close() waits for
     them.
 
-    socketserver listens with a backlog of 5. On Windows a connection past a full backlog is
-    not refused: its SYN is dropped and retried about a second later. A page opens six
-    connections per origin at once, so whenever load starves the accept thread a module
-    request stalled. Measured here: of 40 connects to a listener that accepts nothing, 35
-    timed out at backlog 5 and none at 64.
+    socketserver listens with a backlog of 5. Measured on this box (2026-11-12): of 40
+    connects with a 2 s timeout to a listener that accepts nothing, 35 timed out at backlog 5
+    and none at 64, and none was refused. A page opens up to six connections per origin at
+    once, so a backlog of 5 leaves no room when the accept thread falls behind. A module
+    request stalled by the backlog was never observed; 64 removes the chance of one.
     """
 
     daemon_threads = False
@@ -977,43 +977,40 @@ def check_glyph_intensity(browser, origin):
                f"luma {dark:.1f} at 0 vs {bright:.1f} at 2")
 
 
-def check_inherited_effect_names(browser, origin):
+def check_inherited_effect_names(browser, origin, prepare=None):
     """An unknown effect name falls back to palette, including names every object inherits.
 
     The renderer picked its effect with `config.effect in effects`, which is also true for
     constructor, toString and __proto__, so effect=constructor handed Object to the pipeline
     as a pass factory and the renderer failed to start instead of falling back (AUD-79).
+
+    prepare(page, effect), when given, runs before each page opens; the readiness controls use
+    it to inject a fault into one leg.
     """
-    problems, frames, stalls = [], [], []
-    for name in ("constructor", "toString", "__proto__"):
+    legs, frames = [], []
+    for effect in ("constructor", "toString", "__proto__"):
         page = browser.new_page(viewport={"width": 320, "height": 240})
         evidence = PageEvidence(page, origin)
         try:
-            open_page(page, evidence, f"{origin}/index.html?suppressWarnings=true&numColumns=20&effect={name}")
+            if prepare:
+                prepare(page, effect)
+            open_page(page, evidence, f"{origin}/index.html?suppressWarnings=true&numColumns=20&effect={effect}")
             wait_ready(page, evidence, "window.matrixRuntimeDiagnostics?.frames > 3", timeout=30000, errors_fatal=True)
             state = page.evaluate("""() => ({
                 frames: window.matrixRuntimeDiagnostics?.frames ?? 0,
                 errors: window.matrixRuntimeDiagnostics?.errors ?? [],
                 notice: document.querySelector('.notice')?.textContent.trim() ?? null })""")
         except NotReady as stall:
-            stalls.append(stall)
-            problems.append(f"effect={name}: {stall}")
+            legs.append((f"effect={effect}", str(stall), stall.cause))
             continue
         finally:
             page.close()
         found = [(text.splitlines() or [""])[0] for text in
                  evidence.console + evidence.page_errors + state["errors"] + ([state["notice"]] if state["notice"] else [])]
-        frames.append(f"{name} {state['frames']}")
+        frames.append(f"{effect} {state['frames']}")
         if state["frames"] <= 3 or found:
-            problems.append(f"effect={name}: {state['frames']} frames; " + "; ".join(found[:2]))
-    name = "inherited effect names fall back to the palette render"
-    caused = [stall for stall in stalls if stall.cause]
-    if caused:
-        report_not_ready(name, caused[0])
-    elif problems:
-        fail(name, " | ".join(problems))
-    else:
-        ok(name, "frames: " + ", ".join(frames))
+            legs.append((f"effect={effect}", f"{state['frames']} frames; " + "; ".join(found[:2]), None))
+    report_legs("inherited effect names fall back to the palette render", legs, "frames: " + ", ".join(frames))
 
 
 def check_matrix_web(page, origin):
@@ -1115,9 +1112,12 @@ READY = "window.matrixRuntimeDiagnostics?.ready === true && window.matrixRuntime
 
 
 # A request to the smoke server's own origin that fails with one of these is the harness's
-# fault, not the product's. Chromium maps WSAENOBUFS (10055) to ERR_NO_BUFFER_SPACE, and
-# Windows returns 10055 when a connect cannot get a local port. The one captured renderer
-# stall (2026-11-12) was a module GET that failed this way 72 ms after navigation.
+# fault, not the product's. Chromium maps WSAENOBUFS (10055) to ERR_NO_BUFFER_SPACE. Windows
+# can return 10055 when a socket cannot get a local port, and Chromium's randomized local port
+# pick on Windows (the TcpPortRandomizationWin feature) can return it while ports are free
+# (microsoft/playwright#43545, worked around in #43605). Either way the loopback socket
+# failed, not the page. The one captured renderer stall (2026-11-12) was a module GET that
+# failed with it 72 ms after navigation.
 HARNESS_NET_ERRORS = ("net::ERR_NO_BUFFER_SPACE",)
 
 harness_errors = []
@@ -1127,6 +1127,69 @@ def harness(name, detail):
     """A check the harness could not run because its own infrastructure failed."""
     harness_errors.append((name, detail))
     print(f"  HARNESS  {name}: {detail}")
+
+
+def exit_code(failed, broken):
+    """main()'s exit code from its FAILs and its harness errors, by the gate's rule: a FAIL is
+    the verdict even beside a harness error (1), harness errors alone say the harness broke
+    rather than the product (3), and nothing at all is a pass (0)."""
+    if failed:
+        return 1
+    if broken:
+        return 3
+    return 0
+
+
+def check_exit_mapping():
+    """exit_code() gives each outcome the code the gate reads. The gate counts ok lines on exit
+    0, so a harness error mapped to 0 would read as a pass."""
+    name = "the exit code is 0 for a pass, 3 for harness errors alone and 1 for any FAIL"
+    one_fail, one_harness = [("a check", "a FAIL")], [("a check", "a harness error")]
+    wrong = [f"{len(failed)} FAIL(s) and {len(broken)} harness error(s) gave {exit_code(failed, broken)}, expected {want}"
+             for failed, broken, want in (([], [], 0), ([], one_harness, 3), (one_fail, one_harness, 1), (one_fail, [], 1))
+             if exit_code(failed, broken) != want]
+    if wrong:
+        fail(name, "; ".join(wrong))
+    else:
+        ok(name, "0, 3, 1 and 1 for nothing, harness only, both, FAIL only")
+
+
+def check_probe_ignores_proxy():
+    """server_unreachable() reads a live smoke server as live in a process started with
+    HTTP_PROXY naming a proxy that does not answer, so a proxy cannot turn a run into a harness
+    error. A child process, because urlopen builds its opener, proxies included, on its first
+    call, and this process has made that call already."""
+    import os
+    import subprocess
+    import tempfile
+
+    name = "the smoke-server probe ignores the proxy settings"
+    probe = ("import importlib.util, json, sys; "
+             "spec = importlib.util.spec_from_file_location('web_smoke_probe', sys.argv[1]); "
+             "ws = importlib.util.module_from_spec(spec); spec.loader.exec_module(ws); "
+             "print(json.dumps(ws.server_unreachable(sys.argv[2])))")
+    proxy = socket.socket()  # bound and never listening, so nothing answers on its port
+    proxy.bind(("127.0.0.1", 0))
+    env = {key: value for key, value in os.environ.items() if not key.lower().endswith("_proxy")}
+    env["HTTP_PROXY"] = f"http://127.0.0.1:{proxy.getsockname()[1]}"
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+        httpd, origin = serve(folder)
+        try:
+            run = subprocess.run([sys.executable, "-c", probe, str(Path(__file__).resolve()), origin], env=env,
+                                 capture_output=True, text=True, timeout=60)
+        finally:
+            close_server(httpd)
+            proxy.close()
+    try:
+        reason, ran = json.loads(run.stdout.strip().splitlines()[-1]), run.returncode == 0
+    except (IndexError, ValueError):
+        reason, ran = None, False
+    if not ran:
+        fail(name, f"the probe process exited {run.returncode}: {(run.stderr.strip().splitlines() or [''])[-1]}")
+    elif reason:
+        fail(name, f"a live server at {origin} read as dead with HTTP_PROXY set to a proxy that does not answer: {reason}")
+    else:
+        ok(name, "a live server answered in a process started with HTTP_PROXY set to a proxy that does not answer")
 
 
 class PageEvidence:
@@ -1173,11 +1236,16 @@ class PageEvidence:
 
 
 def server_unreachable(origin):
-    """Why the smoke server at origin does not answer HEAD /, or None when it answers."""
+    """Why the smoke server at origin does not answer HEAD /, or None when it answers.
+
+    Direct, never through a proxy: urllib.request.urlopen follows HTTP_PROXY and the system
+    proxy, and does not bypass 127.0.0.1 here, so with a proxy set a live server read as dead.
+    """
     import urllib.error
     import urllib.request
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        urllib.request.urlopen(urllib.request.Request(origin + "/", method="HEAD"), timeout=5).close()
+        direct.open(urllib.request.Request(origin + "/", method="HEAD"), timeout=5).close()
     except urllib.error.HTTPError:
         return None  # an HTTP status is an answer
     except OSError as error:
@@ -1219,6 +1287,24 @@ def verdict(stall):
 def report_not_ready(name, stall):
     kind, detail = verdict(stall)
     (harness if kind == "HARNESS" else fail)(name, detail)
+
+
+def report_legs(name, legs, passed):
+    """One check's verdict from its legs. legs holds (leg, problem, cause) for every leg with a
+    problem, where cause is the harness cause of that leg's page, or None for a product one.
+
+    The legs the harness broke make one HARNESS line naming each leg, and every other leg's
+    problem is still this check's FAIL, so main() exits 1. A check used to report only its
+    first harness-caused leg, which hid a product failure in another leg of the same check.
+    """
+    broken = [f"{leg}: {cause}; {problem}" for leg, problem, cause in legs if cause]
+    failed = [f"{leg}: {problem}" for leg, problem, cause in legs if not cause]
+    if broken:
+        harness(name, " | ".join(broken))
+    if failed:
+        fail(name, " | ".join(failed))
+    if not legs:
+        ok(name, passed)
 
 
 PAGE_STATE = """() => {
@@ -1631,12 +1717,12 @@ def check_refused_webgl_context(browser, origin):
     instead of asking for the restart that a new browser process needs.
     """
     name = "a page refused every WebGL context shows the restart notice"
-    problems, seen, caused = [], [], []
+    legs, seen = [], []
     for scene, extra in (("matrix", ""), ("matrix", "&renderer=webgpu"), ("uc3d", ""), ("zmatrix", "")):
         leg = f"{scene}{extra}"
         page = browser.new_page(viewport={"width": 480, "height": 360})
         evidence = PageEvidence(page, origin)
-        errors, navigations = [], []
+        errors, navigations, problems = [], [], []
         page.on("pageerror", lambda e, errors=errors: errors.append(f"page error: {e}"))
         page.on("console", lambda m, errors=errors: errors.append(m.text) if "Cannot read properties" in m.text else None)
         page.on("framenavigated", lambda f, page=page, navigations=navigations: navigations.append(f.url) if f == page.main_frame else None)
@@ -1649,8 +1735,7 @@ def check_refused_webgl_context(browser, origin):
                 # The notice is this check's expected outcome, so its absence is read like a
                 # renderer that never started: what the page showed, and whose fault it was.
                 stall = not_ready(page, evidence, "no notice within 20 s", _first_line(error))
-                caused += [stall] if stall.cause else []
-                problems.append(f"{leg}: {stall}")
+                legs.append((leg, str(stall), stall.cause))
                 continue
             page.wait_for_timeout(500)
             state = page.evaluate("""() => ({
@@ -1659,30 +1744,28 @@ def check_refused_webgl_context(browser, origin):
                 diagnostics: window.matrixRuntimeDiagnostics?.errors ?? null,
                 stamps: sessionStorage.getItem('matrixRendererRecoveries') })""")
             if not state["refused"]:
-                problems.append(f"{leg}: witness failed, the page still gets a WebGL context")
+                legs.append((leg, "witness failed, the page still gets a WebGL context", None))
                 continue
             restart = "could not be recovered automatically" in state["notice"] and "Restart MatrixDesktop" in state["notice"]
             if not restart:
-                problems.append(f"{leg}: the notice says '{state['notice']}'")
+                problems.append(f"the notice says '{state['notice']}'")
             if scene == "matrix" and len(state["diagnostics"] or []) != 1:
-                problems.append(f"{leg}: diagnostics recorded {state['diagnostics']}, expected one error")
+                problems.append(f"diagnostics recorded {state['diagnostics']}, expected one error")
             leaked = [text for text in [state["notice"], *(state["diagnostics"] or []), *errors]
                       if "Cannot read properties" in text or text.startswith("page error:")]
             if leaked:
-                problems.append(f"{leg}: {leaked[0]}")
+                problems.append(leaked[0])
             if len(navigations) != 1 or state["stamps"] is not None:
-                problems.append(f"{leg}: {len(navigations)} navigation(s) and recovery stamps {state['stamps']}; expected no reload")
+                problems.append(f"{len(navigations)} navigation(s) and recovery stamps {state['stamps']}; expected no reload")
             if restart and not page.evaluate(NOTICE_IN_VIEW, "Restart MatrixDesktop")["inView"]:
-                problems.append(f"{leg}: the notice is outside the viewport")
-            seen.append(leg)
+                problems.append("the notice is outside the viewport")
+            if problems:
+                legs.append((leg, "; ".join(problems), None))
+            else:
+                seen.append(leg)
         finally:
             page.close()
-    if caused:
-        report_not_ready(name, caused[0])
-    elif problems:
-        fail(name, " | ".join(problems))
-    else:
-        ok(name, ", ".join(seen))
+    report_legs(name, legs, ", ".join(seen))
 
 
 def check_no_favicon_request(browser, origin):
@@ -1754,6 +1837,7 @@ def check_readiness_reporting(browser, origin):
     /js/hostPointer.js is the module whose GET failed in the captured stall; regl/main.js imports
     it through hostPlayback.js, so failing it stops the renderer before diagnostics exist.
     """
+    import contextlib
     import time
 
     module = "/js/hostPointer.js"
@@ -1844,20 +1928,24 @@ def check_readiness_reporting(browser, origin):
         return "; ".join(problems), f"FAIL in {took:.1f} s"
 
     def dead_server():
-        httpd, dead = serve(WEB)
-        close_server(httpd)
+        # Bound and never listening: nothing answers there, and unlike a port a closed server
+        # freed, no other process can take it while the control runs.
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{holder.getsockname()[1]}"
         page = browser.new_page(viewport={"width": 320, "height": 240})
         evidence = PageEvidence(page, dead)
         try:
             open_page(page, evidence, f"{dead}/index.html")
             wait_ready(page, evidence, timeout=5000)
-            return f"a page from the closed server at {dead} became ready", ""
+            return f"a page from {dead}, where nothing listens, became ready", ""
         except NotReady as stall:
             kind, text = verdict(stall)
         finally:
             page.close()
+            holder.close()
         if kind != "HARNESS" or f"the smoke server at {dead} does not answer" not in text:
-            return f"a closed smoke server was reported as {kind}: {text}", ""
+            return f"a smoke server that does not answer was reported as {kind}: {text}", ""
         return "", "HARNESS, names the server"
 
     def unreadable_page():
@@ -1884,6 +1972,42 @@ def check_readiness_reporting(browser, origin):
                     if part not in text]
         return "; ".join(problems), "keeps the readiness error and names the unreadable page"
 
+    def harness_leg_beside_failing_leg():
+        # The inherited-names check with two faulted legs: effect=constructor's module fails
+        # with a stand-in network error made the harness's for this run, effect=toString's is
+        # answered 404. Its lines are captured and its verdicts taken back, so only this
+        # control's own line reaches the run.
+        global HARNESS_NET_ERRORS
+        stand_in, check = "net::ERR_ADDRESS_UNREACHABLE", "inherited effect names fall back to the palette render"
+
+        def prepare(page, effect):
+            if effect == "constructor":
+                page.route("**" + module, lambda route: route.abort("addressunreachable"))
+            elif effect == "toString":
+                page.route("**" + module, lambda route: route.fulfill(status=404, content_type="text/plain", body="missing"))
+
+        marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+        HARNESS_NET_ERRORS = saved + (stand_in,)
+        try:
+            with contextlib.redirect_stdout(printed):
+                check_inherited_effect_names(browser, origin, prepare)
+        finally:
+            HARNESS_NET_ERRORS = saved
+            failed, broken = failures[marks[0]:], harness_errors[marks[1]:]
+            del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+        problems, lines = [], printed.getvalue()
+        if [n for n, _ in failed] != [check] or "effect=toString: " not in failed[0][1] or f"{origin}{module} 404" not in failed[0][1]:
+            problems.append(f"the 404 leg was not this check's FAIL: failures {failed}")
+        elif "effect=constructor" in failed[0][1]:
+            problems.append(f"the harness leg was counted as a product FAIL too: {failed[0][1]}")
+        if ([n for n, _ in broken] != [check] or not broken[0][1].startswith("effect=constructor: ")
+                or f"{origin}{module} {stand_in}" not in broken[0][1]):
+            problems.append(f"the harness leg was not a HARNESS line naming effect=constructor: {broken}")
+        for start in (f"  HARNESS  {check}: effect=constructor: ", f"  FAIL  {check}: "):
+            if not any(line.startswith(start) for line in lines.splitlines()):
+                problems.append(f"no printed line starts {start.strip()!r}")
+        return "; ".join(problems), "FAIL names effect=toString's 404, HARNESS names effect=constructor"
+
     for name, control in (
             ("readiness: a renderer dependency that fails is reported in seconds, naming it", failed_dependency),
             ("readiness: an initialized renderer that draws no frame is a FAIL naming ready and frames", zero_frames),
@@ -1891,7 +2015,8 @@ def check_readiness_reporting(browser, origin):
             ("readiness: a request to another origin still FAILs the offline image check", unexpected_external),
             ("readiness: a shipped module answered 404 is a product FAIL", missing_module),
             ("readiness: a smoke server that does not answer is a harness error", dead_server),
-            ("readiness: a page that cannot be read keeps the readiness error", unreadable_page)):
+            ("readiness: a page that cannot be read keeps the readiness error", unreadable_page),
+            ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg)):
         try:
             problem, detail = control()
         except Exception as error:  # a broken control is this check's FAIL, not exit 3
@@ -1933,6 +2058,8 @@ def main():
     print("=== web smoke: harness ===")
     check_server_is_quiet()
     check_server_keeps_alive()
+    check_exit_mapping()
+    check_probe_ignores_proxy()
 
     cfg_httpd, cfg_origin = serve(CONFIGURATOR)
     try:
@@ -1988,19 +2115,17 @@ def main():
              f"{len(server_errors)} handler error(s), first: {server_errors[0]}")
 
     print()
-    # As in the gate: a harness error after a real failure leaves that failure the verdict (1);
-    # with no failure it is exit 3, which says the harness broke rather than the product.
     for name, detail in harness_errors:
         print(f"  harness error: {name}: {detail}", file=sys.stderr)
-    if failures:
+    code = exit_code(failures, harness_errors)  # check_exit_mapping() guards it
+    if code == 1:
         also = f", and {len(harness_errors)} harness error(s)" if harness_errors else ""
         print(f"WEB SMOKE FAILED: {len(failures)} of {len(failures) + len(passes)} checks{also}")
-        return 1
-    if harness_errors:
+    elif code == 3:
         print(f"WEB SMOKE HARNESS ERROR: {len(harness_errors)} check(s) could not run; {len(passes)} passed")
-        return 3
-    print(f"WEB SMOKE PASSED: {len(passes)} checks")
-    return 0
+    else:
+        print(f"WEB SMOKE PASSED: {len(passes)} checks")
+    return code
 
 
 if __name__ == "__main__":
