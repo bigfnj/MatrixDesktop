@@ -63,8 +63,9 @@ The symbol check also scans the published `MatrixDesktop.dll` IL for the host's
 startup-failure, surface-close, wallpaper single-instance and takeover, WebView2
 process-failure, session-end, camera-permission, mouse-hook and tray Start with
 Windows wiring. It follows the surface-close, renderer-failure, rebuild-backoff
-and wallpaper-ownership decisions along every IL path with chosen inputs, so a
-call kept behind a broken condition still fails. Version parity runs
+and wallpaper-ownership decisions along every IL path with chosen inputs, so the
+check still fails when a call survives behind an inverted condition or a
+constant argument. Version parity runs
 `tests\check-release-version.ps1`, which `release.yml` runs with the tag, and a
 separate check requires
 `release.yml` to run its tag and CI checks before its first `dotnet publish`. Both
@@ -89,9 +90,11 @@ fraction of at least 0.02; animation requires at least 0.005 changed pixels.
 These checks reject blank, uniform and frozen frames. Inspect screenshots too:
 pixel statistics cannot establish visual correctness.
 
-Each case's first frame is captured after the 6 s settle (`-SettleMs`) and again
-every second until it clears the luminance and non-black floors, for at most
-20 s after the window appears. WebView2 child cleanup waits up to 15 s. For
+Each main-app case's first frame is captured after the 6 s settle (`-SettleMs`)
+and again every second until it clears the luminance and non-black floors, for
+at most 20 s after the window appears. The tier 3 configurator capture is polled
+the same way against the luminance floor alone. WebView2 child cleanup waits up
+to 15 s. For
 tiers 2 and 3 the gate keeps the display and the system on and prints
 `display hold: on`, or `display hold: unavailable` when Windows refuses. A
 main-app frame under a floor, or a frozen one, is `UNCHECKED` rather than a
@@ -118,9 +121,10 @@ python tests\uc3d-audio-browser.py --channel msedge
 ```
 
 The ZMatrix browser test checks served source bytes, actual selected backends,
-visible animation, pause/resume, resize and disposal. On REGL it also requires
-the pass to read `gl.getError` about once a second rather than every frame, and
-a recorded WebGL error to still fail the scene with its notice. Original Matrix
+visible animation, pause/resume, resize and disposal. On REGL at 30 fps it also
+requires at least one `gl.getError` read and at most one every ten frames, not
+one every frame, and a recorded WebGL error to still fail the scene with its
+notice within 30 frames. Original Matrix
 also starts paused before renderer import; a real WebGL uniform witness must
 begin at active shader tick zero so ping-pong initialization cannot be skipped.
 On REGL, the
@@ -297,7 +301,7 @@ affected by a change, using the published application.
 | Multi-monitor and window modes | Default borderless mode spans the intended displays; `--single-monitor`, `--monitor N` and `--working-area` use the expected bounds. Resize a windowed instance and check for blank frames or crashes. |
 | Physical key exit | Foreground physical keys close the default app. `--no-exit-on-any-key --exit-on-esc` permits ordinary keys but closes on Esc. Both exit modes disabled permit closing via the window. Injected input is intentionally ignored. |
 | Cursor and DevTools | `--hide-cursor --no-devtools --topmost` hides the app cursor, suppresses DevTools shortcuts and maintains the expected z-order. Closing restores cursor state. |
-| Webcam | `--effect mirror --camera true` obtains permission, renders camera input and releases the camera after closing. This needs an actual camera. With a fresh profile, `/s` and `--wallpaper` with `--effect mirror --camera true` render rain at once with no prompt; after one Allow in a windowed launch they use the camera, and after a Block the next windowed launch prompts again. |
+| Webcam | `--effect mirror --camera true` obtains permission, renders camera input and releases the camera after closing. This needs an actual camera. With a fresh WebView2 profile, `--wallpaper --effect mirror --camera true` renders rain at once with no prompt and logs `Answered a Camera request with Deny and no prompt`. `/s` must do the same, but it ignores the rest of its command line and takes its arguments from the screensaver profile: save a draft with Effect Mirror and Camera on through **Use for screensaver**, or point `MATRIXDESKTOP_SCREENSAVER_PROFILE` at a file holding `["--effect","mirror","--camera","true"]`. After a Block at the windowed prompt, the next windowed launch prompts again. |
 | Looking Glass | The Matrix scene's Holoplay preset requires real device calibration and uses the WebGL quilt path. No-device and renderer-routing tests do not certify a physical display. UC3D has no quilt implementation. |
 | Click ripples | Enable `clickRipples` with palette/stripe effects and test the triangle, star and box shapes in both renderers. Without the option, ordinary rain should not gain click ripples. |
 | Presets and launch controls | A fresh store includes `UC3D Trilogy`, `ZMatrix Desktop` and the older starters. Save, rename and delete a preset; reopen and verify persistence. Edited starters stay edited, and deleted starters stay deleted. `Test Argument` replaces its previous instance and `Stop Test` closes it. |
