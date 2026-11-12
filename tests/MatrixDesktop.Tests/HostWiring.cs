@@ -144,7 +144,8 @@ internal static class HostWiring
                 "the wallpaper tick must reset the rebuild backoff only once a renderer stayed ready");
         });
         // R2-01. HostClosePolicy has its own test; this proves OnFormClosing branches on it, with
-        // the flag WndProc sets, before any teardown. The cancelled-shutdown leg itself is native.
+        // a field rather than a constant, before any teardown. That WndProc sets that field only
+        // around WM_QUERYENDSESSION is R3-18's walker check. The cancelled-shutdown leg is native.
         failures += Run($"a session-end query reaches HostClosePolicy before MainForm tears down: {path}", () =>
         {
             var body = calls.Where(call => call.Caller == "MatrixDesktop.MainForm::OnFormClosing").ToList();
@@ -157,8 +158,6 @@ internal static class HostWiring
                 + string.Join("; ", teardown.Where(call => call.Offset < decide!.Offset).Select(call => call.Callee)));
             Check.True(decide!.PreviousOpcode == OpCodes.Ldfld.Value, "HostClosePolicy must be given the field WndProc sets, not a constant");
             Check.True(decide.NextOpcode is 0x2C or 0x2D or 0x39 or 0x3A, $"OnFormClosing must branch on HostClosePolicy's answer (next opcode 0x{decide.NextOpcode:X2})");
-            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::WndProc" && call.Callee == "System.Windows.Forms.Form::WndProc"),
-                "MainForm must mark the WM_QUERYENDSESSION dispatch in its own WndProc");
         });
         // R2-04. The guard's claim has its own tests; this proves the action the takeover listener
         // posts claims the request, and branches on the claim, before it ends the context. AUD-72:
@@ -461,6 +460,37 @@ internal static class HostWiring
             Check.True(Flows(helper, whenTrue, reset, decided) && !Flows(helper, whenFalse, reset, decided),
                 "the helper must reset a saved setting only when ForgetsSavedState answers true, and keep it (a saved Allow, another origin's state) otherwise");
         });
+        // R2-01, R3-18. OnFormClosing hands HostClosePolicy _sessionEndQuery; WndProc must set it
+        // to true for WM_QUERYENDSESSION (0x11) alone, before the base dispatch, and reset it in a
+        // finally around that dispatch. The old leg only found a base.WndProc call, which both
+        // branches make, so it passed with the store deleted.
+        failures += Run($"MainForm sets the session-end flag HostClosePolicy reads only while WM_QUERYENDSESSION is dispatched: {path}", () =>
+        {
+            const string flag = "MatrixDesktop.MainForm::_sessionEndQuery";
+            const string dispatch = "System.Windows.Forms.Form::WndProc";
+            var code = Body(bodies, "MatrixDesktop.MainForm::WndProc");
+            string Seen(List<Step> steps) => string.Join(" ", steps.Where(step => step.Store ? step.Name == flag : step.Name == dispatch)
+                .Select(step => step.Store ? "flag=" + (step.Values[0]?.ToString() ?? "?") : "dispatch"));
+            foreach (var message in new long[] { 0x11, 0x10 })
+            {
+                var expected = message == 0x11 ? "flag=1 dispatch" : "dispatch";
+                var seen = Paths(code, new() { ["System.Windows.Forms.Message::get_Msg"] = message }).Select(Seen).Distinct().ToList();
+                Check.True(seen is [var only] && only == expected, $"WndProc must turn message 0x{message:X2} into '{expected}', got '{string.Join("' or '", seen)}'");
+            }
+            var dispatches = code.Where(instruction => IsCall(instruction) && instruction.Name == dispatch).Select(instruction => instruction.Offset).ToList();
+            var guarded = FinallyRegions(path, "MatrixDesktop.MainForm::WndProc")
+                .Where(region => dispatches.Any(offset => offset >= region.TryOffset && offset < region.TryOffset + region.TryLength)).ToList();
+            Check.Equal(1, guarded.Count, "WndProc must dispatch WM_QUERYENDSESSION inside one try/finally");
+            var handler = code.Where(instruction => instruction.Offset >= guarded[0].HandlerOffset && instruction.Offset < guarded[0].HandlerOffset + guarded[0].HandlerLength).ToList();
+            var reset = Paths(handler, new()).Select(Seen).Distinct().ToList();
+            Check.True(reset is ["flag=0"], "the finally around the dispatch must reset the flag to false, got '" + string.Join("' or '", reset) + "'");
+            const long sentinel = 7;
+            var read = Paths(Body(bodies, "MatrixDesktop.MainForm::OnFormClosing"), new() { [flag] = sentinel })
+                .Select(steps => steps.FirstOrDefault(step => !step.Store && step.Name == "MatrixDesktop.HostClosePolicy::TearsDownOnClosing")).ToList();
+            Check.True(read.Count > 0 && read.All(step => step is { Values: [long passed] } && passed == sentinel),
+                $"OnFormClosing must hand HostClosePolicy the flag WndProc sets ({sentinel}), got "
+                + string.Join(", ", read.Select(step => step is null ? "no call" : step.Values[0]?.ToString() ?? "?")));
+        });
         failures += Run($"OnRendererFailed reloads, rebuilds or exits as RendererFailurePolicy decides: {path}", () =>
         {
             Check.True(actions.Keys.Order().SequenceEqual(["Exit", "LogOnly", "Recreate", "Reload"]),
@@ -587,6 +617,18 @@ internal static class HostWiring
                     && code.Take(index).TakeLast(8).LastOrDefault(instruction => instruction.Code == OpCodes.Ldftn) is { Name: string method })
                     built.Add(method);
         return built;
+    }
+
+    // The try/finally regions of the one body named method ("Type::Method"), as IL offsets.
+    private static List<ExceptionRegion> FinallyRegions(string path, string method)
+    {
+        using var stream = File.OpenRead(path);
+        using var pe = new PEReader(stream);
+        var reader = pe.GetMetadataReader();
+        var found = reader.TypeDefinitions.Select(reader.GetTypeDefinition).SelectMany(type => type.GetMethods().Select(reader.GetMethodDefinition)
+            .Where(definition => definition.RelativeVirtualAddress != 0 && TypeName(reader, type) + "::" + reader.GetString(definition.Name) == method)).ToList();
+        Check.Equal(1, found.Count, "witness: the scan must find one " + method);
+        return pe.GetMethodBody(found[0].RelativeVirtualAddress).ExceptionRegions.Where(region => region.Kind == ExceptionRegionKind.Finally).ToList();
     }
 
     // The MoveNext of the one async state machine whose type name starts with prefix.
