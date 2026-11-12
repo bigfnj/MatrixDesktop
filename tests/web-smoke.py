@@ -1123,6 +1123,9 @@ READY = "window.matrixRuntimeDiagnostics?.ready === true && window.matrixRuntime
 HARNESS_NET_ERRORS = ("net::ERR_NO_BUFFER_SPACE",)
 
 harness_errors = []
+# Checks this environment cannot run (a browser build that is not installed), by name: an
+# environment gap the gate reports as UNCHECKED, never a product FAIL (R3-16).
+unverified = []
 
 
 def harness(name, detail):
@@ -1131,14 +1134,17 @@ def harness(name, detail):
     print(f"  HARNESS  {name}: {detail}")
 
 
-def exit_code(failed, broken):
-    """main()'s exit code from its FAILs and its harness errors, by the gate's rule: a FAIL is
-    the verdict even beside a harness error (1), harness errors alone say the harness broke
-    rather than the product (3), and nothing at all is a pass (0)."""
+def exit_code(failed, broken, missing=()):
+    """main()'s exit code from its FAILs, its harness errors and the checks this environment
+    could not run, by the gate's rule: a FAIL is the verdict even beside the others (1), harness
+    errors say the harness broke rather than the product (3), checks that could not run alone
+    are the cannot-verify exit (2), and nothing at all is a pass (0)."""
     if failed:
         return 1
     if broken:
         return 3
+    if missing:
+        return 2
     return 0
 
 
@@ -1790,8 +1796,13 @@ def check_no_favicon_request(browser, origin):
     except browser_launch.LaunchArgumentsError:
         raise
     except Exception as exc:
-        fail(name, f"the full Chromium build would not start ({type(exc).__name__}), and the headless shell never "
-                   "requests a favicon; install it with: python -m playwright install chromium")
+        # The headless shell alone ('playwright install --only-shell chromium') runs every other
+        # check, so a missing full build is an environment gap like a missing chromium (R2-35):
+        # UNVERIFIED and exit 2, never a product FAIL (R3-16).
+        unverified.append(name)
+        print(f"UNVERIFIED: the full Chromium build is unavailable, so '{name}' cannot run ({type(exc).__name__}), "
+              "and the headless shell never requests a favicon; install it with: python -m playwright install chromium",
+              file=sys.stderr, flush=True)
         return
 
     def strip_icon(route):
@@ -2122,16 +2133,23 @@ def main():
     if server_errors:
         fail("the static servers raise nothing but client hang-ups",
              f"{len(server_errors)} handler error(s), first: {server_errors[0]}")
+    return final_verdict()
 
+
+def final_verdict():
+    """main()'s closing lines and its exit code, from this run's FAILs, harness errors and the
+    checks this environment could not run (tests/test_web_smoke_verdict.py)."""
     print()
     for name, detail in harness_errors:
         print(f"  harness error: {name}: {detail}", file=sys.stderr)
-    code = exit_code(failures, harness_errors)  # check_exit_mapping() guards it
+    code = exit_code(failures, harness_errors, unverified)  # check_exit_mapping() and the test above guard it
     if code == 1:
         also = f", and {len(harness_errors)} harness error(s)" if harness_errors else ""
         print(f"WEB SMOKE FAILED: {len(failures)} of {len(failures) + len(passes)} checks{also}")
     elif code == 3:
         print(f"WEB SMOKE HARNESS ERROR: {len(harness_errors)} check(s) could not run; {len(passes)} passed")
+    elif code == 2:
+        print(f"WEB SMOKE UNVERIFIED: {len(unverified)} check(s) could not run: {', '.join(unverified)}; {len(passes)} passed")
     else:
         print(f"WEB SMOKE PASSED: {len(passes)} checks")
     return code

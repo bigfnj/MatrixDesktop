@@ -80,6 +80,8 @@ $script:Fail = 0
 $script:Unchecked = 0
 $script:Failures = New-Object 'Collections.Generic.List[string]'
 $script:Uncheckables = New-Object 'Collections.Generic.List[string]'
+$script:HarnessCount = 0
+$script:HarnessErrors = New-Object 'Collections.Generic.List[string]'
 $script:DisplayHeld = $false
 
 function Test-Hdr { param([string]$Msg) Write-Host ''; Write-Host "=== $Msg" -ForegroundColor Cyan }
@@ -97,6 +99,15 @@ function Test-Unchecked {
     $script:Uncheckables.Add("$Msg ($Why)")
     Write-Host "  UNCHECKED  $Msg" -ForegroundColor Yellow
     Write-Host "               $Why" -ForegroundColor Yellow
+}
+# A check whose own harness broke (web-smoke.py's exit 3). The run continues, and the gate ends
+# in exit 3 unless a check failed, because a broken harness is never a verdict on the app (R3-26).
+function Test-Harness {
+    param([string]$Msg, [string]$Detail)
+    $script:HarnessCount++
+    $script:HarnessErrors.Add("$Msg ($Detail)")
+    Write-Host "  HARNESS    $Msg" -ForegroundColor Magenta
+    if ($Detail) { Write-Host "               $Detail" -ForegroundColor Magenta }
 }
 function Stop-Harness {
     param([string]$Why)
@@ -679,7 +690,7 @@ try {
             $smokeOut = Get-Content -LiteralPath $smokeLog, "$smokeLog.err" | Out-String
             $smokeExit = $smokeRun.ExitCode
             foreach ($line in ($smokeOut -split "`r?`n")) {
-                if ($line -match '^\s{2}(ok|FAIL)\s') {
+                if ($line -match '^\s{2}(ok|FAIL|HARNESS)\s') {
                     Write-Host ('  ' + $line.Trim()) -ForegroundColor DarkGray
                 }
             }
@@ -700,6 +711,15 @@ try {
                     if ($smokeVerdict.Outcome -eq 'unchecked') { Test-Unchecked 'headless web smoke' $smokeVerdict.Detail }
                     else { Test-Fail 'headless web smoke' $smokeVerdict.Detail }
                 }
+                # web-smoke.py exits 3 only when its own harness broke and nothing failed: a loopback
+                # error on its server's origin, a server that stops answering, a missing fixture or
+                # an exception before a verdict. That is the gate's harness error, not a product
+                # FAIL (R3-26). The HARNESS lines name each check; a crash prints only to stderr.
+                3 {
+                    $broken = @([regex]::Matches($smokeOut, '(?m)^\s+HARNESS\s+(.+)$') | ForEach-Object { $_.Groups[1].Value.Trim() })
+                    if ($broken.Count -eq 0) { $broken = @(Get-Content -LiteralPath "$smokeLog.err" -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }) }
+                    Test-Harness 'headless web smoke' ((@($broken | Select-Object -First 3) -join ' | ') + "; see $smokeLog and $smokeLog.err")
+                }
                 default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
             }
         }
@@ -717,6 +737,7 @@ try {
     if (-not $py) {
         Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
         Test-Unchecked 'native smoke process lifecycle' 'Python with Playwright is unavailable'
+        Test-Unchecked 'web smoke verdict for a check this environment cannot run' 'Python with Playwright is unavailable'
         Test-Unchecked 'screensaver foreground wait and ownership' 'Python is unavailable'
         Test-Unchecked 'browser launch keeps Playwright defaults and disables TcpPortRandomizationWin' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
@@ -730,6 +751,8 @@ try {
         foreach ($case in @(
             @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
             @{ Name = 'native smoke process lifecycle'; Script = 'tests\test_native_smoke.py'; Arguments = '' },
+            # R3-16: a browser build that is not installed makes web-smoke.py's check UNVERIFIED, exit 2, not a FAIL.
+            @{ Name = 'web smoke verdict for a check this environment cannot run'; Script = 'tests\test_web_smoke_verdict.py'; Arguments = '' },
             @{ Name = 'screensaver foreground wait and ownership'; Script = 'tests\screensaver-focus.test.py'; Arguments = '' },
             # Every Chromium the suites below launch goes through tests\browser_launch.py; this proves
             # its merged --disable-features verification passes a good launch and names each bad one.
@@ -1407,6 +1430,11 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             if ($nativeRun.ExitCode -eq 0) { Test-Ok 'published UC3D media and preview' }
             elseif ($nativeSuspension) { Test-Unchecked 'published UC3D media and preview' "exit $($nativeRun.ExitCode) after a MatrixDesktop process logged '$nativeSuspension'; see $nativeLog" }
             else { Test-Fail 'published UC3D media and preview' "exit $($nativeRun.ExitCode); see $nativeLog" }
+            # A profile the run could not delete leaves its exit code alone (R2-37), so the log is
+            # read for it. A leak is harness hygiene, so it is UNCHECKED beside the case's own
+            # verdict, never in place of it (Get-ProfileLeakLines, gate-lib.ps1; R3-15).
+            $nativeLeaks = @(Get-ProfileLeakLines -Log $nativeLog)
+            if ($nativeLeaks.Count -gt 0) { Test-Unchecked 'WebView2 profile cleanup [published UC3D media and preview]' "$($nativeLeaks[0]); see $nativeLog" }
         }
     }
 
@@ -1437,6 +1465,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 Test-Fail $case.Name $verdict.Detail
                 Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
             }
+            # As for the native smoke above: a leaked profile is reported beside the verdict (R3-15).
+            $caseLeaks = @(Get-ProfileLeakLines -Log $log)
+            if ($caseLeaks.Count -gt 0) { Test-Unchecked "WebView2 profile cleanup [$($case.Name)]" "$($caseLeaks[0]); see $log" }
         }
     }
 
@@ -1444,18 +1475,35 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
 
     Write-Host ''
     Write-Host ('=' * 74)
-    Write-Host (" PASS {0}    FAIL {1}    UNCHECKED {2}" -f $script:Pass, $script:Fail, $script:Unchecked)
+    Write-Host ((" PASS {0}    FAIL {1}    UNCHECKED {2}" -f $script:Pass, $script:Fail, $script:Unchecked) + $(if ($script:HarnessCount -gt 0) { "    HARNESS $($script:HarnessCount)" } else { '' }))
     Write-Host ('=' * 74)
 
     if ($script:Fail -gt 0) {
         Write-Host ''
         Write-Host 'GATE FAILED:' -ForegroundColor Red
         foreach ($f in $script:Failures) { Write-Host "  - $f" -ForegroundColor Red }
+        if ($script:HarnessCount -gt 0) {
+            Write-Host 'and the harness broke in:' -ForegroundColor Magenta
+            foreach ($h in $script:HarnessErrors) { Write-Host "  - $h" -ForegroundColor Magenta }
+        }
         if ($script:Unchecked -gt 0) {
             Write-Host 'and could not verify:' -ForegroundColor Yellow
             foreach ($u in $script:Uncheckables) { Write-Host "  - $u" -ForegroundColor Yellow }
         }
         exit 1
+    }
+
+    # Nothing failed, but a check's own harness broke: exit 3 as the header defines it (R3-26).
+    if ($script:HarnessCount -gt 0) {
+        Write-Host ''
+        Write-Host 'HARNESS ERROR:' -ForegroundColor Magenta
+        foreach ($h in $script:HarnessErrors) { Write-Host "  - $h" -ForegroundColor Magenta }
+        if ($script:Unchecked -gt 0) {
+            Write-Host 'and could not verify:' -ForegroundColor Yellow
+            foreach ($u in $script:Uncheckables) { Write-Host "  - $u" -ForegroundColor Yellow }
+        }
+        Write-Host 'This is a defect in the gate, not a verdict on the application.' -ForegroundColor Magenta
+        exit 3
     }
 
     if ($script:Unchecked -gt 0) {
