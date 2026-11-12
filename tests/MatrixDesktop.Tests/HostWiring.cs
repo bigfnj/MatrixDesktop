@@ -207,9 +207,9 @@ internal static class HostWiring
             .Any(callee => Reaches(calls, callee, matches, depth - 1));
     }
 
-    // Reads, never writes: Enabled, or the State family that compares the shortcut with this launch.
-    private static bool ReadsAutostart(string callee) =>
-        callee == "MatrixDesktop.AutostartService::get_Enabled" || callee.StartsWith("MatrixDesktop.AutostartService::State", StringComparison.Ordinal);
+    // Reads, never writes: the State family that compares the shortcut with this launch (R2-03
+    // removed Enabled, which only asked whether a shortcut existed).
+    private static bool ReadsAutostart(string callee) => callee.StartsWith("MatrixDesktop.AutostartService::State", StringComparison.Ordinal);
 
     private static int Run(string name, Action check)
     {
@@ -323,7 +323,7 @@ internal static class HostWiring
     private static int VerifyDecisions(string path)
     {
         Dictionary<string, List<Instruction>?> bodies;
-        Dictionary<string, long> actions, kinds, outcomes;
+        Dictionary<string, long> actions, kinds, outcomes, autostart;
         try
         {
             using var stream = File.OpenRead(path);
@@ -333,6 +333,7 @@ internal static class HostWiring
             actions = EnumValues(reader, "MatrixDesktop.RendererFailureAction");
             kinds = EnumValues(reader, "MatrixDesktop.RendererFailureKind");
             outcomes = EnumValues(reader, "MatrixDesktop.WallpaperInstanceGuard/Outcome");
+            autostart = EnumValues(reader, "MatrixDesktop.AutostartState");
         }
         catch (Exception error)
         {
@@ -556,6 +557,27 @@ internal static class HostWiring
             }
             Check.True(wrong.Count == 0, "TakeWallpaperOwnership must end a timed-out or superseded launch without listening, and listen on one that took ownership: "
                 + string.Join("; ", wrong));
+        });
+        // R2-03, R3-19. The tray's ShowAutostart walked with AutostartService.State pinned to each
+        // AutostartState: only ThisLaunch ticks Start with Windows. A shortcut that starts other
+        // settings shows unticked, so one click stores this launch's (ClickEnables).
+        failures += Run($"the tray ticks Start with Windows only when the shortcut starts this launch: {path}", () =>
+        {
+            Check.True(autostart.Keys.Order().SequenceEqual(["Off", "OtherSettings", "ThisLaunch"]),
+                "witness: AutostartState must be Off, ThisLaunch and OtherSettings: " + string.Join(", ", autostart.Keys));
+            var show = bodies.Keys.Where(key => key.StartsWith("MatrixDesktop.MatrixApplicationContext", StringComparison.Ordinal)
+                && key.Contains("::<CreateTray>g__ShowAutostart|", StringComparison.Ordinal)).ToList();
+            Check.Equal(1, show.Count, "witness: the scan must find CreateTray's ShowAutostart");
+            var wrong = new List<string>();
+            foreach (var (state, value) in autostart)
+            {
+                var expected = state == "ThisLaunch" ? "1" : "0";
+                var ticked = Paths(Body(bodies, show[0]), new() { ["MatrixDesktop.AutostartService::State"] = value }).Select(steps => string.Join("/",
+                    steps.Where(step => !step.Store && step.Name == "System.Windows.Forms.ToolStripMenuItem::set_Checked").Select(step => step.Values[1]?.ToString() ?? "?"))).Distinct().ToList();
+                if (ticked is not [var only] || only != expected)
+                    wrong.Add($"{state}: expected Checked={expected}, got '{string.Join("' or '", ticked)}'");
+            }
+            Check.True(wrong.Count == 0, "Start with Windows must be ticked exactly when AutostartService.State is ThisLaunch: " + string.Join("; ", wrong));
         });
         // R3-04. ListenForTakeover fires once, and a false claim (the newcomer withdrew at its
         // bound) is reachable after every timed-out newcomer, so the withdrawn branch must listen
