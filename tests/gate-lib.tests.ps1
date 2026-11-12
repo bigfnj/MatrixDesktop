@@ -728,13 +728,15 @@ try {
     }
 
     # A copy of the real web-smoke.py beside a stub fixture: the script exits 3 before its imports
-    # when its repo has no loadState fixture.
+    # when its repo has no loadState fixture. It imports its sibling browser_launch.py (the shared
+    # Playwright launch), so that is copied beside it; without it the copy dies on the import, exit 1.
     function New-WebSmokeCopy {
         $root = Join-Path $scratch 'websmoke'
         $copy = Join-Path $root 'tests\web-smoke.py'
         if (-not (Test-Path -LiteralPath $copy -PathType Leaf)) {
             foreach ($dir in 'tests', 'artifacts\gate') { New-Item -ItemType Directory -Force -Path (Join-Path $root $dir) | Out-Null }
             Copy-Item -LiteralPath (Join-Path $here 'web-smoke.py') -Destination $copy
+            Copy-Item -LiteralPath (Join-Path $here 'browser_launch.py') -Destination (Join-Path $root 'tests\browser_launch.py')
             [void](New-StubFile 'websmoke\artifacts\gate\loadState.json' '{}')
         }
         return $copy
