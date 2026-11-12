@@ -15,12 +15,18 @@ select that interpreter. Its browser smoke also needs Playwright Chromium.
 The browser suites launch Chromium through `tests\browser_launch.py`, which disables
 `TcpPortRandomizationWin` merged into Playwright's own `--disable-features` and
 verifies the launched browser's argv on every launch. A launch whose argv fails
-that check is a harness error. When the argv cannot be read, the launch goes
-ahead and prints a `DEGRADED` line each time. The one captured web smoke
-renderer stall was a module request to its own loopback origin that failed with
-`net::ERR_NO_BUFFER_SPACE`, which is how Chromium reports Windows error 10055.
-Windows can return 10055 when a socket cannot get a local port, and Chromium's
-randomized local port pick on Windows (`TcpPortRandomizationWin`;
+that check raises an error and closes that browser, so no check runs on it. The
+web smoke reports that error as a harness error (exit 3); in the gate's other
+cases that launch through the helper it is a FAIL. To build the merged switch,
+the helper first reads Playwright's own switch from a probe launch's argv. When
+that argv cannot be read, the suite's browser launches with its own arguments
+and `TcpPortRandomizationWin` is not disabled. When only the merged launch's
+argv cannot be read, the switch was requested but is not confirmed. Either way
+the launch goes ahead and prints a `DEGRADED` line each time. The one captured
+web smoke renderer stall was a module request to its own loopback origin that
+failed with `net::ERR_NO_BUFFER_SPACE`, which is how Chromium reports Windows
+error 10055. Windows can return 10055 when a socket cannot get a local port, and
+Chromium's randomized local port pick on Windows (`TcpPortRandomizationWin`;
 microsoft/playwright#43545, #43605) can return it while ports are free. A
 bounded A/B on one machine strongly supports that feature as the cause; it is
 not proven. The favicon checks in the web smoke and the ZMatrix configurator
@@ -331,7 +337,7 @@ proxy), or a request to its own origin that failed with
 check with several, and the URL and error or the server that did not answer.
 Every other renderer failure, including a 404 of a shipped module or a request
 to another origin, stays a FAIL. On a page the harness broke, an HTTP error
-status, or a request to another origin that the check did not block itself, is
+status, or a failed request to another origin that the check did not block itself, is
 still a FAIL beside the `HARNESS` line, and a product failure in another leg of
 the same check is still that check's FAIL. The smoke exits 3 when it has
 `HARNESS` lines and no FAIL, and also when its loadState fixture is missing or it
