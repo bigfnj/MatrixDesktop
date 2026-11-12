@@ -129,8 +129,9 @@ def serve(directory):
 
 def close_server(httpd):
     """Stop serving, then wait for every handler thread, so none is still running (or
-    recording an error) once this returns. A keep-alive connection a client leaves open ends
-    at the handler timeout, so that wait is bounded by _QuietHandler.timeout."""
+    recording an error) once this returns. An idle keep-alive connection ends at
+    _QuietHandler.timeout. That timeout bounds inactivity, not a client that keeps sending,
+    so it is not a bound on the whole wait."""
     httpd.shutdown()
     httpd.server_close()
 
@@ -1320,9 +1321,13 @@ def harness_cause(evidence):
     Only two causes belong to the harness: a smoke server that does not answer, and a request
     to its own origin that failed with a loopback resource error. Everything else stays the
     product's FAIL: an HTTP 404 of a shipped module, a request to another origin, a renderer
-    that initializes and draws nothing, a wrong app URL. On a page the harness broke, those stay
-    a FAIL too (the cause's product list): any harness hit used to make the whole page HARNESS,
-    so a 404 of one module beside a loopback error on its sibling was never a FAIL (MDST-01).
+    that initializes and draws nothing, a wrong app URL. On a page the harness broke, only
+    request evidence stays a FAIL beside the HARNESS line (the cause's product list): an
+    unexpected HTTP status of 400 or more, or a failed request to another origin. A console,
+    page or diagnostics error on such a page is not a FAIL, because the renderer's error
+    boundary reports a harness-caused load failure without its URL (MDST-01: text matching
+    gave 17 false FAILs in 112 single-request faults). Any harness hit used to make the whole
+    page HARNESS, so a 404 of one module beside a loopback error on its sibling was never a FAIL.
     """
     dead = server_unreachable(evidence.origin)
     if dead:

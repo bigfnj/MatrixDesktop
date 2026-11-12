@@ -12,7 +12,7 @@
         0  GATE PASSED     every selected check ran and passed
         1  GATE FAILED     at least one definite negative
         2  CANNOT VERIFY   nothing failed, but at least one check could not run
-        3  HARNESS ERROR   the gate itself broke, which is never an app verdict
+        3  HARNESS ERROR   the gate or a check's own harness broke, never an app verdict
 
     Separating 3 from 1 matters: "my harness broke" must never masquerade as "your change
     broke it". Separating 2 from 0 matters more: you cannot get a green gate by having

@@ -67,7 +67,7 @@ jobs:
           #   0  pass
           #   1  real failure          -> fail the build
           #   2  could not verify      -> tolerated HERE, but never silently
-          #   3  the gate itself broke -> fail the build
+          #   3  the gate or a check's own harness broke -> fail the build
           #
           # 2 is tolerated because a hosted runner has no interactive desktop
           # session, and a tier 1 check that needs one (or needs node on PATH)
@@ -108,4 +108,4 @@ jobs:
             exit 0
           }
 
-          throw "Verification gate failed with exit $code (1 = a real failure, 3 = the gate itself broke)."
+          throw "Verification gate failed with exit $code (1 = a real failure, 3 = the gate or a check's own harness broke)."
