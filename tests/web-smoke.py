@@ -1208,9 +1208,10 @@ class PageEvidence:
     """
 
     def __init__(self, page, origin, expected=()):
-        self.origin, self.expected = origin, set(expected)
+        self.page, self.origin, self.expected = page, origin, set(expected)
         self.failed, self.statuses, self.console, self.page_errors = [], [], [], []
-        self.recording = True
+        self.recording, self.reloading = True, False
+        page.on("request", self._request)
         page.on("requestfailed", self._request_failed)
         page.on("response", self._response)
         page.on("console", self._console)
@@ -1219,11 +1220,28 @@ class PageEvidence:
     def own(self, url):
         return url.startswith(self.origin + "/")
 
+    def next_document(self):
+        """For a reload the check itself causes: call it before the reload, and the records
+        restart when the reload's main-frame navigation request is issued, before the new
+        document has made a request. A reset after the navigation wait, which returns at the new
+        document's load event, erased that document's own failures: a recovery page whose
+        /js/main.js answered 404 reported a renderer that never initialized and no failed
+        request (MDST-04). A request the old document still has in flight is not reported when
+        the reload aborts it (measured: a fetch to a socket that never answers, issued 330 ms
+        before the reload, gave no requestfailed event). Only what the old document reports
+        between the navigation request and the commit would still count, and the recovery
+        check's old document is idle then."""
+        self.reloading = True
+
     def new_document(self):
-        """Forget the previous document's records at a reload the check itself caused, whose
-        in-flight requests that reload aborts."""
+        """Forget the records so far (see next_document())."""
         for records in (self.failed, self.statuses, self.console, self.page_errors):
             records.clear()
+
+    def _request(self, request):
+        if self.reloading and request.is_navigation_request() and request.frame == self.page.main_frame:
+            self.reloading = False
+            self.new_document()
 
     def _request_failed(self, request):
         if self.recording:
@@ -1595,13 +1613,17 @@ LOSE = ("() => { window.__beforeLoss = true; const gl = document.querySelector('
 LIT = 0.002  # a lost-and-restored canvas is exactly black; ZMatrix rain at 480x360 lights about 0.8%
 
 
-def check_context_loss_recovery(browser, origin):
-    """A lost WebGL context must come back as rendering rain, not a black page that looks healthy."""
-    for scene in ("matrix", "uc3d", "zmatrix"):
+def check_context_restore(browser, origin, scenes=("matrix", "uc3d", "zmatrix"), prepare=None, timeout=30000):
+    """A lost WebGL context must come back as rendering rain, not a black page that looks healthy.
+    prepare(page) runs before the first load and timeout bounds the recovery document's
+    readiness wait, both for the readiness control that faults the recovery document."""
+    for scene in scenes:
         name = f"{scene} renders again after a WebGL context loss and restore"
         page = browser.new_page(viewport={"width": 480, "height": 360})
         evidence = PageEvidence(page, origin)
         try:
+            if prepare:
+                prepare(page)
             open_page(page, evidence, f"{origin}/index.html?suppressWarnings=true&scene={scene}&numColumns=40")
             wait_ready(page, evidence, timeout=30000)
             page.wait_for_timeout(1500)
@@ -1611,14 +1633,14 @@ def check_context_loss_recovery(browser, origin):
                 continue
             page.evaluate(LOSE)
             page.wait_for_timeout(300)
+            evidence.next_document()
             try:
                 with page.expect_navigation(timeout=8000):
                     page.evaluate("window.__lose.restoreContext()")
             except Exception:
                 fail(name, "the page did not reload within 8 s of restoreContext()")
                 continue
-            evidence.new_document()
-            wait_ready(page, evidence, READY + " && window.__beforeLoss === undefined", timeout=30000)
+            wait_ready(page, evidence, READY + " && window.__beforeLoss === undefined", timeout=timeout)
             first = page.evaluate("window.matrixRuntimeDiagnostics.frames")
             for _ in range(12):  # rain builds up after the reload; ZMatrix starts sparse
                 page.wait_for_timeout(500)
@@ -1636,6 +1658,11 @@ def check_context_loss_recovery(browser, origin):
             fail(name, f"{type(exc).__name__}: {str(exc).splitlines()[0]}")
         finally:
             page.close()
+
+
+def check_context_loss_recovery(browser, origin):
+    """A lost GPU context: restored, never restored, and lost again past the reload budget."""
+    check_context_restore(browser, origin)
 
     name = "a WebGL context that is never restored still reloads"
     page = browser.new_page(viewport={"width": 480, "height": 360})
@@ -2098,6 +2125,67 @@ def check_readiness_reporting(browser, origin):
             problems.append(f"not one HARNESS line naming {broken}: {flagged}")
         return "; ".join(problems), f"FAIL names the 404 of {missing}, HARNESS names {broken}"
 
+    def recovery_document_fault():
+        # check_context_restore's matrix leg with only the recovery document's /js/main.js (its
+        # second request) faulted: answered 404, then failed with the stand-in harness error, as
+        # above. main.js loads before the load event the navigation wait returns on, so a reset
+        # after that wait erases its failure every time. Lines captured and taken back.
+        global HARNESS_NET_ERRORS
+        stand_in, check = "net::ERR_ADDRESS_UNREACHABLE", "matrix renders again after a WebGL context loss and restore"
+        target, problems = f"{origin}/js/main.js", []
+        for label, fault in (("404", lambda route: route.fulfill(status=404, content_type="text/plain", body="missing")),
+                             (stand_in, lambda route: route.abort("addressunreachable"))):
+            served = []
+
+            def prepare(page, fault=fault, served=served):
+                def second_faulted(route):
+                    served.append(route.request.url)
+                    if len(served) == 1:
+                        route.continue_()
+                    else:
+                        fault(route)
+                page.route(lambda url: url == target, second_faulted)
+
+            marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+            HARNESS_NET_ERRORS = saved + (stand_in,)
+            try:
+                with contextlib.redirect_stdout(printed):
+                    check_context_restore(browser, origin, scenes=("matrix",), prepare=prepare, timeout=3000)
+            finally:
+                HARNESS_NET_ERRORS = saved
+                failed, broken = failures[marks[0]:], harness_errors[marks[1]:]
+                del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+            if len(served) != 2:
+                problems.append(f"{label}: witness failed: {target} was requested {len(served)} time(s), not once per document")
+            elif label == "404":
+                if broken or [n for n, _ in failed] != [check] or f"HTTP >= 400: {target} 404" not in failed[0][1]:
+                    problems.append(f"404: not one FAIL naming the 404 of {target}: failures {failed}, harness {broken}")
+            elif failed or [n for n, _ in broken] != [check] or f"{target} {stand_in}" not in broken[0][1].split("; ")[0]:
+                problems.append(f"{stand_in}: not one HARNESS line naming {target}: failures {failed}, harness {broken}")
+
+        # Where the reset falls, from stand-in events: after next_document(), the old document's
+        # own request and a child frame's navigation come before the reload's main-frame
+        # navigation request, and only the reload's request starts the new document's records.
+        class Stand:
+            def __init__(self, **fields):
+                self.__dict__.update(fields)
+
+            def is_navigation_request(self):
+                return self.navigation
+
+        handlers, main = {}, object()
+        evidence = PageEvidence(Stand(on=handlers.__setitem__, main_frame=main), origin)
+        old = Stand(url=f"{origin}/js/old-document.js", navigation=False, frame=main)
+        evidence.next_document()
+        for event, item in (("request", old), ("request", Stand(url=f"{origin}/child.html", navigation=True, frame=object())),
+                            ("response", Stand(url=old.url, status=404)),
+                            ("request", Stand(url=f"{origin}/index.html", navigation=True, frame=main)),
+                            ("response", Stand(url=target, status=404))):
+            handlers[event](item)
+        if evidence.statuses != [(target, 404)]:
+            problems.append(f"the records did not restart at the reload's navigation request: HTTP >= 400 {evidence.statuses}")
+        return "; ".join(problems), f"FAIL names the 404 of {target}, HARNESS names its {stand_in}, reset at the reload's request"
+
     for name, control in (
             ("readiness: a renderer dependency that fails is reported in seconds, naming it", failed_dependency),
             ("readiness: an initialized renderer that draws no frame is a FAIL naming ready and frames", zero_frames),
@@ -2107,7 +2195,8 @@ def check_readiness_reporting(browser, origin):
             ("readiness: a smoke server that does not answer is a harness error", dead_server),
             ("readiness: a page that cannot be read keeps the readiness error", unreadable_page),
             ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg),
-            ("readiness: a harness fault does not hide a 404 on the same page", harness_fault_beside_missing_module)):
+            ("readiness: a harness fault does not hide a 404 on the same page", harness_fault_beside_missing_module),
+            ("readiness: a reload keeps the failures of the document it loads", recovery_document_fault)):
         try:
             problem, detail = control()
         except Exception as error:  # a broken control is this check's FAIL, not exit 3
