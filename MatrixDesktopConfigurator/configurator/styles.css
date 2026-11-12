@@ -805,6 +805,23 @@ h1 {
 	outline-offset: 2px;
 }
 
+/* The same ring for the other controls that had no visible focus (R3-05). A checkbox or range
+   slider paints no author border, so the input rule's outline: none left it only the --focus-ring
+   halo (1.5:1 dark); a summary drew the UA ring. The section heading a jump focuses and the help
+   guide take it inset: the heading spans its scroller's edges and the guide fills its dialog. */
+input[type="checkbox"]:focus-visible,
+input[type="range"]:focus-visible,
+summary:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: 2px;
+}
+
+.section-title:focus-visible,
+.modal-body:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: -2px;
+}
+
 .cp-inputs {
 	display: grid;
 	gap: 8px;
