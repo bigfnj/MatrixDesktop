@@ -16,7 +16,7 @@ select that interpreter. Its browser smoke also needs Playwright Chromium.
 | --- | --- |
 | Local portable folder | `publish-portable-win-x64-fd.cmd`, producing `publish\win-x64-fd\`. |
 | Gate portable folder | `tests\run-gate.ps1`, producing `artifacts\gate\win-x64-fd\`. |
-| Tagged release | `.github/workflows/release.yml`, producing `MatrixDesktop-<tag>-win-x64-fd.zip` and a SHA256 file, after checking the tag against both csproj and the guide header and requiring CI success on the tagged commit. |
+| Tagged release | `.github/workflows/release.yml`, producing `MatrixDesktop-<tag>-win-x64-fd.zip` and a SHA256 file, after checking the tag against both csproj, the guide header and README's current source version and requiring CI success on the tagged commit. |
 
 All supported folders contain both executables, `MatrixDesktop.scr`, and their `web\` and
 `configurator\` assets. Test the extracted release zip before announcing a
@@ -60,9 +60,13 @@ effect to what `config.js` and both stripe passes render. It runs the UC3D
 calibration probe with its WebGPU adapter hidden (`MD_UC3D_HIDE_WEBGPU_ADAPTER=1`)
 and passes it only on exit 2 with a `CANNOT VERIFY WebGPU` line and no WebGPU pass.
 The symbol check also scans the published `MatrixDesktop.dll` IL for the host's
-startup-failure, surface-close, wallpaper single-instance and WebView2
-process-failure wiring. Version parity runs `tests\check-release-version.ps1`,
-which `release.yml` runs with the tag, and a separate check requires
+startup-failure, surface-close, wallpaper single-instance and takeover, WebView2
+process-failure, session-end, camera-permission, mouse-hook and tray Start with
+Windows wiring. It follows the surface-close, renderer-failure, rebuild-backoff
+and wallpaper-ownership decisions along every IL path with chosen inputs, so a
+call kept behind a broken condition still fails. Version parity runs
+`tests\check-release-version.ps1`, which `release.yml` runs with the tag, and a
+separate check requires
 `release.yml` to run its tag and CI checks before its first `dotnet publish`. Both
 published `runtimeconfig.json` files must keep ICU globalization, and the local
 framework-dependent publish profiles must not change the build beyond what the
@@ -85,6 +89,17 @@ fraction of at least 0.02; animation requires at least 0.005 changed pixels.
 These checks reject blank, uniform and frozen frames. Inspect screenshots too:
 pixel statistics cannot establish visual correctness.
 
+Each case's first frame is captured after the 6 s settle (`-SettleMs`) and again
+every second until it clears the luminance and non-black floors, for at most
+20 s after the window appears. WebView2 child cleanup waits up to 15 s. For
+tiers 2 and 3 the gate keeps the display and the system on and prints
+`display hold: on`, or `display hold: unavailable` when Windows refuses. A
+main-app frame under a floor, or a frozen one, is `UNCHECKED` rather than a
+failure when that case's process logged that it suspended, or tried to suspend,
+its WebView for display-off, a locked or disconnected session or sleep. A
+failing tier 3 probe script is `UNCHECKED` when any MatrixDesktop process
+logged such a suspension while it ran.
+
 ## ZMatrix, wallpaper and screensaver checks
 
 After each focused smoke passes, retain the existing Matrix/UC3D regressions:
@@ -103,13 +118,19 @@ python tests\uc3d-audio-browser.py --channel msedge
 ```
 
 The ZMatrix browser test checks served source bytes, actual selected backends,
-visible animation, pause/resume, resize and disposal. Original Matrix also starts
-paused before renderer import; a real WebGL uniform witness must begin at active
-shader tick zero so ping-pong initialization cannot be skipped. On REGL, the
+visible animation, pause/resume, resize and disposal. On REGL it also requires
+the pass to read `gl.getError` about once a second rather than every frame, and
+a recorded WebGL error to still fail the scene with its notice. Original Matrix
+also starts paused before renderer import; a real WebGL uniform witness must
+begin at active shader tick zero so ping-pong initialization cannot be skipped.
+On REGL, the
 original Matrix test also requires the shader time uniform to stay small after
-four days of page time while the tick keeps counting, and `fps=0` to draw exactly
-one non-black frame. Browser fallback warnings are expected when no native GDI
-bridge is attached.
+four days of page time while the tick keeps counting, and `fps=0` and `once=true`
+to each draw exactly one non-black frame that survives a window resize. A visible
+host pause must park the frame loop and resume where it froze; a hidden one still
+restarts shader time, and with `skipIntro=false` that restart does not replay
+the intro. Plug me in must survive a recovery reload. Browser fallback warnings
+are expected when no native GDI bridge is attached.
 
 Against a complete published folder:
 
@@ -122,15 +143,21 @@ python tests\screensaver-smoke.py --scr artifacts\gate\win-x64-fd\MatrixDesktop.
 Wallpaper checks cover all three scenes and both graphics backends, the real
 WorkerW parent, native fonts and clean shutdown. Run these focus-sensitive
 checks sequentially with configurator/UI probes. A concurrently activated
-application can invalidate the unchanged-foreground witness.
+application can invalidate the unchanged-foreground witness. Without `--output`
+the wallpaper probe writes its evidence to a new temporary folder and deletes
+each case's WebView2 profile there; a folder given with `--output`, such as the
+gate's, keeps the profile, which the next run reuses.
 
 Before its configurator cases, the native configurator probe works on private
 copies of the published folder with synthetic stores. A second configurator on
 the same store must exit 0 and leave the store and its backup unchanged. The
 configurator must answer `WM_QUERYENDSESSION`, keep running after a cancelled
-shutdown and exit, ending its Test host, when the session really ends. A Test
-window that closes by itself must be reported to the page once, and `Stop Test`
-must still end the current Test host after a replaced one exits.
+shutdown and exit, ending its Test host, when the session really ends. The probe
+also launches the published `MatrixDesktop.exe` windowed with its own WebView2
+profile; that host must answer `WM_QUERYENDSESSION`, keep rendering after the
+shutdown is cancelled and exit 0 on `WM_CLOSE`. A Test window that closes by
+itself must be reported to the page once, and `Stop Test` must still end the
+current Test host after a replaced one exits.
 
 The screensaver probe supplies an owned synthetic profile and preview parent.
 It checks child bounds/resize/parent death, fullscreen coverage despite saved
@@ -176,8 +203,12 @@ python tests\uc3d-calibration.py --renderer both --channel msedge
 
 The probe asserts the selected backend rather than accepting silent fallback.
 It checks animated 2D rain, photo RGB in the code field, visible relief, literal
-caption text, the clock and disposal. It records the served shader's digest and
-writes synthetic screenshots and a report to `artifacts\uc3d\`. A missing WebGPU
+caption text, the clock and disposal. On the REGL backend it also serves
+synthetic desktops one pixel over `MAX_TEXTURE_SIZE` on each axis, which must
+render downscaled with their aspect kept and the right way up, and one at the
+limit, which must upload unchanged. It records the served shader's digest and,
+on REGL, the served `regl/uc3dPass.js` digest, and writes synthetic screenshots
+and a report to `artifacts\uc3d\`. A missing WebGPU
 adapter returns exit 2. A shader/device failure is a failure, not a WebGPU pass.
 
 The calibration probe checks 22 original-control cases per backend: slider
@@ -225,7 +256,8 @@ the capture region is unobstructed, then starts UC3D with desktop capture enable
 It validates every captured pixel against the synthetic palette, capture bounds,
 the opt-in media grant and `no-store` response. It also checks that the published
 web tree is unchanged. It writes a report, not captured image pixels, and closes
-its own fixture and application. `--windowed` additionally requires an
+its own fixture and application, then deletes the application's private WebView2
+profile under its run folder. `--windowed` additionally requires an
 unobstructed full-desktop fixture for the windowed initial-bounds case.
 
 ## Focused regression commands
@@ -265,7 +297,7 @@ affected by a change, using the published application.
 | Multi-monitor and window modes | Default borderless mode spans the intended displays; `--single-monitor`, `--monitor N` and `--working-area` use the expected bounds. Resize a windowed instance and check for blank frames or crashes. |
 | Physical key exit | Foreground physical keys close the default app. `--no-exit-on-any-key --exit-on-esc` permits ordinary keys but closes on Esc. Both exit modes disabled permit closing via the window. Injected input is intentionally ignored. |
 | Cursor and DevTools | `--hide-cursor --no-devtools --topmost` hides the app cursor, suppresses DevTools shortcuts and maintains the expected z-order. Closing restores cursor state. |
-| Webcam | `--effect mirror --camera true` obtains permission, renders camera input and releases the camera after closing. This needs an actual camera. |
+| Webcam | `--effect mirror --camera true` obtains permission, renders camera input and releases the camera after closing. This needs an actual camera. With a fresh profile, `/s` and `--wallpaper` with `--effect mirror --camera true` render rain at once with no prompt; after one Allow in a windowed launch they use the camera, and after a Block the next windowed launch prompts again. |
 | Looking Glass | The Matrix scene's Holoplay preset requires real device calibration and uses the WebGL quilt path. No-device and renderer-routing tests do not certify a physical display. UC3D has no quilt implementation. |
 | Click ripples | Enable `clickRipples` with palette/stripe effects and test the triangle, star and box shapes in both renderers. Without the option, ordinary rain should not gain click ripples. |
 | Presets and launch controls | A fresh store includes `UC3D Trilogy`, `ZMatrix Desktop` and the older starters. Save, rename and delete a preset; reopen and verify persistence. Edited starters stay edited, and deleted starters stay deleted. `Test Argument` replaces its previous instance and `Stop Test` closes it. |
