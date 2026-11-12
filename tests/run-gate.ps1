@@ -101,7 +101,7 @@ function Test-Unchecked {
     Write-Host "               $Why" -ForegroundColor Yellow
 }
 # A check whose own harness broke (web-smoke.py's exit 3, or a tier-1 Python case's exit 3 with
-# its HARNESS ERROR line, MDST-05). The run continues, and the gate ends
+# its HARNESS ERROR line and no FAIL line, MDST-05). The run continues, and the gate ends
 # in exit 3 unless a check failed, because a broken harness is never a verdict on the app (R3-26).
 function Test-Harness {
     param([string]$Msg, [string]$Detail)
@@ -794,7 +794,8 @@ try {
             if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
             elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
             # Exit 3 with a HARNESS ERROR line, as when a browser launch failed argument
-            # verification, is the gate's harness error, never a product FAIL (MDST-05).
+            # verification, is the gate's harness error, never a product FAIL (MDST-05),
+            # unless the case also printed a FAIL line: that stays a FAIL (Get-GateCaseVerdict).
             elseif ($verdict.Outcome -eq 'harness') { Test-Harness $case.Name $verdict.Detail }
             else {
                 Test-Fail $case.Name $verdict.Detail

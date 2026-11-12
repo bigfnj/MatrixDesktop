@@ -46,10 +46,16 @@ function Get-GateCaseVerdict {
     # Exit 3 is the child's own harness error only with its 'HARNESS ERROR' line: a suite whose
     # browser launch failed argument verification (browser_launch.LaunchArgumentsError) prints
     # one and exits 3 (MDST-05). A bare exit 3 stays a FAIL, because it has other sources, such
-    # as abort() in a native extension.
+    # as abort() in a native extension. So does an exit 3 that also printed a FAIL line: a FAIL
+    # outranks a harness error (as in web-smoke, R3-26), and zmatrix-configurator.py reaches it
+    # when its last check's full-Chromium launch raises after earlier checks failed.
     if ($ExitCode -eq 3) {
         $m = [regex]::Match($text, '(?m)^[ \t]*HARNESS ERROR\b.*$')
         if ($m.Success) {
+            $failed = [regex]::Match($text, '(?m)^[ \t]*FAIL\b.*$')
+            if ($failed.Success) {
+                return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "exit 3, a FAIL beside a harness error: $($failed.Value.Trim()) | $($m.Value.Trim()); $where" }
+            }
             return [pscustomobject]@{ Outcome = 'harness'; ExitCode = $ExitCode; Detail = "$($m.Value.Trim()); $where" }
         }
     }

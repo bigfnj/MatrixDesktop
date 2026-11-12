@@ -1080,7 +1080,7 @@ try {
         Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
     }
 
-    Invoke-TestCase 'MDST-05 (b) a tier-1 Python case''s exit 3 with its HARNESS ERROR line is the gate''s harness error, and a bare exit 3 a FAIL' {
+    Invoke-TestCase 'MDST-05 (b) a tier-1 Python case''s exit 3 with its HARNESS ERROR line is the gate''s harness error, and a bare exit 3 or one beside a FAIL line a FAIL' {
         if (-not $Python) { return 'CANNOT VERIFY MDST-05 (b): no Python interpreter for the stubs' }
         $refused = 'browser launch (msedge) 157.0.4341.46: argument verification FAILED: TcpPortRandomizationWin is missing'
         $all = Invoke-Tier1PythonLoop 'mdst-05-b' @{
@@ -1102,6 +1102,23 @@ try {
         $wrong = @($want | Where-Object { $all -notcontains $_ } | ForEach-Object { "missing '$_'" })
         $other = @($all | Where-Object { $_ -notlike 'ok|*' -and $want -notcontains $_ })
         if ($other.Count -gt 0) { $wrong += "unexpected: $($other -join ' / ')" }
+        # A FAIL outranks a harness error. zmatrix-configurator.py prints FAIL for a check that
+        # failed, then its last check's full-Chromium launch raises LaunchArgumentsError and its
+        # __main__ prints HARNESS ERROR and exits 3; browser-launch.test.py can do the same after
+        # a FAIL. Both stay the product FAIL they were before MDST-05, naming both lines.
+        $mixed = Invoke-Tier1PythonLoop 'mdst-05-b-mixed' @{
+            'zmatrix-configurator.py' = @{ Out = @('HARNESS C:\stub\MatrixDesktop.Tests.exe sha256=00', 'PASS Every control has a label', 'FAIL Colour popover content stays inside its box: stub overflow')
+                Err = @('Traceback (most recent call last):', '  File "stub", line 1, in check', 'AssertionError: stub overflow', "HARNESS ERROR: LaunchArgumentsError $refused"); Exit = 3 }
+            'browser-launch.test.py'  = @{ Out = @('PASS keeps Playwright defaults', 'FAIL disables TcpPortRandomizationWin: stub'); Err = @('HARNESS ERROR: OSError: stub'); Exit = 3 }
+        }
+        $wantMixed = @(
+            "FAIL|ZMatrix configurator controls and imports|exit 3, a FAIL beside a harness error: FAIL Colour popover content stays inside its box: stub overflow | HARNESS ERROR: LaunchArgumentsError $refused"
+            'FAIL|browser launch keeps Playwright defaults and disables TcpPortRandomizationWin|exit 3, a FAIL beside a harness error: FAIL disables TcpPortRandomizationWin: stub | HARNESS ERROR: OSError: stub'
+        )
+        $wrongMixed = @($wantMixed | Where-Object { $mixed -notcontains $_ } | ForEach-Object { "missing '$_'" })
+        $otherMixed = @($mixed | Where-Object { $_ -notlike 'ok|*' -and $wantMixed -notcontains $_ })
+        if ($otherMixed.Count -gt 0) { $wrongMixed += "unexpected: $($otherMixed -join ' / ')" }
+        if ($wrongMixed.Count -gt 0) { $wrong += "FAIL beside HARNESS ERROR: $($wrongMixed -join ' || ') (reported: $($mixed -join ' / '))" }
         if ($wrong.Count -gt 0) { throw (($wrong -join ' || ') + " (reported: $($all -join ' / '))") }
     }
 
