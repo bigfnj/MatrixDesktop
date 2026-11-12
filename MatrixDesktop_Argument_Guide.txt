@@ -541,9 +541,8 @@ camera (boolean)
     A Block lasts only for that launch: the next windowed or fullscreen launch
     with effect=mirror and camera=true asks again.
   - A screensaver (/s), its preview (/p) and a wallpaper cannot show the
-    prompt, so they deny the camera without asking and continue without it,
-    unless an earlier windowed or fullscreen launch, such as the
-    configurator's Test Argument, already allowed it.
+    prompt. They deny any camera request WebView2 raises, without asking and
+    without saving the answer, and continue without the camera.
   - The configurator leaves camera out of Copy, Test Argument, Export .ps1,
     Use for screensaver and the live preview unless Effect is Mirror. The saved
     draft keeps the setting, so switching back to Mirror restores it.
