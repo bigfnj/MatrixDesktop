@@ -1306,6 +1306,23 @@ def contrast(first, second):
     return (high + 0.05) / (low + 0.05)
 
 
+def focus_ring(style):
+    # The page's own focus ring, an outline other than auto or a zero-offset spread box-shadow, and
+    # its contrast composited over style["background"]: (ring, ratio), or (None, 0) for none, as with
+    # the UA ring (outline: auto) or outline: none.
+    background = css_color(style["background"])[0]
+    shadow = re.match(r"(rgba?\([^)]*\)) 0px 0px 0px [1-9]", style["boxShadow"])
+    if style["outlineStyle"] not in ("none", "auto") and style["outlineWidth"] > 0:
+        ring = style["outlineColor"]
+    elif shadow:
+        ring = shadow.group(1)
+    else:
+        return None, 0
+    rgb, alpha = css_color(ring)
+    seen = [channel * alpha + under * (1 - alpha) for channel, under in zip(rgb, background)]
+    return ring, contrast(seen, background)
+
+
 SLIDER_FOCUS = """selector => { const node = document.querySelector('.color-popover ' + selector), style = getComputedStyle(node);
     return {focused: document.activeElement === node && node.matches(':focus-visible'), outlineStyle: style.outlineStyle,
             outlineWidth: parseFloat(style.outlineWidth), outlineColor: style.outlineColor, boxShadow: style.boxShadow,
@@ -1330,19 +1347,88 @@ def check_slider_focus_ring(page, _fixture):
             page.keyboard.press("Shift+Tab")
             style = page.evaluate(SLIDER_FOCUS, selector)
             assert style["focused"], "witness: Shift+Tab did not give " + selector + " keyboard focus: " + str(style)
-            background = css_color(style["background"])[0]
-            shadow = re.match(r"(rgba?\([^)]*\)) 0px 0px 0px [1-9]", style["boxShadow"])
-            if style["outlineStyle"] not in ("none", "auto") and style["outlineWidth"] > 0:
-                ring = style["outlineColor"]
-            elif shadow:
-                ring = shadow.group(1)
-            else:
+            ring, ratio = focus_ring(style)
+            if not ring:
                 raise AssertionError(theme + " theme: " + selector + " has no focus ring of the page's own: " + str(style))
-            rgb, alpha = css_color(ring)
-            seen = [channel * alpha + under * (1 - alpha) for channel, under in zip(rgb, background)]
-            ratio = contrast(seen, background)
             assert ratio >= 3, theme + " theme: the " + selector + " focus ring " + ring + " is " + str(round(ratio, 2)) + ":1 on the popover " + style["background"] + ", under 3:1"
         page.keyboard.press("Escape")
+
+
+# A ring outside the box, or a spread shadow, is drawn over the nearest painted ancestor (the walk
+# starts at the parent: Chromium paints no background for a native checkbox); an outline with a
+# negative offset is drawn inside the box, over the element's own background.
+FOCUS_RING = """node => { const style = getComputedStyle(node);
+    const inside = !['none', 'auto'].includes(style.outlineStyle) && parseFloat(style.outlineOffset) < 0;
+    let background = getComputedStyle(document.body).backgroundColor;
+    for (let n = inside ? node : node.parentElement; n; n = n.parentElement) {
+        const color = getComputedStyle(n).backgroundColor;
+        if (color !== 'rgba(0, 0, 0, 0)') { background = color; break; }
+    }
+    return {focused: document.activeElement === node && node.matches(':focus-visible'), tag: node.tagName,
+            outlineStyle: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth), outlineOffset: style.outlineOffset,
+            outlineColor: style.outlineColor, boxShadow: style.boxShadow, background}; }"""
+# Focuses the tab stop before a control, so one real Tab press moves keyboard focus onto it.
+PREVIOUS_STOP = """target => { const stops = [...document.querySelectorAll('input, select, textarea, button, summary, [tabindex]')]
+    .filter(node => node.tabIndex >= 0 && !node.disabled && node.checkVisibility());
+    const index = stops.indexOf(target);
+    if (index > 0) stops[index - 1].focus();
+    return index; }"""
+
+
+def check_focus_ring_sweep(page, _fixture):
+    # R3-05: R2-42 gave only the popover sliders a ring of the page's own. styles.css sets outline:
+    # none on every input, so a checkbox or range slider, which paint no author border, showed only
+    # the 2 px --focus-ring halo (1.53:1 on the dark panel), and a summary, a heading reached by a
+    # section jump and the help guide drew the UA ring, near black on the dark theme. Each is reached
+    # the way a keyboard user reaches it and must show a ring of the page's own at 3:1 on what the
+    # ring is drawn over, in both themes. Computed style, not pixels: headless Chromium draws the UA
+    # ring with a white inner band that WebView2 does not.
+    apply_import(page, """[General]
+MaxStream=777
+OwnerExtension=retained
+""")
+    problems = []
+
+    def judge(theme, label, target):
+        style = target.evaluate(FOCUS_RING)
+        assert style["focused"], "witness: the keyboard did not give the " + label + " visible focus: " + str(style)
+        ring, ratio = focus_ring(style)
+        if not ring:
+            problems.append(theme + " theme: the " + label + " has no focus ring of the page's own (outline " + style["outlineStyle"] + ")")
+        elif ratio < 3:
+            problems.append(theme + " theme: the " + label + " focus ring " + ring + " is " + str(round(ratio, 2)) + ":1 on " + style["background"] + ", under 3:1")
+
+    def tab_to(theme, label, target):
+        target.evaluate("node => node.scrollIntoView({block: 'center'})")
+        assert target.evaluate(PREVIOUS_STOP) > 0, "witness: the " + label + " is not a tab stop after another"
+        page.keyboard.press("Tab")
+        judge(theme, label, target)
+
+    for theme in ("dark", "light"):
+        if theme == "light":
+            page.locator("#themeButton").click()
+        assert page.evaluate("document.documentElement.dataset.theme") == theme, "witness: the page is not on the " + theme + " theme"
+        choose_zmatrix(page)
+        tab_to(theme, "first enabled range slider", page.locator("#fieldSurface input[type=range]:not(:disabled)").first)
+        tab_to(theme, "zmFont summary", field(page, "zmFont").locator("summary"))
+        report = page.locator(".import-report")
+        tab_to(theme, "import report summary", report.locator("summary").first)
+        if not report.evaluate("node => node.open"):
+            page.keyboard.press("Enter")
+        page.keyboard.press("Tab")  # into the open report, to its nested summary
+        judge(theme, "retained source values summary", report.locator("details > summary"))
+        page.locator("#sectionJump button[data-group='advanced']").focus()
+        page.keyboard.press("Enter")
+        judge(theme, "advanced section heading after a jump", page.locator("#section-advanced .section-title"))
+        page.locator("#helpButton").focus()
+        page.keyboard.press("Enter")
+        page.wait_for_function("!document.querySelector('#helpModal').hidden && document.activeElement?.id === 'helpBody'")
+        judge(theme, "help guide", page.locator("#helpBody"))
+        page.keyboard.press("Escape")
+        field(page, "scene").locator("select").select_option("matrix")
+        page.wait_for_function("document.querySelector('[data-field=\"clickRipples\"] input').disabled === false")
+        tab_to(theme, "clickRipples checkbox", field(page, "clickRipples").locator("input"))
+    assert not problems, "; ".join(problems)
 
 
 POPOVER_BOXES = """() => { const box = document.querySelector('.color-popover').getBoundingClientRect();
@@ -1439,6 +1525,7 @@ CHECKS = [
     ("A Control units switch keeps an untouched Bloom strength on what renders", check_controls_switch_bloom),
     ("Typing a name in a gating select picks the option it spells", check_select_typeahead),
     ("Colour popover sliders show a visible keyboard focus ring in both themes", check_slider_focus_ring),
+    ("Checkboxes, range sliders, summaries, a jumped-to heading and the help guide show a visible keyboard focus ring in both themes", check_focus_ring_sweep),
     ("Colour popover content stays inside its box", check_popover_fits),
     ("A reopened store's sorted colour keys still follow a version switch", check_sorted_store_retarget),
 ]
