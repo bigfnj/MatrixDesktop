@@ -21,7 +21,60 @@ internal static class HostLifecyclePolicyTests
         ("Host answers a session-end query without tearing down its renderer", SessionEndQuery),
         ("Host wallpaper guard withdraws a request the holder had not claimed by the newcomer's deadline", WallpaperTakeoverWithdrawn),
         ("Host wallpaper guard lets the newer of two overlapping launches win", WallpaperNewerOfTwoWins),
+        ("Host wallpaper guard gives the newest launch the claimed bound when the holder already claimed an older request", WallpaperNewestAfterClaim),
     ];
+
+    // R3-09. A request posted after the holder claimed an older one overwrote the claim, so the
+    // newest newcomer withdrew at its bound and showed the 'did not exit' dialog while the
+    // committed holder still left, and no wallpaper remained. The holder here claims the older
+    // request and then tears down for 1.5 s after the newest one starts, past its 1 s bound.
+    private static void WallpaperNewestAfterClaim()
+    {
+        for (var trial = 0; trial < 5; trial++)
+        {
+            var scope = "test-" + Guid.NewGuid().ToString("N");
+            using var holding = new ManualResetEventSlim();
+            using var claimedOlder = new ManualResetEventSlim();
+            using var newestStarting = new ManualResetEventSlim();
+            WallpaperInstanceGuard.Outcome older = default, newest = default;
+            var holderClaimed = false;
+            long releasingAt = 0, newestDoneAt = 0;
+            var holder = new Thread(() =>
+            {
+                using var held = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                using var asked = new ManualResetEventSlim();
+                held.ListenForTakeover(asked.Set);
+                holding.Set();
+                if (!asked.Wait(TimeSpan.FromSeconds(10)) || !(holderClaimed = held.ClaimTakeover())) return;
+                claimedOlder.Set();
+                // A claimed holder is committed to leave; its teardown outlasts the newest bound.
+                if (newestStarting.Wait(TimeSpan.FromSeconds(10))) Thread.Sleep(1500);
+                Volatile.Write(ref releasingAt, Environment.TickCount64);
+            }) { IsBackground = true };
+            holder.Start();
+            Check.True(holding.Wait(TimeSpan.FromSeconds(10)), $"the holder must acquire (trial {trial})");
+            var first = new Thread(() =>
+            {
+                using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                older = guard.Result;
+            }) { IsBackground = true };
+            var second = new Thread(() =>
+            {
+                newestStarting.Set();
+                using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                newest = guard.Result;
+                Volatile.Write(ref newestDoneAt, Environment.TickCount64);
+            }) { IsBackground = true };
+            first.Start();
+            Check.True(claimedOlder.Wait(TimeSpan.FromSeconds(10)), $"the holder must claim the older request (trial {trial})");
+            second.Start();
+            Check.True(first.Join(TimeSpan.FromSeconds(15)) && second.Join(TimeSpan.FromSeconds(15)) && holder.Join(TimeSpan.FromSeconds(15)), $"all three launches must finish (trial {trial})");
+            Check.True(holderClaimed, $"the holder must have claimed a request (trial {trial})");
+            Check.Equal(WallpaperInstanceGuard.Outcome.TookOver, newest, $"the newest launch must get the claimed holder's second bound and take over, not give up while it leaves (trial {trial})");
+            Check.Equal(WallpaperInstanceGuard.Outcome.Superseded, older, $"the older newcomer whose request was claimed must stop quietly (trial {trial})");
+            Check.True(Volatile.Read(ref releasingAt) <= Volatile.Read(ref newestDoneAt), $"the newest launch must finish only after the claimed holder released (trial {trial})");
+        }
+    }
 
     // R2-04. A newcomer that timed out left its request standing, so a holder slower than the
     // bound exited afterwards anyway and left no wallpaper at all.

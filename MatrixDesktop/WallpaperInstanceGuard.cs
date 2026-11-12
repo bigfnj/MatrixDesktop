@@ -80,8 +80,9 @@ internal sealed class WallpaperInstanceGuard : IDisposable
             if (!superseded) owned = WaitForHolder(mutex, exitRequest, board, ticket, bound, ref superseded);
             if (!owned && !superseded)
             {
-                // At the deadline: withdraw the request, unless the holder already claimed it and
-                // is on its way out, which gets one more bound.
+                // At the deadline: withdraw the request, unless the holder already claimed it, or
+                // an older request this one replaced, and is on its way out, which gets one more
+                // bound.
                 var withdrawal = board.Withdraw(ticket);
                 superseded = withdrawal == Withdrawal.Superseded;
                 if (withdrawal == Withdrawal.Claimed && !(owned = WaitForHolder(mutex, exitRequest, board, ticket, bound, ref superseded))) board.Clear(ticket);
@@ -151,7 +152,8 @@ internal sealed class WallpaperInstanceGuard : IDisposable
     private enum Withdrawal { Withdrawn, Claimed, Superseded }
 
     // The scope's request board: the last ticket issued, the newest ticket that asked for the
-    // desktop, and the standing request (a ticket, with Claimed set once the holder took it).
+    // desktop, and the standing request (a ticket, with Claimed set once the holder took it or an
+    // older request this one replaced).
     // Every launch in the scope keeps it open; a named mutex serialises the three values.
     private sealed class RequestBoard : IDisposable
     {
@@ -192,12 +194,14 @@ internal sealed class WallpaperInstanceGuard : IDisposable
 
         internal bool NewerThan(long ticket) => Locked(() => _view.ReadInt64(NewestAt) > ticket);
 
-        // False when a newer launch already asked: this one is superseded and posts nothing.
+        // False when a newer launch already asked: this one is superseded and posts nothing. A
+        // holder that claimed an older request is leaving whichever newcomer it answered, so the
+        // newer request keeps the Claimed bit (R3-09).
         internal bool Request(long ticket) => Locked(() =>
         {
             if (_view.ReadInt64(NewestAt) > ticket) return false;
             _view.Write(NewestAt, ticket);
-            _view.Write(RequestAt, ticket);
+            _view.Write(RequestAt, (_view.ReadInt64(RequestAt) & Claimed) != 0 ? ticket | Claimed : ticket);
             return true;
         });
 
