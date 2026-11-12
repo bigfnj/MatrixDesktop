@@ -602,8 +602,10 @@ internal static class NativeBridgeTests
         .Select(pair => pair.Value is null ? "" : Encoding.UTF8.GetString(pair.Value)).ToArray();
 
     // R2-07: GDI resolves a requested face through the live font table, so a font installed after
-    // an atlas was built changes what a rebuild draws. A refresh re-reads the font table, the
-    // configurator rebuilds on the install broadcast, and a rebuild that draws the same keeps its ids.
+    // an atlas was built changes what a rebuild draws. A refresh re-reads the font table; the
+    // configurator's next update rebuilds after the install broadcast, which this case stands in for
+    // by calling OnInstalledFontsChanged (that the constructor subscribes it is HostWiring's check);
+    // and a rebuild that draws the same keeps its ids.
     private static void FontInstallReResolvesAtlases()
     {
         var query = "scene=zmatrix&zmFont=" + Uri.EscapeDataString("{\"name\":\"Late Font\"}");

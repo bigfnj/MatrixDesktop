@@ -3,8 +3,9 @@ using MatrixDesktop;
 using MatrixDesktop.Shared;
 using Microsoft.Web.WebView2.Core;
 
-// The permission answers MainForm applies, for the host kind MainForm passes (R2-51), and the
-// saved permission state it clears before each navigation (R2-52).
+// HostPermissionPolicy's answer for each host kind (R2-51) and the saved permission state it picks
+// to clear (R2-52). That MainForm passes its own host kind and applies the answer is HostWiring's
+// published-dll check, which walks the handler; these cases never compile MainForm.
 internal static class HostPermissionTests
 {
     internal static IEnumerable<(string, Action)> All =>
