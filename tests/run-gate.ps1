@@ -1430,6 +1430,11 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
             if ($nativeRun.ExitCode -eq 0) { Test-Ok 'published UC3D media and preview' }
             elseif ($nativeSuspension) { Test-Unchecked 'published UC3D media and preview' "exit $($nativeRun.ExitCode) after a MatrixDesktop process logged '$nativeSuspension'; see $nativeLog" }
             else { Test-Fail 'published UC3D media and preview' "exit $($nativeRun.ExitCode); see $nativeLog" }
+            # A profile the run could not delete leaves its exit code alone (R2-37), so the log is
+            # read for it. A leak is harness hygiene, so it is UNCHECKED beside the case's own
+            # verdict, never in place of it (Get-ProfileLeakLines, gate-lib.ps1; R3-15).
+            $nativeLeaks = @(Get-ProfileLeakLines -Log $nativeLog)
+            if ($nativeLeaks.Count -gt 0) { Test-Unchecked 'WebView2 profile cleanup [published UC3D media and preview]' "$($nativeLeaks[0]); see $nativeLog" }
         }
     }
 
@@ -1460,6 +1465,9 @@ if (`$bad.Count -gt 0) { `$bad -join '; ' } else { 'OK' }
                 Test-Fail $case.Name $verdict.Detail
                 Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
             }
+            # As for the native smoke above: a leaked profile is reported beside the verdict (R3-15).
+            $caseLeaks = @(Get-ProfileLeakLines -Log $log)
+            if ($caseLeaks.Count -gt 0) { Test-Unchecked "WebView2 profile cleanup [$($case.Name)]" "$($caseLeaks[0]); see $log" }
         }
     }
 

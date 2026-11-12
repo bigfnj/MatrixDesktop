@@ -765,6 +765,79 @@ try {
         if ($verdict.Detail -notlike 'UNVERIFIED: chromium is unavailable: *') { throw "the reason does not say chromium is unavailable ($($verdict.Detail))" }
     }
 
+    # ------------------------------------------------------------ R3-15 leaked WebView2 profiles
+
+    Invoke-TestCase 'R2-37 a leaked WebView2 profile is reported, not swallowed by an exit-0 verdict' {
+        $leaked = New-LogPath 'r3-15-leaked'
+        [IO.File]::WriteAllText($leaked, "PASS native smoke`nLEAKED 1 WebView2 profile(s): D:/x/profile-a`n")
+        [IO.File]::WriteAllText("$leaked.err", '')
+        $clean = New-LogPath 'r3-15-clean'
+        [IO.File]::WriteAllText($clean, "PASS native smoke`nPRUNE removed 1 of 1 WebView2 profile(s) older than a day from D:/x`n")
+        $warn = New-LogPath 'r3-15-warn'
+        [IO.File]::WriteAllText($warn, "PASS native smoke`n")
+        [IO.File]::WriteAllText("$warn.err", "WARN 2 process(es) started by pid 42 still running after 30 s; deleting D:/x/profile-b anyway`n")
+        # Every sub-assertion runs, so a mutation shows exactly which ones it breaks.
+        $wrong = @()
+        $found = @(Get-ProfileLeakLines -Log $leaked)
+        if ($found.Count -ne 1 -or $found[0] -notlike '*profile-a*') { $wrong += "the LEAKED log gave $($found.Count) line(s): $($found -join ' / ')" }
+        if ((Get-GateCaseVerdict -ExitCode 0 -Log $leaked).Outcome -ne 'ok') { $wrong += 'control: the exit-0 verdict of the LEAKED log is no longer ok, so this case no longer shows what the verdict misses' }
+        $found = @(Get-ProfileLeakLines -Log $clean)
+        if ($found.Count -ne 0) { $wrong += "the clean log gave $($found.Count) line(s): $($found -join ' / ')" }
+        $found = @(Get-ProfileLeakLines -Log $warn)
+        if ($found.Count -ne 1 -or $found[0] -notlike '*profile-b*') { $wrong += "the WARN-only log (on stderr) gave $($found.Count) line(s): $($found -join ' / ')" }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
+    Invoke-TestCase 'R3-15 the native smoke and each tier-3 case report a leaked profile as UNCHECKED after their own verdict' {
+        if (-not $Python) { return 'CANNOT VERIFY R3-15: no Python interpreter for the stubs' }
+        # The real native smoke block and the real tier-3 loop of run-gate.ps1, run against stub
+        # scripts with recording stand-ins for the report functions. The loop's session check is
+        # replaced by $true, so the cases run in a non-interactive host as well.
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $nativeStarts = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$nativeRun' }, $true))
+        $loops = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Condition.Extent.Text -like '*wallpaper-smoke.py*' }, $true))
+        Assert-Equal '1,1' "$($nativeStarts.Count),$($loops.Count)" 'run-gate.ps1 has one native smoke start and one tier-3 loop'
+        $nativeBody = $nativeStarts[0].Parent.Extent.Text
+        $loopText = $loops[0].Extent.Text
+        Assert-Equal 1 ([regex]::Matches($loopText, '\[Environment\]::UserInteractive')).Count 'the tier-3 loop checks the session once'
+        $blocks = @([scriptblock]::Create($nativeBody.Substring(1, $nativeBody.Length - 2)), [scriptblock]::Create($loopText.Replace('[Environment]::UserInteractive', '$true')))
+        $script:Reported = New-Object 'Collections.Generic.List[string]'
+        function Test-Ok { param([string]$Msg) $script:Reported.Add("ok|$Msg") }
+        function Test-Fail { param([string]$Msg, [string]$Detail) $script:Reported.Add("FAIL|$Msg") }
+        function Test-Unchecked { param([string]$Msg, [string]$Why) $script:Reported.Add("UNCHECKED|$Msg|$Why") }
+        function Get-LogRecordsForPid { param([switch]$AnyProcess, $Since) return @() }
+        function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor) }
+        $RepoRoot = Join-Path $scratch 'r3-15-root'
+        $ShotDir = Join-Path $scratch 'r3-15-shots'
+        $GatePublishDir = Join-Path $scratch 'r3-15-publish'
+        foreach ($dir in (Join-Path $RepoRoot 'tests'), $ShotDir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        $stubs = @{
+            'native-uc3d-smoke.py'          = @('LEAKED 1 WebView2 profile(s): D:/x/profile-native', 0)
+            'wallpaper-smoke.py'            = @('LEAKED 2 WebView2 profile(s): D:/x/profile-wall-1, D:/x/profile-wall-2', 0)
+            'screensaver-smoke.py'          = @('PASS clean', 0)
+            'native-zmatrix-configurator.py' = @('WARN could not remove WebView2 profile D:/x/profile-cfg: busy', 1)
+        }
+        foreach ($name in $stubs.Keys) {
+            [IO.File]::WriteAllText((Join-Path $RepoRoot "tests\$name"), "print('$($stubs[$name][0])')`nraise SystemExit($($stubs[$name][1]))`n")
+        }
+        $py = $Python
+        foreach ($block in $blocks) { . $block }
+        $all = @($script:Reported | ForEach-Object { $_ -replace '; see .*$', '' })
+        $want = @(
+            'ok|published UC3D media and preview'
+            'UNCHECKED|WebView2 profile cleanup [published UC3D media and preview]|LEAKED 1 WebView2 profile(s): D:/x/profile-native'
+            'ok|published wallpaper and native ZMatrix'
+            'UNCHECKED|WebView2 profile cleanup [published wallpaper and native ZMatrix]|LEAKED 2 WebView2 profile(s): D:/x/profile-wall-1, D:/x/profile-wall-2'
+            'ok|published screensaver entrypoints'
+            'FAIL|published ZMatrix configurator'
+            'UNCHECKED|WebView2 profile cleanup [published ZMatrix configurator]|WARN could not remove WebView2 profile D:/x/profile-cfg: busy'
+        )
+        Assert-Equal ($want -join ' / ') ($all -join ' / ') 'each leak follows its own case''s verdict, and a clean case reports none'
+        foreach ($line in @($script:Reported | Where-Object { $_ -like 'UNCHECKED|*' })) {
+            if ($line -notlike "*; see $ShotDir*") { throw "the leak report does not name the case log ($line)" }
+        }
+    }
+
     # ------------------------------------------------------------ R3-26 web smoke harness errors
 
     Invoke-TestCase 'R3-26 (a) the web smoke''s exit 3 is a HARNESS line naming its checks, not a FAIL, and its HARNESS lines are echoed' {

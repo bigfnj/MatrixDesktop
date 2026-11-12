@@ -275,6 +275,22 @@ function Test-SamePath {
     return [string]::Equals($fullA, $fullB, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# native-uc3d-smoke.py, and the tier-3 scripts that load it, delete each private WebView2 profile
+# after its host exits; one they cannot delete is named in a 'LEAKED n WebView2 profile(s): ...'
+# line at exit, after the WARN lines that explain it, and the exit code is left alone (R2-37).
+# The gate decided those cases by exit code alone, so a run that leaked profiles was green and
+# silent (R3-15). Returns those lines from $Log and "$Log.err", LEAKED lines first; none for a
+# clean run.
+function Get-ProfileLeakLines {
+    param([Parameter(Mandatory = $true)][string]$Log)
+    $pattern = '^(?:LEAKED \d+ WebView2 profile|WARN could not remove WebView2 profile|WARN could not wait for the processes started by pid|WARN \d+ process\(es\) started by pid .* still running after)'
+    $lines = @()
+    foreach ($path in @($Log, "$Log.err")) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) { $lines += @([IO.File]::ReadAllLines($path) | Where-Object { $_ -match $pattern }) }
+    }
+    return @(@($lines | Where-Object { $_ -like 'LEAKED *' }) + @($lines | Where-Object { $_ -notlike 'LEAKED *' }))
+}
+
 # Top-level folders under $Path that are not in the $Before snapshot, sorted. Replaces a
 # Test-Path for one literal 'userdata' name: any folder the app creates beside the exe counts.
 function Get-NewTopLevelDirectories {
