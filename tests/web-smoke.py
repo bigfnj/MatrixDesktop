@@ -1278,12 +1278,6 @@ def server_unreachable(origin):
     return None
 
 
-# Error texts that only report a failed import or resource load. On a page the harness broke they
-# are its fault's import cascade, and a bad status or another origin's request behind one is
-# counted from the request itself.
-CASCADE_ERRORS = ("Failed to fetch dynamically imported module", "Failed to load resource")
-
-
 class HarnessCause(str):
     """harness_cause()'s answer: why the harness stopped a renderer. product holds the page's
     product failures that do not follow from that fault, which stay a FAIL beside it."""
@@ -1294,16 +1288,23 @@ class HarnessCause(str):
         return cause
 
 
-def independent_failures(evidence, broken):
-    """A page's product failures that do not follow from a harness fault: an HTTP status >= 400
-    (a shipped file missing or broken), a request to another origin the check did not block on
-    purpose, and a page or console error that is neither an import cascade (CASCADE_ERRORS) nor
-    names a URL the fault broke (broken)."""
+def independent_failures(evidence):
+    """A page's product failures that do not follow from a harness fault, read from its requests:
+    an HTTP status >= 400 (a shipped file missing or broken) and a request to another origin the
+    check did not block on purpose.
+
+    Not its console or page errors. The product reports a load the fault broke through its own
+    error boundary, in words that name neither the request nor the fault: main.js's "Failed to
+    load renderer: Event" for a classic script, "...: TypeError: Failed to fetch" for a shader
+    text, "...: EncodingError: The source image cannot be decoded." for the glyph atlas. A rule
+    that counted every error but the import cascade made each of those a FAIL, so a harness
+    fault alone on any of the matrix page's 13 such requests exited 1, not 3 (MDST-01, round 3).
+    A fault on one request does not answer another with a status or send one to another origin:
+    with each own-origin request of the matrix, UC3D and ZMatrix pages failed alone, none did.
+    """
     found = [f"{url} {status}" for url, status in evidence.statuses if url not in evidence.expected]
     found += [f"{url} {error}" for url, error in evidence.failed
               if not evidence.own(url) and url not in evidence.expected]
-    found += ["error: " + (text.splitlines() or [""])[0] for text in evidence.page_errors + evidence.console
-              if not any(marker in text for marker in CASCADE_ERRORS) and not any(url in text for url in broken)]
     return found
 
 
@@ -1320,12 +1321,12 @@ def harness_cause(evidence):
     dead = server_unreachable(evidence.origin)
     if dead:
         return HarnessCause(f"the smoke server at {evidence.origin} does not answer ({dead})",
-                            independent_failures(evidence, [url for url, _ in evidence.failed if evidence.own(url)]))
+                            independent_failures(evidence))
     hits = [(url, error) for url, error in evidence.failed if evidence.own(url) and error in HARNESS_NET_ERRORS]
     if hits:
         return HarnessCause("a request to the smoke server's own origin failed with a loopback resource error: "
                             + ", ".join(f"{url} {error}" for url, error in hits[:3]),
-                            independent_failures(evidence, [url for url, _ in hits]))
+                            independent_failures(evidence))
     return None
 
 
@@ -2125,6 +2126,42 @@ def check_readiness_reporting(browser, origin):
             problems.append(f"not one HARNESS line naming {broken}: {flagged}")
         return "; ".join(problems), f"FAIL names the 404 of {missing}, HARNESS names {broken}"
 
+    def harness_fault_alone():
+        # The stand-in harness error, as above, alone on one request of each kind the matrix page
+        # makes: a module import, a classic script regl/main.js's loadJS adds, a shader text
+        # regl/utils.js's loadText fetches, and the glyph atlas an Image decodes. main.js's error
+        # boundary reports the last three without their URL, and an error-text rule made each a
+        # FAIL beside its HARNESS line. Each page's lines are captured and taken back.
+        global HARNESS_NET_ERRORS
+        stand_in, name, problems = "net::ERR_ADDRESS_UNREACHABLE", "a page with only a harness fault", []
+        for path in ("/js/regl/rainPass.js", "/lib/regl.min.js", "/shaders/glsl/rainPass.vert.glsl",
+                     "/assets/matrixcode_msdf.png"):
+            served, page = [], browser.new_page(viewport={"width": 320, "height": 240})
+            evidence = PageEvidence(page, origin)
+            marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+            HARNESS_NET_ERRORS = saved + (stand_in,)
+            try:
+                page.route("**" + path, lambda route: (served.append(route.request.url), route.abort("addressunreachable")))
+                with contextlib.redirect_stdout(printed):
+                    try:
+                        open_page(page, evidence, app)
+                        wait_ready(page, evidence, timeout=20000, errors_fatal=True)
+                        ok(name)
+                    except NotReady as stall:
+                        report_not_ready(name, stall)
+            finally:
+                HARNESS_NET_ERRORS = saved
+                page.close()
+                failed, flagged = failures[marks[0]:], harness_errors[marks[1]:]
+                del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+            if served != [origin + path]:
+                problems.append(f"{path}: witness failed: the faulted requests were {served}")
+            elif failed:
+                problems.append(f"{path}: a FAIL beside the harness fault: {[detail.split('; ')[0] for _, detail in failed]}")
+            elif len(flagged) != 1 or f"{origin}{path} {stand_in}" not in flagged[0][1].split("; ")[0]:
+                problems.append(f"{path}: not one HARNESS line naming it: {flagged}")
+        return "; ".join(problems), "HARNESS alone for a module, a classic script, a shader fetch and an image"
+
     def recovery_document_fault():
         # check_context_restore's matrix leg with only the recovery document's /js/main.js (its
         # second request) faulted: answered 404, then failed with the stand-in harness error, as
@@ -2196,6 +2233,7 @@ def check_readiness_reporting(browser, origin):
             ("readiness: a page that cannot be read keeps the readiness error", unreadable_page),
             ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg),
             ("readiness: a harness fault does not hide a 404 on the same page", harness_fault_beside_missing_module),
+            ("readiness: a harness fault alone on a module, script, fetch or image load stays HARNESS", harness_fault_alone),
             ("readiness: a reload keeps the failures of the document it loads", recovery_document_fault)):
         try:
             problem, detail = control()
