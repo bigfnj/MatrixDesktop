@@ -871,9 +871,11 @@ public sealed class MainForm : Form
     }
 
     // R2-52: one Block on WebView2's camera prompt was saved in the profile every host shares and
-    // switched the Mirror camera off for good. Before each navigation, a saved camera denial for
-    // this app is cleared (HostPermissionPolicy decides which), so the Camera setting decides again
-    // and the next interactive launch that asks shows the prompt. A saved Allow is kept.
+    // switched the Mirror camera off for good. Each time a WebView is initialised, before its first
+    // navigation, a saved camera denial for this app is cleared (HostPermissionPolicy decides
+    // which), so the Camera setting decides again. A renderer reload (ReloadRenderer) and the
+    // page's own recovery reload keep it, so a Block lasts until the next start or surface
+    // rebuild, and the next interactive launch that asks shows the prompt. A saved Allow is kept.
     private static async Task ForgetSavedCameraDenialAsync(CoreWebView2 core)
     {
         try
