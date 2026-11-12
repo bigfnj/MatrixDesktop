@@ -100,6 +100,25 @@ internal static class HostWiring
                     $"{subscribe} must have exactly one caller, the host context, which routes it through PlaybackPolicy");
             }
         });
+        // R3-13. The configurator's bridge never calls RefreshAsync, so a font install (R2-07) or a
+        // Windows wallpaper change (R2-09) reaches it only through these subscriptions, and the
+        // native cases call the handlers directly. Shared/NativeMediaBridge.cs is compiled into both
+        // EXEs; this reads MatrixDesktop.dll's copy. Each event must be subscribed in the
+        // constructor and detached in Dispose with a delegate built from its own handler.
+        failures += Run($"the native media bridge follows font, preference and display changes and detaches them: {path}", () =>
+        {
+            const string bridge = "MatrixDesktop.Shared.NativeMediaBridge::";
+            var wrong = new List<string>();
+            foreach (var (name, delegateConstructor) in new[] { ("DisplaySettingsChanged", "System.EventHandler::.ctor"),
+                ("UserPreferenceChanged", "Microsoft.Win32.UserPreferenceChangedEventHandler::.ctor"), ("InstalledFontsChanged", "System.EventHandler::.ctor") })
+                foreach (var (method, accessor) in new[] { (".ctor", "add_"), ("Dispose", "remove_") })
+                {
+                    var targets = DelegateTargets(calls, functionLoads, bridge + method, delegateConstructor, "Microsoft.Win32.SystemEvents::" + accessor + name);
+                    if (targets is not [var only] || only != bridge + "On" + name)
+                        wrong.Add($"{method} {accessor}{name} -> [{string.Join(", ", targets)}]");
+                }
+            Check.True(wrong.Count == 0, "NativeMediaBridge's constructor must subscribe, and Dispose detach, each SystemEvents change with its own handler: " + string.Join("; ", wrong));
+        });
         // AUD-72. WallpaperInstanceGuard has its own tests; these prove the wallpaper context uses it.
         failures += Run($"wallpaper launch takes the instance guard before its tray and releases it on exit: {path}", () =>
         {
