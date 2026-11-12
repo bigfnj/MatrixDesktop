@@ -16,13 +16,17 @@ The browser suites launch Chromium through `tests\browser_launch.py`, which disa
 `TcpPortRandomizationWin` merged into Playwright's own `--disable-features` and
 verifies the launched browser's argv on every launch. A launch whose argv fails
 that check raises an error and closes that browser, so no check runs on it. The
-web smoke reports that error as a harness error (exit 3); in the gate's other
-cases that launch through the helper it is a FAIL. To build the merged switch,
+web smoke, the ZMatrix configurator suite, `uc3d-browser.py`,
+`uc3d-audio-browser.py`, `uc3d-calibration.py`, `matrix-playback-browser.py`
+and `zmatrix-browser.py` report that error as a harness error and exit 3; the
+helper's own self-test, `tests\browser-launch.test.py`, counts it as a failed
+check. To build the merged switch,
 the helper first reads Playwright's own switch from a probe launch's argv. When
 that argv cannot be read, the suite's browser launches with its own arguments
 and `TcpPortRandomizationWin` is not disabled. When only the merged launch's
 argv cannot be read, the switch was requested but is not confirmed. Either way
-the launch goes ahead and prints a `DEGRADED` line each time. The one captured
+the launch goes ahead and prints a `DEGRADED` line each time, which the gate
+reports as `UNCHECKED` beside that case's own verdict. The one captured
 web smoke renderer stall was a module request to its own loopback origin that
 failed with `net::ERR_NO_BUFFER_SPACE`, which is how Chromium reports Windows
 error 10055. Windows can return 10055 when a socket cannot get a local port, and
@@ -63,10 +67,12 @@ parity check. `-Tier1Only` explicitly omits the interactive application tiers.
 | `0` | Every selected check ran and passed. |
 | `1` | At least one definite failure. |
 | `2` | At least one selected check could not be verified; inspect every `UNCHECKED` line. |
-| `3` | The verification harness broke, or a check's own harness broke and no check failed. The web smoke's exit 3 (a loopback error on its server's origin, a server that stopped answering, a missing fixture, a crash) is the second kind: the run continues, and the summary names each check reported as `HARNESS`. A FAIL in the same run keeps exit 1. |
+| `3` | The verification harness broke, or a check's own harness broke and no check failed; never a verdict on the application. The web smoke's exit 3 (a loopback error on its server's origin, a server that stopped answering, a missing fixture, a crash) is the second kind, and so is another tier 1 Python case's exit 3 with a `HARNESS ERROR` line and no FAIL line: the run continues, and the summary names each check reported as `HARNESS`. A FAIL in the same run keeps exit 1. |
 
-CI surfaces exit 2 as warning annotations rather than silently treating missing
-coverage as a pass. Exit 1 and 3 fail the workflow.
+CI surfaces exit 2 as one warning annotation that names every `UNCHECKED` item;
+each item's reason stays in the job log, on the line below its `UNCHECKED` line
+and in the gate's closing list. Missing coverage is never silently treated as a
+pass. Exit 1 and 3 fail the workflow.
 
 Tier 1 builds with no warnings, runs native regressions and JavaScript lifecycle
 and UC3D scenarios, checks module syntax and referenced assets, and runs the
@@ -91,10 +97,19 @@ The symbol check also scans the published `MatrixDesktop.dll` IL for the host's
 startup-failure, surface-close, wallpaper single-instance and takeover, WebView2
 process-failure, session-end, camera-permission, mouse-hook and tray Start with
 Windows wiring. It follows the surface-close, renderer-failure, rebuild-backoff
-and wallpaper-ownership decisions, and a renderer reload's reset of the
-suspended flag, along every IL path with chosen inputs, so the
+and wallpaper-ownership decisions, a renderer reload's reset of the
+suspended flag, and `WndProc` for every message id from 0 to 0xFFFF, which
+must set the session-end flag only while `WM_QUERYENDSESSION` is dispatched,
+along every IL path with chosen inputs, so the
 check still fails when a call survives behind an inverted condition or a
-constant argument. Version parity runs
+constant argument. Each WebView2 initialisation must await the helper that
+clears a saved camera denial before it navigates, and that helper may reset a
+saved permission setting only on
+`HostPermissionPolicy.ForgetsSavedState`'s true answer: no reset may be
+reachable from the helper's entry, that answer's false edge or any exception
+handler. The walk follows normal flow only and does not enter the methods it
+calls, so these checks guard against regressions rather than model the CLR
+exactly. Version parity runs
 `tests\check-release-version.ps1`, which `release.yml` runs with the tag, and a
 separate check requires
 `release.yml` to run its tag and CI checks before its first `dotnet publish`. Both
@@ -281,7 +296,8 @@ one `LEAKED` line when the probe exits. The gate reads the native smoke's log an
 each tier 3 case's log for those lines, and for a `WARN` that processes the
 application started outlived the wait, and reports
 `UNCHECKED  WebView2 profile cleanup [<case>]` beside the case's own verdict,
-naming the first such line and the log. Profiles older than a day are pruned
+naming the `LEAKED` line when there is one, otherwise the first such `WARN`, and
+the log. Profiles older than a day are pruned
 when the probe starts. The optional
 donor input also exercises the imported manifest,
 glyph atlas and explicit sound-test action. Screenshots and reports under
@@ -330,6 +346,17 @@ web smoke, the Python cases under `tier 1: UC3D importer and WebGL smoke` and th
 tier 3 wallpaper, screensaver and configurator cases treat exit 2 without that
 line as a failure, because argparse usage errors and missing scripts also exit 2.
 
+A browser launch whose argv could not be read back (`tests\browser_launch.py`
+prints a line starting `DEGRADED`, because `TcpPortRandomizationWin` was not
+disabled or not verified) is reported as
+`UNCHECKED  browser launch verification [<case>]` beside that case's own
+verdict. The gate reads both logs of the headless web smoke and of every Python
+case under `tier 1: UC3D importer and WebGL smoke` for such lines, counting only
+unindented ones, so a degraded launch makes the gate exit 2 even when the suite
+passed, unless a check failed or a harness broke. When the web smoke fails a
+check or exits 3, the gate also reports its `UNVERIFIED` lines as
+`UNCHECKED  headless web smoke checks this environment cannot run`.
+
 `tests\web-smoke.py` gives a check a `HARNESS` verdict for only two causes: a
 smoke server that does not answer `HEAD /` (probed directly, never through a
 proxy), or a request to its own origin that failed with
@@ -345,6 +372,20 @@ stops on an exception. Its exit mapping is itself a checked case
 ("the exit code is 0 for a pass, 3 for harness errors alone and 1 for any
 FAIL"). The gate reports the web smoke's exit 3 as a `HARNESS` line, never a
 FAIL, and prints the smoke's `HARNESS` lines beside its ok and FAIL lines.
+
+A Python case under `tier 1: UC3D importer and WebGL smoke` that exits 3 counts
+as a harness error (`HARNESS`; the gate ends in exit 3 unless a check failed)
+only when it printed a line starting `HARNESS ERROR` and no line starting
+`FAIL`. A bare exit 3, or an exit 3 beside a FAIL line, is a FAIL, because a
+FAIL outranks a harness error; its detail names the first FAIL line and the
+`HARNESS ERROR` line. `uc3d-browser.py`, `uc3d-audio-browser.py`,
+`uc3d-calibration.py`, `matrix-playback-browser.py` and `zmatrix-browser.py`
+print `HARNESS ERROR: <script>: <error>` and exit 3 when a browser launch fails
+argument verification (`browser_launch.LaunchArgumentsError`). The ZMatrix
+configurator suite prints `HARNESS ERROR` with the error's type and message on
+its error output and exits 3. It can do so after earlier checks printed FAIL
+lines, when its last check's full Chromium launch fails verification, and the
+gate then reports a FAIL.
 
 ## Interactive and hardware checks
 

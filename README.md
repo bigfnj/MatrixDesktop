@@ -342,7 +342,7 @@ older presets keep Legacy controls.
 
 Preset storage is portable-first:
 
-- If the publish folder accepts new files and any presets file already there can be saved over (not read-only, and the permissions let you write its data and attributes and either delete it or delete files in its folder), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`. If those permissions cannot be read, name only a file server's own accounts (as on some network shares), or the folder cannot be asked whether you may delete its files, the check falls back to the older write-attributes test for that file and the configurator logs an INFO line naming it.
+- If the publish folder accepts new files and any presets file already there can be saved over (not read-only, its permissions refuse none of Read permissions, Write attributes or writing its data, and they do not refuse both Delete on the file and Delete subfolders and files on its folder), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`. When those permissions cannot be read or checked in full, as can happen on a network share, the file is not refused for the part left unchecked: the older write-attributes test decides for that file, and the configurator logs an INFO line naming it.
 - Otherwise presets are stored under `%LOCALAPPDATA%\MatrixDesktop\Configurator\`. When that hides a presets file beside the configurator, the configurator logs a warning naming both paths.
 
 In framework-dependent publish output, run:
@@ -609,7 +609,7 @@ publish (NETSDK1176), so it never produced an executable.
 the build and publish, rather than maintaining a second build sequence.
 
 Verification needs the pinned .NET SDK, PowerShell 7, Node.js, and Python with
-Playwright, Pillow and Chromium installed. PowerShell 7 is also used by a child probe
+Playwright, Pillow and the full Chromium build installed. PowerShell 7 is also used by a child probe
 when the gate starts under Windows PowerShell 5.1. Full runtime checks additionally
 use ImageMagick and an interactive Windows desktop session.
 
@@ -666,7 +666,9 @@ the configurator suite checks the same for the configurator page. The headless s
 requests a favicon, so both checks need the full Chromium build
 (`python -m playwright install chromium`, which CI's install step runs). With only the
 headless shell installed, each prints UNVERIFIED instead of failing, and a suite with
-nothing else wrong exits 2, which the gate reports as UNCHECKED.
+nothing else wrong exits 2, which the gate reports as UNCHECKED. When the web smoke also
+fails a check or exits 3, the gate still lists its UNVERIFIED lines as UNCHECKED beside
+that verdict.
 
 If Playwright is not installed for the interpreter it finds, the gate reports the smoke as
 not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific
@@ -679,12 +681,19 @@ helper reads the one `--disable-features` switch Playwright passes from a probe 
 Windows, and checks the launched browser's own command line for exactly one such switch
 holding that feature and every token Playwright passed. Each verified launch prints an
 argument-verification PASS line. A launch that fails verification raises
-`LaunchArgumentsError`, which the web smoke and the configurator suite report as a harness
-error (exit 3). A launch whose browser command line cannot be read prints a DEGRADED line
-and goes ahead unverified. When the probe's command line cannot be read, the helper has no
+`LaunchArgumentsError`, which the web smoke, the configurator suite, `uc3d-browser.py`,
+`uc3d-audio-browser.py`, `uc3d-calibration.py`, `matrix-playback-browser.py` and
+`zmatrix-browser.py` report as a harness error (exit 3), never a product failure. The last
+five print `HARNESS ERROR: <script>: <error>`; the configurator suite prints its own
+`HARNESS ERROR` line, and the web smoke a `harness error` line, on their error output. A
+launch whose browser command line cannot be read prints a DEGRADED line and goes ahead
+unverified. When the probe's command line cannot be read, the helper has no
 Playwright switch to merge with, so the suite runs on its own arguments without the
 helper's `TcpPortRandomizationWin` disable; when only the real launch's command line cannot
-be read, the disable was requested but is not confirmed. Tier 1 runs
+be read, the disable was requested but is not confirmed. The gate reads every unindented
+DEGRADED line in the web smoke's and each tier-1 Python case's output and reports it as
+UNCHECKED `browser launch verification [<case>]` beside that case's own verdict, so a
+degraded launch keeps the gate from passing even when the suite passed. Tier 1 runs
 `tests/browser-launch.test.py`, which proves the check names each wrong shape of the switch.
 
 The helper turns the feature off because of the smoke's one captured stall: 72 ms after
@@ -707,7 +716,9 @@ unexpected HTTP status of 400 or more or a failed request to another origin. The
 records the smoke's exit 3 as a HARNESS line of its own, which quotes up to three of the
 smoke's HARNESS lines or, when the smoke printed none, as after a failed launch verification,
 the first three non-blank lines of its error output. The gate ends in exit 3 unless another
-check failed.
+check failed. For the other tier-1 Python cases, an exit 3 is a HARNESS line too, but only
+when the case printed a line starting `HARNESS ERROR` and no line starting `FAIL`. A bare
+exit 3, or an exit 3 beside a FAIL line, is a FAIL, because a FAIL outranks a harness error.
 
 Installed Edge can exercise both UC3D rendering backends with
 `python tests\uc3d-browser.py --renderer both --channel msedge`. Original-control
@@ -729,11 +740,13 @@ Exit codes:
 | --- | --- |
 | `0` | Pass. Every selected check ran and passed. |
 | `1` | A real failure. At least one check failed and the cause is in the code or the repo. |
-| `2` | Something could not be verified: a check was skipped for lack of an interactive session, missing build output, or similar, or a GUI check came back black, frozen or failing after the app asked WebView2 to suspend its renderer for display-off, a locked or disconnected session or sleep. Not a pass; the not-verified list is printed. |
-| `3` | A harness error: the gate itself broke, or a check's own harness broke (the web smoke's exit 3) and no check failed. Treat as a harness bug, not a product failure. |
+| `2` | Something could not be verified: a check was skipped for lack of an interactive session, missing build output, or similar, or a GUI check came back black, frozen or failing after the app asked WebView2 to suspend its renderer for display-off, a locked or disconnected session or sleep. A browser launch that printed DEGRADED counts here too. Not a pass; the not-verified list is printed. |
+| `3` | A harness error: the gate itself broke, or a check's own harness broke (the web smoke's exit 3, or another tier-1 Python case's exit 3 with its `HARNESS ERROR` line and no FAIL line) and no check failed. Never a verdict on the application: treat it as a harness bug, not a product failure. |
 
 Exit 2 is worth treating as acceptable in CI while still printing the not-verified list,
-which is what `ci.yml` does. Exit 1 and 3 fail the build.
+which is what `ci.yml` does: one warning annotation names every UNCHECKED item, and each
+item's reason stays in the job log on the line below its UNCHECKED line. Exit 1 and 3 fail
+the build.
 
 ## Notes / prerequisites
 
