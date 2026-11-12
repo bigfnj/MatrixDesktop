@@ -198,7 +198,11 @@ internal static class HostWiring
                 "MainForm must mark the WM_QUERYENDSESSION dispatch in its own WndProc");
         });
         // R2-04. The guard's claim has its own tests; this proves the action the takeover listener
-        // posts claims the request, and branches on the claim, before it ends the context.
+        // posts claims the request, and branches on the claim, before it ends the context. AUD-72:
+        // that action is the only way a running wallpaper reacts to a newer launch, and the guard's
+        // own tests pass a callback of their own, so it must end this context itself
+        // (ApplicationContext.ExitThread, not Application.ExitThread). R3-20: the one owner of the
+        // claimed branch; the withdrawn branch is R3-04's check in VerifyDecisions.
         failures += Run($"the wallpaper claims a takeover request before it exits: {path}", () =>
         {
             var listeners = DelegateTargets(calls, functionLoads, "MatrixDesktop.MatrixApplicationContext::TakeWallpaperOwnership",
@@ -207,9 +211,9 @@ internal static class HostWiring
             var posted = DelegateTargets(calls, functionLoads, listeners[0], "System.Action::.ctor", "MatrixDesktop.MatrixApplicationContext/CoordinatorWindow::Post");
             Check.Equal(1, posted.Count, "the takeover listener must post one action to the UI thread: " + listeners[0]);
             var body = calls.Where(call => call.Caller == posted[0]).ToList();
-            var exit = body.FirstOrDefault(call => call.Callee.EndsWith("::ExitThread", StringComparison.Ordinal));
+            var exit = body.FirstOrDefault(call => call.Callee == ExitThread);
             var claim = body.FirstOrDefault(call => call.Callee == "MatrixDesktop.WallpaperInstanceGuard::ClaimTakeover");
-            Check.True(exit is not null, "witness: the posted takeover action must be able to end the context: " + posted[0]);
+            Check.True(exit is not null, "the posted takeover action must end this context with ApplicationContext.ExitThread, or every newer launch waits out its bound and quits: " + posted[0]);
             Check.True(claim is not null && claim.Offset < exit!.Offset, "the posted takeover action must claim the request before ExitThread: " + posted[0]);
             Check.True(claim!.NextOpcode is 0x2C or 0x2D or 0x39 or 0x3A, $"the posted takeover action must branch on the claim (next opcode 0x{claim.NextOpcode:X2})");
         });
@@ -349,12 +353,15 @@ internal static class HostWiring
     private sealed record Step(string Name, long?[] Values, bool Store);
 
     private const string Context = "MatrixDesktop.MatrixApplicationContext::";
+    private const string Guard = "MatrixDesktop.WallpaperInstanceGuard::";
     private const string ExitThread = "System.Windows.Forms.ApplicationContext::ExitThread";
+    // The step a path ends with when its method returns a value; Values[0] is that value.
+    private const string Return = "(return)";
 
     private static int VerifyDecisions(string path)
     {
         Dictionary<string, List<Instruction>?> bodies;
-        Dictionary<string, long> actions, kinds;
+        Dictionary<string, long> actions, kinds, outcomes;
         try
         {
             using var stream = File.OpenRead(path);
@@ -363,6 +370,7 @@ internal static class HostWiring
             bodies = ReadBodies(pe, reader);
             actions = EnumValues(reader, "MatrixDesktop.RendererFailureAction");
             kinds = EnumValues(reader, "MatrixDesktop.RendererFailureKind");
+            outcomes = EnumValues(reader, "MatrixDesktop.WallpaperInstanceGuard/Outcome");
         }
         catch (Exception error)
         {
@@ -470,15 +478,49 @@ internal static class HostWiring
                     : "a renderer that has not stayed ready must keep the rebuild backoff") + ", got stores '" + string.Join("' or '", stored) + "'");
             }
         });
-        // AUD-72. ListenForTakeover's callback is the only way a running wallpaper reacts to a
-        // newer launch, and the guard's own tests pass a callback of their own.
-        failures += Run($"the takeover callback ends this wallpaper: {path}", () =>
+        // R3-04. TakeWallpaperOwnership walked with the guard's Result pinned to each Outcome the
+        // enum defines. A launch that timed out or was superseded must end (ExitThread, false) and
+        // never listen: a superseded one that went on built a second tray and surface with no scope
+        // mutex (AUD-72). One that acquired or took over must listen for a newer launch; one whose
+        // guard is unavailable runs unguarded.
+        failures += Run($"TakeWallpaperOwnership ends a launch that did not take ownership and listens on one that did: {path}", () =>
         {
-            var code = Body(bodies, Context + "TakeWallpaperOwnership");
-            var listen = code.FindIndex(instruction => IsCall(instruction) && instruction.Name == "MatrixDesktop.WallpaperInstanceGuard::ListenForTakeover");
-            var callback = code.Take(Math.Max(listen, 0)).LastOrDefault(instruction => instruction.Code == OpCodes.Ldftn)?.Name;
-            Check.True(callback is not null, "witness: the scan must see the callback TakeWallpaperOwnership hands to ListenForTakeover");
-            Check.True(Leads(bodies, callback!, ExitThread, depth: 3), "the takeover callback must end this wallpaper, or every newer launch waits out its bound and quits: " + callback);
+            Check.True(outcomes.Keys.Order().SequenceEqual(["Acquired", "Superseded", "TimedOut", "TookOver", "Unavailable"]),
+                "witness: WallpaperInstanceGuard.Outcome must be Acquired, TookOver, TimedOut, Unavailable and Superseded: " + string.Join(", ", outcomes.Keys));
+            var wrong = new List<string>();
+            foreach (var (outcome, value) in outcomes)
+            {
+                var expected = outcome switch { "TimedOut" or "Superseded" => "exit return 0", "Unavailable" => "return 1", _ => "listen return 1" };
+                var seen = Paths(Body(bodies, Context + "TakeWallpaperOwnership"), new() { [Guard + "get_Result"] = value }).Select(steps => string.Join(" ", new[]
+                {
+                    steps.Any(step => !step.Store && step.Name == ExitThread) ? "exit" : null,
+                    steps.Any(step => !step.Store && step.Name == Guard + "ListenForTakeover") ? "listen" : null,
+                    "return " + (steps.LastOrDefault(step => step.Name == Return)?.Values[0]?.ToString() ?? "?"),
+                }.OfType<string>())).Distinct().ToList();
+                if (seen is not [var only] || only != expected)
+                    wrong.Add($"{outcome}: expected '{expected}', got '{string.Join("' or '", seen)}'");
+            }
+            Check.True(wrong.Count == 0, "TakeWallpaperOwnership must end a timed-out or superseded launch without listening, and listen on one that took ownership: "
+                + string.Join("; ", wrong));
+        });
+        // R3-04. ListenForTakeover fires once, and a false claim (the newcomer withdrew at its
+        // bound) is reachable after every timed-out newcomer, so the withdrawn branch must listen
+        // again with a callback that posts OnTakeoverRequested; without it every later launch waits
+        // out its bound. The claimed branch is the R2-04 check's.
+        failures += Run($"a withdrawn takeover request keeps this wallpaper listening: {path}", () =>
+        {
+            var code = Body(bodies, Context + "OnTakeoverRequested");
+            var paths = Paths(code, new() { [Context + "_exiting"] = 0, [Context + "_instance"] = 1, [Guard + "ClaimTakeover"] = 0 });
+            var listened = paths.Count(steps => steps.Any(step => !step.Store && step.Name == Guard + "ListenForTakeover"));
+            var exited = paths.Count(steps => steps.Any(step => !step.Store && step.Name == ExitThread));
+            Check.True(paths.Count > 0 && listened == paths.Count && exited == 0,
+                $"a withdrawn takeover request must listen again and keep this wallpaper: {paths.Count} paths, {listened} listen, {exited} exit");
+            var listen = code.FindIndex(instruction => IsCall(instruction) && instruction.Name == Guard + "ListenForTakeover");
+            var callback = code.Take(listen).LastOrDefault(instruction => instruction.Code == OpCodes.Ldftn)?.Name;
+            var posts = callback is null || !bodies.TryGetValue(callback, out var built) || built is null ? [] : built;
+            Check.True(posts.Any(instruction => instruction.Code == OpCodes.Ldftn && instruction.Name == Context + "OnTakeoverRequested")
+                && posts.Any(instruction => IsCall(instruction) && instruction.Name == "MatrixDesktop.MatrixApplicationContext/CoordinatorWindow::Post"),
+                "the renewed listener must post OnTakeoverRequested to the UI thread again: " + callback);
         });
         failures += Run($"a wallpaper launch that did not take ownership stops before its tray: {path}", () =>
         {
@@ -513,16 +555,6 @@ internal static class HostWiring
     private static List<Instruction> Body(Dictionary<string, List<Instruction>?> bodies, string method) =>
         bodies.TryGetValue(method, out var code) ? code ?? throw new InvalidOperationException("the scan found more than one " + method)
             : throw new InvalidOperationException("the scan found no " + method);
-
-    // True when method, a closure it builds or a MatrixDesktop method it calls, within depth steps, calls callee.
-    private static bool Leads(Dictionary<string, List<Instruction>?> bodies, string method, string callee, int depth)
-    {
-        if (!bodies.TryGetValue(method, out var code) || code is null) return false;
-        if (code.Any(instruction => IsCall(instruction) && instruction.Name == callee)) return true;
-        return depth > 1 && code.Where(instruction => (IsCall(instruction) || instruction.Code == OpCodes.Ldftn) && instruction.Name != method
-                && instruction.Name!.StartsWith("MatrixDesktop.", StringComparison.Ordinal))
-            .Select(instruction => instruction.Name!).Distinct().ToList().Any(next => Leads(bodies, next, callee, depth - 1));
-    }
 
     private static Dictionary<string, long> EnumValues(MetadataReader reader, string typeName)
     {
@@ -562,6 +594,7 @@ internal static class HostWiring
                 long? Pop() { var top = stack[^1]; stack.RemoveAt(stack.Count - 1); return top; }
                 long? Fact() => instruction.Name is not null && facts.TryGetValue(instruction.Name, out var known) ? known : null;
                 void Fork(int target) => work.Push((at[target], new List<long?>(stack), new Dictionary<long, long?>(locals), new List<Step>(steps)));
+                if (op == OpCodes.Ret && stack.Count > 0) steps.Add(new Step(Return, [stack[^1]], Store: false));
                 if (op == OpCodes.Ret || op == OpCodes.Throw || op == OpCodes.Rethrow || op == OpCodes.Endfinally) { done.Add(steps); break; }
                 if (op == OpCodes.Switch)
                 {
