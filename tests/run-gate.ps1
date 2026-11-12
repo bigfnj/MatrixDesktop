@@ -737,6 +737,7 @@ try {
     if (-not $py) {
         Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
         Test-Unchecked 'native smoke process lifecycle' 'Python with Playwright is unavailable'
+        Test-Unchecked 'web smoke verdict for a check this environment cannot run' 'Python with Playwright is unavailable'
         Test-Unchecked 'screensaver foreground wait and ownership' 'Python is unavailable'
         Test-Unchecked 'browser launch keeps Playwright defaults and disables TcpPortRandomizationWin' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
@@ -750,6 +751,8 @@ try {
         foreach ($case in @(
             @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
             @{ Name = 'native smoke process lifecycle'; Script = 'tests\test_native_smoke.py'; Arguments = '' },
+            # R3-16: a browser build that is not installed makes web-smoke.py's check UNVERIFIED, exit 2, not a FAIL.
+            @{ Name = 'web smoke verdict for a check this environment cannot run'; Script = 'tests\test_web_smoke_verdict.py'; Arguments = '' },
             @{ Name = 'screensaver foreground wait and ownership'; Script = 'tests\screensaver-focus.test.py'; Arguments = '' },
             # Every Chromium the suites below launch goes through tests\browser_launch.py; this proves
             # its merged --disable-features verification passes a good launch and names each bad one.
