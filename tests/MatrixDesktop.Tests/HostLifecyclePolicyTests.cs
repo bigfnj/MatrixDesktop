@@ -21,7 +21,133 @@ internal static class HostLifecyclePolicyTests
         ("Host answers a session-end query without tearing down its renderer", SessionEndQuery),
         ("Host wallpaper guard withdraws a request the holder had not claimed by the newcomer's deadline", WallpaperTakeoverWithdrawn),
         ("Host wallpaper guard lets the newer of two overlapping launches win", WallpaperNewerOfTwoWins),
+        ("Host wallpaper guard gives the newest launch the claimed bound when the holder already claimed an older request", WallpaperNewestAfterClaim),
+        ("Host wallpaper guard withdraws a newer request that replaced an unclaimed one at its deadline", WallpaperNewestAfterUnclaimed),
     ];
+
+    // R3-09. A request posted after the holder claimed an older one overwrote the claim, so the
+    // newest newcomer withdrew at its bound and showed the 'did not exit' dialog while the
+    // committed holder still left, and no wallpaper remained. The holder here claims the older
+    // request and then tears down for 1.5 s after the newest one starts, past its 1 s bound.
+    private static void WallpaperNewestAfterClaim()
+    {
+        for (var trial = 0; trial < 5; trial++)
+        {
+            var scope = "test-" + Guid.NewGuid().ToString("N");
+            using var holding = new ManualResetEventSlim();
+            using var claimedOlder = new ManualResetEventSlim();
+            using var newestStarting = new ManualResetEventSlim();
+            WallpaperInstanceGuard.Outcome older = default, newest = default;
+            var holderClaimed = false;
+            long releasingAt = 0, newestDoneAt = 0;
+            var holder = new Thread(() =>
+            {
+                using var held = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                using var asked = new ManualResetEventSlim();
+                held.ListenForTakeover(asked.Set);
+                holding.Set();
+                if (!asked.Wait(TimeSpan.FromSeconds(10)) || !(holderClaimed = held.ClaimTakeover())) return;
+                claimedOlder.Set();
+                // A claimed holder is committed to leave; its teardown outlasts the newest bound.
+                if (newestStarting.Wait(TimeSpan.FromSeconds(10))) Thread.Sleep(1500);
+                Volatile.Write(ref releasingAt, Environment.TickCount64);
+            }) { IsBackground = true };
+            holder.Start();
+            Check.True(holding.Wait(TimeSpan.FromSeconds(10)), $"the holder must acquire (trial {trial})");
+            var first = new Thread(() =>
+            {
+                using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                older = guard.Result;
+            }) { IsBackground = true };
+            var second = new Thread(() =>
+            {
+                newestStarting.Set();
+                using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                newest = guard.Result;
+                Volatile.Write(ref newestDoneAt, Environment.TickCount64);
+            }) { IsBackground = true };
+            first.Start();
+            Check.True(claimedOlder.Wait(TimeSpan.FromSeconds(10)), $"the holder must claim the older request (trial {trial})");
+            second.Start();
+            Check.True(first.Join(TimeSpan.FromSeconds(15)) && second.Join(TimeSpan.FromSeconds(15)) && holder.Join(TimeSpan.FromSeconds(15)), $"all three launches must finish (trial {trial})");
+            Check.True(holderClaimed, $"the holder must have claimed a request (trial {trial})");
+            Check.Equal(WallpaperInstanceGuard.Outcome.TookOver, newest, $"the newest launch must get the claimed holder's second bound and take over, not give up while it leaves (trial {trial})");
+            Check.Equal(WallpaperInstanceGuard.Outcome.Superseded, older, $"the older newcomer whose request was claimed must stop quietly (trial {trial})");
+            Check.True(Volatile.Read(ref releasingAt) <= Volatile.Read(ref newestDoneAt), $"the newest launch must finish only after the claimed holder released (trial {trial})");
+        }
+    }
+
+    // R3-09, the other branch. Only a claimed request passes its Claimed bit to the newer request
+    // that replaces it. A newest launch that replaced an unclaimed request must still withdraw at
+    // its own deadline (R2-04), so a holder that reaches the request after that keeps the desktop.
+    // The holder here is asked by the older newcomer, never claims on the signal, and reaches the
+    // request 1.5 s after the newest starts: past its 1 s bound, inside the second bound a carried
+    // bit would wrongly give it.
+    private static void WallpaperNewestAfterUnclaimed()
+    {
+        for (var trial = 0; trial < 5; trial++)
+        {
+            var scope = "test-" + Guid.NewGuid().ToString("N");
+            using var holding = new ManualResetEventSlim();
+            using var asked = new ManualResetEventSlim();
+            using var newestStarting = new ManualResetEventSlim();
+            using var decided = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            WallpaperInstanceGuard.Outcome older = default, newest = default;
+            var claimed = true;
+            var holder = new Thread(() =>
+            {
+                using var held = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                held.ListenForTakeover(asked.Set);
+                holding.Set();
+                if (newestStarting.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    Thread.Sleep(1500);
+                    claimed = held.ClaimTakeover();
+                }
+                decided.Set();
+                release.Wait(TimeSpan.FromSeconds(20));
+            }) { IsBackground = true };
+            holder.Start();
+            var holderDone = false;
+            try
+            {
+                Check.True(holding.Wait(TimeSpan.FromSeconds(10)), $"the holder must acquire (trial {trial})");
+                var first = new Thread(() =>
+                {
+                    using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                    older = guard.Result;
+                }) { IsBackground = true };
+                var second = new Thread(() =>
+                {
+                    newestStarting.Set();
+                    using var guard = WallpaperInstanceGuard.Acquire(scope, TimeSpan.FromSeconds(1));
+                    newest = guard.Result;
+                }) { IsBackground = true };
+                first.Start();
+                Check.True(asked.Wait(TimeSpan.FromSeconds(10)), $"the older newcomer must ask the holder to exit (trial {trial})");
+                second.Start();
+                Check.True(first.Join(TimeSpan.FromSeconds(15)) && second.Join(TimeSpan.FromSeconds(15)), $"both newcomers must finish (trial {trial})");
+                Check.True(decided.Wait(TimeSpan.FromSeconds(10)), $"the holder must reach the request (trial {trial})");
+                Check.False(claimed, $"a newest launch that replaced an unclaimed request must withdraw it at its own deadline, so a holder reaching it later keeps the desktop (trial {trial})");
+                Check.Equal(WallpaperInstanceGuard.Outcome.TimedOut, newest, $"the newest launch must give up at its bound when the holder had not claimed (trial {trial})");
+                Check.Equal(WallpaperInstanceGuard.Outcome.Superseded, older, $"the older newcomer must stop quietly once the newest asked (trial {trial})");
+                using var scopeMutex = Mutex.OpenExisting($"Local\\MatrixDesktop.Wallpaper.{scope}");
+                var taken = false;
+                try { taken = scopeMutex.WaitOne(0); } catch (AbandonedMutexException) { taken = true; }
+                if (taken) scopeMutex.ReleaseMutex();
+                Check.False(taken, $"the holder must still own the scope after both newcomers gave up (trial {trial})");
+            }
+            finally
+            {
+                // Let a holder still waiting for the newest launch finish too, before the events go.
+                newestStarting.Set();
+                release.Set();
+                holderDone = holder.Join(TimeSpan.FromSeconds(10));
+            }
+            Check.True(holderDone, $"the holder must finish (trial {trial})");
+        }
+    }
 
     // R2-04. A newcomer that timed out left its request standing, so a holder slower than the
     // bound exited afterwards anyway and left no wallpaper at all.
