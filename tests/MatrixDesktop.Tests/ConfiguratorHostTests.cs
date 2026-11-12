@@ -15,13 +15,15 @@ internal static class ConfiguratorHostTests
         ("Every request the page posts is one the configurator host serves, and Rename keeps the saved values", PageRequestsAreServed),
     ];
 
-    // R2-13. No test project compiles ConfiguratorForm, so a deleted request arm passed every
-    // suite while each Rename on the page failed with "Unknown configurator request". The form
-    // routes every request through ConfiguratorRequests.DispatchAsync, which this sends each
-    // requestHost name in app.js through (the window's own requests reach a stand-in): none may
-    // be refused, and renamePreset, answered from the store alone, must keep the saved values,
-    // the working draft and the selection on a fixture store. Killing mutations: delete the
-    // renamePreset arm, or drop a name from FormTypes; this case fails naming it.
+    // R2-13, R3-08. No test project compiles ConfiguratorForm, so a deleted request arm passed
+    // every suite while each Rename on the page failed with "Unknown configurator request". The
+    // form hands every request to ConfiguratorRequests.DispatchAsync, whose switch is the only
+    // one: this sends each requestHost name in app.js through it to a recording window. None may
+    // be refused; each must reach the IConfiguratorWindow method of its own name with the page's
+    // payload, and every such method must be one the page posts; renamePreset, answered from the
+    // store alone, must keep the saved values, the working draft and the selection on a fixture
+    // store. Killing mutations: delete the renamePreset or deletePreset arm (fails naming it),
+    // or point savePreset at DeletePreset (fails naming both).
     private static void PageRequestsAreServed()
     {
         using var resource = typeof(ConfiguratorHostTests).Assembly.GetManifestResourceStream("app.js.txt")
@@ -41,22 +43,33 @@ internal static class ConfiguratorHostTests
             var state = new ConfiguratorState { SelectedPresetId = "night", LastDraft = new System.Text.Json.Nodes.JsonObject { ["effect"] = "stripes" } };
             state.UserPresets.Add(new UserPreset { Id = "night", Name = "Night", Values = new System.Text.Json.Nodes.JsonObject { ["effect"] = "palette" } });
             using var payload = System.Text.Json.JsonDocument.Parse("""{"id":"night","name":"Midnight"}""");
+            var builder = new CommandBuilder(ArgumentCatalog.Create());
+            var window = new RecordingConfiguratorWindow();
             var refused = new List<string>();
-            var byForm = new List<string>();
+            var misrouted = new List<string>();
             foreach (var name in names)
             {
+                window.Calls.Clear();
+                window.Payloads.Clear();
                 try
                 {
-                    ConfiguratorRequests.DispatchAsync(name, payload.RootElement, state, storage,
-                        (type, _) => { byForm.Add(type); return Task.FromResult<object?>(null); }).GetAwaiter().GetResult();
+                    ConfiguratorRequests.DispatchAsync(name, payload.RootElement, state, storage, builder, window).GetAwaiter().GetResult();
                 }
                 catch (InvalidOperationException error) when (error.Message.StartsWith("Unknown configurator request", StringComparison.Ordinal))
                 {
                     refused.Add(name);
+                    continue;
                 }
+                var reached = string.Join(" ", window.Calls);
+                if (reached != (name == "renamePreset" ? string.Empty : name)) misrouted.Add($"{name} reached '{reached}'");
+                if (window.Payloads.Any(sent => sent != payload.RootElement.GetRawText())) misrouted.Add($"{name} lost its payload: {string.Join(" ", window.Payloads)}");
             }
             Check.True(refused.Count == 0, "the configurator host refuses requests the page posts: " + string.Join(", ", refused));
-            Check.False(byForm.Contains("renamePreset"), "renamePreset is answered from the store, not by the window");
+            Check.True(misrouted.Count == 0, "each request must reach the window method of its own name, and renamePreset none: " + string.Join("; ", misrouted));
+            var windowRequests = typeof(IConfiguratorWindow).GetMethods().Select(method => RecordingConfiguratorWindow.RequestName(method.Name)).Order(StringComparer.Ordinal).ToList();
+            Check.True(windowRequests.Count >= 18, "the window must serve the page's own requests: " + string.Join(", ", windowRequests));
+            Check.Equal(string.Join(" ", windowRequests), string.Join(" ", names.Where(name => name != "renamePreset").Order(StringComparer.Ordinal)),
+                "every window method must be a request the page posts, and every page request but renamePreset a window method");
             var stored = storage.Load();
             var preset = stored.UserPresets.Single();
             Check.Equal("Midnight", preset.Name, "Rename through the host's dispatch must store the new name");
@@ -189,4 +202,42 @@ internal static class ConfiguratorHostTests
         Check.True(process.WaitForExit(20_000), "the guard probe process must finish");
         return process.ExitCode;
     }
+}
+
+// Stands in for ConfiguratorForm: records the request each method serves (its own name, first
+// letter lowered, Async dropped), the payload it was handed and Use for screensaver's argv.
+internal sealed class RecordingConfiguratorWindow : IConfiguratorWindow
+{
+    public List<string> Calls { get; } = [];
+    public List<string> Payloads { get; } = [];
+    public string[]? ScreensaverArguments { get; private set; }
+
+    public static string RequestName(string method)
+        => char.ToLowerInvariant(method[0]) + (method.EndsWith("Async", StringComparison.Ordinal) ? method[1..^5] : method[1..]);
+
+    private object Record(System.Text.Json.JsonElement? payload = null, [System.Runtime.CompilerServices.CallerMemberName] string method = "")
+    {
+        Calls.Add(RequestName(method));
+        if (payload is { } sent) Payloads.Add(sent.ValueKind == System.Text.Json.JsonValueKind.Undefined ? "(none)" : sent.GetRawText());
+        return new { served = method };
+    }
+
+    public object LoadState() => Record();
+    public object SaveDraft(System.Text.Json.JsonElement payload) => Record(payload);
+    public object SavePreset(System.Text.Json.JsonElement payload) => Record(payload);
+    public object DeletePreset(System.Text.Json.JsonElement payload) => Record(payload);
+    public object BuildCommand(System.Text.Json.JsonElement payload) => Record(payload);
+    public Task<object> BuildWebQueryAsync(System.Text.Json.JsonElement payload) => Task.FromResult(Record(payload));
+    public object ImportCommand(System.Text.Json.JsonElement payload) => Record(payload);
+    public object BrowseConfig() => Record();
+    public object UseScreensaver(string[] screensaverArguments) { ScreensaverArguments = screensaverArguments; return Record(); }
+    public object RestoreScreensaver() => Record();
+    public object RandomizeDraft(System.Text.Json.JsonElement payload) => Record(payload);
+    public object BrowseMedia(System.Text.Json.JsonElement payload) => Record(payload);
+    public object CopyCommand(System.Text.Json.JsonElement payload) => Record(payload);
+    public object TestCommand(System.Text.Json.JsonElement payload) => Record(payload);
+    public object StopTest() => Record();
+    public object SetTheme(System.Text.Json.JsonElement payload) => Record(payload);
+    public object ExportPowerShell(System.Text.Json.JsonElement payload) => Record(payload);
+    public object LoadHelp() => Record();
 }
