@@ -141,7 +141,7 @@ export async function createRuntime(canvas, options, backend) {
 // maximumDimension is the backend's texture/viewport limit for the canvas and render target.
 export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Infinity, environment = {}) {
   const clock = environment.clock ?? createPlaybackClock();
-  let frame = 0, dead = false, parked = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false;
+  let frame = 0, dead = false, parked = false, start = null, previous = -Infinity, elapsed = 0, lastDraw = null, reduced = false, presented = false;
   const requestedFps = Number(runtime.config.fps ?? 60);
   const fps = Number.isFinite(requestedFps) ? Math.max(0, Math.min(120, requestedFps)) : 60;
   const dispose = () => {
@@ -152,8 +152,11 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
   const tick = (now) => {
     if (dead) return;
     now = clock.seconds(now) * 1000;
-    // A paused host keeps the last frame on screen: park without requesting another frame.
-    if (clock.paused) { parked = true; return; }
+    // A paused host keeps the last presented frame on screen: park without requesting another
+    // frame. R3-01: a pause in force before any frame presented (it outlives a surface rebuild
+    // and a reload) draws one frame first, or the screen stays black for the whole pause.
+    const paused = clock.paused;
+    if (paused && presented) { parked = true; return; }
     if (start === null) start = now;
     if (fps === 0 || now - previous >= 1000 / fps - 0.5 || runtime.config.once) {
       const ratio = window.devicePixelRatio || 1;
@@ -165,14 +168,14 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
         // Do not simulate an entire sleep/lock interval on the first resumed frame.
         // Dropped time is intentional; active simulation resumes without catch-up debt.
         if (lastDraw !== null) elapsed += Math.min(1, Math.max(0, (now-lastDraw)/1000));
-        else if (runtime.config.once || fps === 0) elapsed = 10;
+        else if (runtime.config.once || fps === 0 || paused) elapsed = 10;
       } else elapsed = (now - start) / 1000;
       lastDraw = now;
       // A draw that returns false presented nothing: a lost context waits for its event.
       // Only a presented frame counts, as in ZMatrix; a throwing draw never reaches the count.
       try {
         runtime.diagnostics.ready = draw(runtime.update(elapsed, width, height), width, height) !== false;
-        if (runtime.diagnostics.ready) runtime.diagnostics.frames++;
+        if (runtime.diagnostics.ready) { runtime.diagnostics.frames++; presented = true; }
       }
       catch (error) { runtime.diagnostics.errors.push(error.message); console.error("UC3D render failed", error); showRenderFailure("UC3D", error); dispose(); return; }
       previous = now;
@@ -180,6 +183,7 @@ export function startLoop(canvas, runtime, draw, cleanup, maximumDimension = Inf
       // or explicit teardown, just as for the animated path, without scheduling a loop.
       if (runtime.config.once || fps === 0) return;
     }
+    if (paused) { parked = true; return; }
     frame = requestAnimationFrame(tick);
   };
   // The host's resume re-arms a parked loop once. The listener also runs on subscribing.

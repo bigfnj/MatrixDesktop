@@ -455,15 +455,22 @@ await test("shader time stays small over days and moves its origin only when the
 	const { gapMs, briefGapMs, softSeconds, hardSeconds, restartSeconds } = rebaseLimits;
 	const time = createShaderTime(), shifts = [];
 	time.onRebase((shift) => shifts.push(shift));
-	// hidden: the page reported a visibility change during the gap (js/hostPlayback.js unseenEpoch).
+	// hidden: the page reported a visibility change during the gap (js/hostPlayback.js unseenEpoch),
+	// and came back into view 16 ms before this frame (shownAt), as a lock without a pause does.
 	let wall = 1000, epoch = 0;
-	const frame = (seconds, gap = 16, hidden = false) => time.frame(seconds, (wall += gap), hidden ? ++epoch : epoch);
+	const frame = (seconds, gap = 16, hidden = false) => time.frame(seconds, (wall += gap), hidden ? ++epoch : epoch, wall - 16);
 	assert.equal(frame(0), 0);
 	assert.equal(frame(500, 2 * gapMs, true), 500, "time below the restart point must not move");
 	assert.equal(frame(1800, gapMs - 1000, true), 1800, "a pause under a minute must keep time continuous");
 	assert.deepEqual(shifts, []);
 	// R2-19: a visible host pause (manual, a fullscreen app, battery) keeps its frame on screen.
 	near(frame(1800.016, 2 * gapMs), 1800.016, "a visible pause of two minutes must keep time continuous", 1e-9);
+	assert.deepEqual(shifts, []);
+	// R3-02: a lock 30 s into a visible pause hides the page (epoch + 1), and the unlock shows the
+	// frozen frame again 10 s later while still paused (epoch + 2); the resume comes five minutes on.
+	const shown = wall + 40_000;
+	epoch += 2;
+	near(time.frame(1800.024, (wall += 340_000), epoch, shown), 1800.024, "a visible pause that spanned a lock must keep time continuous", 1e-9);
 	assert.deepEqual(shifts, []);
 	near(frame(1800.032, gapMs, true), restartSeconds, "a minute without frames (lock, display off, suspend) must restart shader time");
 	near(frame(1800.048), restartSeconds + 0.016, "time must stay continuous after a move", 1e-9);
@@ -667,6 +674,14 @@ let pendingFrame = null, lastFrame = null;
 // One document for every fake page: js/hostPlayback.js listens for visibilitychange on the
 // document it finds when first imported.
 const pageDocument = new Events();
+// A visibility change at a frame time: the fake frames use synthetic timestamps, and
+// js/hostPlayback.js stamps a change to visible (shownAt) with performance.now().
+const setVisibility = (state, at) => {
+	const now = performance.now;
+	pageDocument.visibilityState = state;
+	performance.now = () => at;
+	try { pageDocument.fire("visibilitychange"); } finally { performance.now = now; }
+};
 // js/hostPlayback.js adds its matrix-host-state listener to window once, when first imported,
 // and every case clears window's listeners, so keep that listener to pause the host (R2-24).
 let hostState = null;
@@ -828,10 +843,42 @@ await test("WebGPU Matrix renderer moves shader time only across a gap the page 
 		run.frame(16); run.frame(33);
 		run.frame(1_800_000);
 		near(seconds(), 1800, "a 30-minute gap with no visibility change (a visible host pause) must keep shader time continuous", 1);
-		pageDocument.fire("visibilitychange");
+		setVisibility("visible", 1_860_984);
 		run.frame(1_861_000);
 		near(seconds(), rebaseLimits.restartSeconds, "a minute the page spent hidden must restart shader time", 1e-3);
 	} finally { run.dispose(); }
+});
+
+await test("WebGPU Matrix renderer keeps shader time continuous after a visible pause that spanned a lock (R3-02)", async () => {
+	assert.equal(typeof hostState, "function", "js/hostPlayback.js no longer listens for matrix-host-state on window");
+	// The playback clock reads performance.now() on each host event, so stamp those at frame times too.
+	const host = (paused, at) => { const now = performance.now; performance.now = () => at; try { hostState({ detail: { paused } }); } finally { performance.now = now; } };
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1 });
+	try {
+		const seconds = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0]).map(([, data]) => new Float32Array(data)[0]).at(-1);
+		run.frame(16); run.frame(33);
+		run.frame(1_800_000);
+		const before = seconds();
+		assert(before > 1700, `shader time was ${before} s before the pause, below the restart point, so the check proved nothing`);
+		// A tray pause, a lock 30 s in, an unlock 10 s later that shows the frozen frame again while
+		// still paused (MainForm.SetHostPausedAsync), and the resume five minutes after that.
+		host(true, 1_800_010);
+		setVisibility("hidden", 1_830_000);
+		setVisibility("visible", 1_840_000);
+		host(false, 2_140_000);
+		run.frame(2_140_016);
+		near(seconds(), before + 0.026, "a visible pause that spanned a lock must keep shader time continuous", 1e-2);
+		// A lock with no other pause: the first frame follows the unlock's show, so it still restarts.
+		host(true, 2_140_100);
+		setVisibility("hidden", 2_140_200);
+		setVisibility("visible", 2_300_000);
+		host(false, 2_300_000);
+		run.frame(2_300_016);
+		near(seconds(), rebaseLimits.restartSeconds, "a lock with no other pause must still restart shader time", 1e-2);
+	} finally {
+		host(false, 2_400_000);
+		run.dispose();
+	}
 });
 
 await test("WebGPU Matrix renderer restarts shader time after a slow intro is done (R2-20)", async () => {
@@ -843,7 +890,7 @@ await test("WebGPU Matrix renderer restarts shader time after a slow intro is do
 		const seconds = () => run.device.writes.filter(([buffer]) => buffer === run.device.buffers[0]).map(([, data]) => new Float32Array(data)[0]).at(-1);
 		run.frame(16); run.frame(33);
 		run.frame(3_500_000);
-		pageDocument.fire("visibilitychange");
+		setVisibility("visible", 3_560_984);
 		run.frame(3_561_000);
 		near(seconds(), restartSeconds, "a move must restart shader time after the intro, where introSafeLimits puts it", 1e-2);
 	} finally { run.dispose(); }
@@ -890,6 +937,48 @@ await test("WebGPU Matrix renderer parks its frame loop through a host pause (R2
 		host(false);
 		run.dispose();
 		globalThis.requestAnimationFrame = request;
+	}
+});
+
+// R3-01: a visible pause outlives a surface rebuild and a reload, so it can be in force before the
+// first frame; parking then left the canvas black for the whole pause.
+await test("WebGPU Matrix renderer under a pause in force at load draws one frame, parks, and resumes (R3-01)", async () => {
+	assert.equal(typeof hostState, "function", "js/hostPlayback.js no longer listens for matrix-host-state on window");
+	const host = (paused) => hostState({ detail: { paused } });
+	host(true);
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "30" } });
+	try {
+		run.frame(16);
+		assert(run.device.renderPasses > 0, "a pause in force before the first frame must still render that frame");
+		assert.deepEqual([run.diagnostics.frames, run.diagnostics.ready], [1, true]);
+		assert.equal(pendingFrame, null, "after its first frame a paused renderer must park");
+		host(false);
+		assert.notEqual(pendingFrame, null, "a resume must request a frame");
+		// A pause that arrives with that frame still pending parks it: the first frame is on screen.
+		host(true);
+		const passes = run.device.renderPasses;
+		run.frame(33);
+		assert.deepEqual([run.diagnostics.frames, run.device.renderPasses, pendingFrame], [1, passes, null], "a paused frame after the first must draw nothing");
+		host(false);
+		run.frame(50);
+		assert.equal(run.diagnostics.frames, 2, "the frame after a resume must draw");
+		assert.notEqual(pendingFrame, null, "the resumed renderer must keep requesting frames");
+	} finally {
+		host(false);
+		run.dispose();
+	}
+	// Below 60 fps the first frame skips rendering and presents nothing, so a pause after it still draws one.
+	const skipped = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "30" } });
+	try {
+		skipped.frame(16);
+		assert.equal(skipped.device.renderPasses, 0, "witness: the first frame below 60 fps skips rendering");
+		host(true);
+		skipped.frame(33);
+		assert(skipped.device.renderPasses > 0, "a pause after a frame that skipped rendering must still render one");
+		assert.equal(pendingFrame, null, "and then park");
+	} finally {
+		host(false);
+		skipped.dispose();
 	}
 });
 

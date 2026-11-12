@@ -1,5 +1,5 @@
 import createCanvasSize from "../canvasSize.js";
-import { createPlaybackClock, subscribeHostPlayback, unseenEpoch } from "../hostPlayback.js";
+import { createPlaybackClock, subscribeHostPlayback, unseenEpoch, shownAt } from "../hostPlayback.js";
 import { createShaderTime, introSafeLimits } from "../shaderTime.js";
 import { structs } from "../../lib/gpu-buffer.js";
 import { makeUniformBuffer, makePipeline } from "./utils.js";
@@ -213,13 +213,17 @@ export default async (canvas, config) => {
 	const canvasSize = [0, 0];
 	sizeTracker = createCanvasSize(canvas, config.resolution, device.limits.maxTextureDimension2D);
 
+	// R3-01: until a frame has presented, a paused frame draws once and then parks, or a pause
+	// in force at load (it outlives a surface rebuild and a reload) leaves the canvas black.
+	let presented = false;
 	const renderLoop = (now) => {
 		if (cleanedUp || deviceLost) return;
 		const wall = now;
 		now = clock.seconds(now) * 1000;
 		// R2-24: a visible host pause (AUD-06) parks the loop instead of waking it at the display
 		// rate; the resume listener below requests the next frame.
-		if (clock.paused) { parked = true; return; }
+		const paused = clock.paused;
+		if (paused && presented) { parked = true; return; }
 		if (isNaN(start)) {
 			start = now;
 		}
@@ -228,7 +232,7 @@ export default async (canvas, config) => {
 			last = start;
 		}
 
-		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame;
+		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame || paused;
 		if (shouldRender) {
 			while (now - targetFrameTimeMilliseconds > last) {
 				last += targetFrameTimeMilliseconds;
@@ -249,7 +253,7 @@ export default async (canvas, config) => {
 			device.queue.copyExternalImageToTexture({ source: cameraCanvas }, { texture: cameraTex }, cameraSize);
 		}
 
-		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: shaderTime.frame((now - start) / 1000, wall, unseenEpoch()), frames }));
+		device.queue.writeBuffer(timeBuffer, 0, timeUniforms.toBuffer({ seconds: shaderTime.frame((now - start) / 1000, wall, unseenEpoch(), shownAt()), frames }));
 		frames++;
 
 		const encoder = device.createCommandEncoder();
@@ -258,8 +262,12 @@ export default async (canvas, config) => {
 		// encoder.copyTextureToTexture({ texture: outputs?.primary }, { texture: canvasContext.getCurrentTexture() }, canvasSize);
 		device.queue.submit([encoder.finish()]);
 		diagnostics.frames = frames; diagnostics.ready = !gpuFailed; diagnostics.simulationTime = (now - start) / 1000;
+		// A frame that skipped rendering (below 60 fps) shows the last output, empty at first.
+		if (shouldRender && !gpuFailed) presented = true;
 
-		if (!singleFrame) {
+		if (paused && !singleFrame) {
+			parked = true;
+		} else if (!singleFrame) {
 			frameRequest = requestAnimationFrame(renderLoop);
 		} else {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.

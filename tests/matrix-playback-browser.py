@@ -1,4 +1,5 @@
-"""Verify the original Matrix renderer survives an initial and mid-run pause."""
+"""Verify the original Matrix renderer survives an initial and mid-run pause, and that every scene
+shows a frame under a pause in force at load."""
 import argparse
 import functools
 import http.server
@@ -144,6 +145,144 @@ def capture(page):
     return Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
 
 
+HELD_BOOTSTRAP = """(() => {
+  // Hold the renderer before it starts, so the test can pause the loaded page first.
+  window.matrixHostBootstrapReady = new Promise(resolve => { window.__resolveNativeBootstrap = resolve; });
+})();"""
+
+
+def check_initial_pause_frame(page, label):
+    """A pause already in force at the first frame must leave that frame on screen (R3-01).
+
+    A manual, fullscreen-app or battery pause leaves the page visible (AUD-06), and it outlives
+    a surface rebuild and a reload, so a renderer that parked before its first frame showed
+    black for the whole pause. It draws one frame and parks: one frame, and no other.
+    """
+    try:
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.frames >= 1", timeout=10000)
+    except Exception:
+        image = capture(page)
+        frames = page.evaluate("window.matrixRuntimeDiagnostics?.frames")
+        raise AssertionError(f"{label}: a renderer paused before its first frame drew {frames} frames in 10 s, "
+                             f"so the paused screen is blank (canvas stddev {max(ImageStat.Stat(image).stddev):.2f})") from None
+    page.wait_for_timeout(750)
+    held = capture(page)
+    frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+    stddev = max(ImageStat.Stat(held).stddev)
+    assert frames == 1, f"{label}: a renderer paused before its first frame drew {frames} frames, not one"
+    assert stddev > 3, f"{label}: the frame drawn under a pause in force at load is a uniform fill (stddev {stddev:.2f})"
+    page.wait_for_timeout(250)
+    later = page.evaluate("matrixRuntimeDiagnostics.frames")
+    assert later == 1, f"{label}: a paused renderer kept drawing after its first frame ({later} frames)"
+    assert ImageChops.difference(held, capture(page)).getbbox() is None, f"{label}: the paused first frame changed"
+    return stddev
+
+
+def check_scene_initial_pause(context, port, backend):
+    """Every scene keeps a frame on screen under a pause that arrives before its first frame (R3-01).
+
+    In the host's order: the host pauses at NavigationCompleted (MainForm.SetHostPausedAsync),
+    and the renderer starts after the native bootstrap and its own assets. The Matrix case runs
+    at 30 fps, where a frame may skip rendering; the UC3D and ZMatrix frames are warmed as once
+    warms them, so the frozen frame is not empty.
+    """
+    # The host's own script: renderer modules not yet imported read the state when they load.
+    host = "paused => { window.matrixHostPlaybackState = { paused }; window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: window.matrixHostPlaybackState })); }"
+    results = {}
+    for label, query in (
+        ("original Matrix at 30 fps", f"renderer={backend}&suppressWarnings=true&resolution=1&fps=30"),
+        ("UC3D", f"scene=uc3d&renderer={backend}&suppressWarnings=true&resolution=1"),
+        ("ZMatrix", f"scene=zmatrix&renderer={backend}&suppressWarnings=true&resolution=1&fps=30"
+                    "&zmMaxStream=80&zmRefreshTime=20&zmBackgroundMode=color&zmBackgroundColor=9,18,27"),
+    ):
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.add_init_script(HELD_BOOTSTRAP)
+        try:
+            page.goto(f"http://127.0.0.1:{port}/index.html?{query}", wait_until="load")
+            page.evaluate(host, True)
+            page.evaluate("window.__resolveNativeBootstrap()")
+            results[label] = check_initial_pause_frame(page, f"{label} {backend}")
+            assert page.evaluate("matrixRuntimeDiagnostics.backend") == backend, f"{label}: requested backend silently fell back"
+            page.evaluate(host, False)
+            try:
+                page.wait_for_function("matrixRuntimeDiagnostics.frames > 3", timeout=10000)
+            except Exception:
+                raise AssertionError(f"{label} {backend}: the renderer did not draw again within 10 s of a resume") from None
+            page.evaluate("matrixRuntimeDiagnostics.dispose()")
+            page.wait_for_timeout(100)
+            assert not errors, errors
+        finally:
+            page.close()
+    return results
+
+
+SKIP_THEN_PAUSE = """(() => {
+  // Pause in the task of the renderer's first frame, right after it, so the second frame is
+  // the first paused one. Every frame callback is wrapped; the first to end with one frame
+  // counted sends the host's pause.
+  const request = window.requestAnimationFrame.bind(window);
+  window.__pausedAtFrames = null;
+  window.requestAnimationFrame = callback => request(time => {
+    try { callback(time); }
+    finally {
+      if (window.__pausedAtFrames === null && window.matrixRuntimeDiagnostics?.frames === 1) {
+        window.__pausedAtFrames = window.matrixRuntimeDiagnostics.frames;
+        window.matrixHostPlaybackState = { paused: true };
+        window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: window.matrixHostPlaybackState }));
+      }
+    }
+  });
+})();"""
+
+
+def check_regl_skip_then_pause(context, port):
+    """A pause after a first frame that skipped rendering must still show a frame (R3-01).
+
+    Below 60 fps the first frame only starts the frame clock and shows the pipeline's empty
+    output, so nothing is on screen yet. A host pause that lands before the next frame must
+    not find the loop marked as presented: that frame renders once and parks, or the wallpaper
+    stays black under the pause. The WebGPU node case 'a pause after a frame that skipped
+    rendering must still render one' is the same contract.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(SKIP_THEN_PAUSE)
+    host = "paused => { window.matrixHostPlaybackState = { paused }; window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: window.matrixHostPlaybackState })); }"
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&fps=30", wait_until="load")
+        try:
+            page.wait_for_function("window.__pausedAtFrames !== null", timeout=30000)
+        except Exception:
+            raise AssertionError("the renderer never drew its first frame, so the skip-then-pause check proved nothing") from None
+        page.wait_for_timeout(1000)
+        held = capture(page)
+        state = page.evaluate("({ pausedAt: window.__pausedAtFrames, frames: matrixRuntimeDiagnostics.frames, backend: matrixRuntimeDiagnostics.backend })")
+        stddev = max(ImageStat.Stat(held).stddev)
+        assert state["backend"] == "regl", "requested backend silently fell back"
+        assert state["pausedAt"] == 1, f"the pause landed after frame {state['pausedAt']}, not the first, so the check proved nothing"
+        assert state["frames"] == 2, (f"original Matrix at 30 fps regl: a pause after a first frame that skipped rendering left "
+                                      f"{state['frames']} frames, not 2, and the paused screen shows canvas stddev {stddev:.2f}")
+        assert stddev > 3, f"original Matrix at 30 fps regl: the frame drawn under a pause after a skipped first frame is a uniform fill (stddev {stddev:.2f})"
+        page.wait_for_timeout(250)
+        later = page.evaluate("matrixRuntimeDiagnostics.frames")
+        assert later == 2, f"a paused renderer kept drawing after its frozen frame ({later} frames)"
+        assert ImageChops.difference(held, capture(page)).getbbox() is None, "the frozen frame after a skipped first frame changed"
+        page.evaluate(host, False)
+        try:
+            page.wait_for_function("matrixRuntimeDiagnostics.frames > 4", timeout=10000)
+        except Exception:
+            raise AssertionError("the renderer did not draw again within 10 s of a resume after a skip-then-pause") from None
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+        return stddev
+    finally:
+        page.close()
+
+
 def lose_regl_context(page):
     """Lose the running renderer's WebGL context; it must clear ready and report the loss once.
 
@@ -279,6 +418,8 @@ def check_regl_visible_pause(context, port):
     Lock, display off and suspend hide the WebView first, which the page sees as a visibility
     change; a synthetic visibilitychange stands in for that here. animationSpeed is low, so
     the rain barely moves between the frozen and resumed screenshots unless time jumps.
+    R3-02: a lock early in a visible pause hides the page, and the unlock shows the frozen
+    frame again while still paused, so the resume a minute later must not move time either.
     """
     page = context.new_page()
     errors = []
@@ -293,29 +434,34 @@ def check_regl_visible_pause(context, port):
             page.wait_for_timeout(60)
         page.wait_for_timeout(500)
         results = {}
-        for name, pause_ms, hidden in (("control", 30_000, False), ("visible", 61_000, False), ("hidden", 61_000, True)):
+        for name, pause_ms, lock in (("control", 30_000, None), ("visible", 61_000, None), ("spanned", 61_000, "start"), ("hidden", 61_000, "end")):
             page.evaluate(host, True)
             page.wait_for_timeout(400)
             frames = page.evaluate("matrixRuntimeDiagnostics.frames")
             frozen = capture(page)
+            if lock == "start":  # hidden, then shown again 10 s later, still paused
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 10000; document.dispatchEvent(new Event('visibilitychange'))")
             page.evaluate(f"window.__clockOffset += {pause_ms}")
-            if hidden:
-                page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
             page.wait_for_timeout(200)
             assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames, f"the {name} pause kept drawing, so the check proved nothing"
             before = page.evaluate("window.__shaderUniforms.time.at(-1)")
+            if lock == "end":  # the page comes back into view just before the resumed frame, as at unlock
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
             page.evaluate(host, False)
             page.wait_for_function("previous => matrixRuntimeDiagnostics.frames > previous + 2", arg=frames, timeout=10000)
             page.wait_for_timeout(120)
             after = page.evaluate("window.__shaderUniforms.time.at(-1)")
             results[name] = {"changed": changed_fraction(frozen, capture(page)), "before": before, "after": after}
-        control, visible, hidden = results["control"], results["visible"], results["hidden"]
+        control, visible, spanned, hidden = results["control"], results["visible"], results["spanned"], results["hidden"]
         assert control["before"] > 900, f"shader time was {control['before']} s before the pauses, below the restart point, so the check proved nothing"
         # Natural motion between the two screenshots grows with load (a 30 s control measured
         # 0.5% to 4.3%); a move of shader time changes about 27% of pixels.
         assert visible["changed"] <= 3 * control["changed"] + 0.05, (
             f"a visible 61 s pause changed {visible['changed']:.2%} of pixels on resume against {control['changed']:.2%} after a 30 s pause")
         assert visible["after"] > visible["before"], f"a visible 61 s pause moved shader time from {visible['before']} s to {visible['after']} s"
+        assert spanned["changed"] <= 3 * control["changed"] + 0.05, (
+            f"a visible pause that spanned a lock changed {spanned['changed']:.2%} of pixels on resume against {control['changed']:.2%} after a 30 s pause")
+        assert spanned["after"] > spanned["before"], f"a visible pause that spanned a lock moved shader time from {spanned['before']} s to {spanned['after']} s"
         assert hidden["after"] < 650, f"a hidden 61 s pause kept shader time at {hidden['after']} s instead of restarting it"
         assert hidden["changed"] >= 0.1, (
             f"a hidden 61 s pause changed only {hidden['changed']:.2%} of pixels on resume, so this check cannot see a move of shader time")
@@ -353,7 +499,8 @@ def check_regl_intro_rebase(context, port):
         page.wait_for_timeout(1500)
         before = page.evaluate("window.__shaderUniforms.time.at(-1)")
         bright_before = bright_fraction(capture(page))
-        page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 61000")
+        # Hidden, and shown again at the end of the gap, as an unlock brings it back (R3-02).
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange')); window.__clockOffset += 61000; document.dispatchEvent(new Event('visibilitychange'))")
         page.wait_for_timeout(1500)
         after = page.evaluate("window.__shaderUniforms.time.at(-1)")
         bright_after = bright_fraction(capture(page))
@@ -548,18 +695,18 @@ def main():
                         continue
                     page.wait_for_function("window.matrixRuntimeDiagnostics?.initialized", timeout=30000)
                     assert page.evaluate("matrixRuntimeDiagnostics.backend") == backend, "requested backend silently fell back"
-                    page.wait_for_timeout(750)
-                    assert page.evaluate("matrixRuntimeDiagnostics.frames") == 0, "initially paused renderer executed GPU passes"
+                    check_initial_pause_frame(page, f"original Matrix {backend}")
                     page.evaluate("window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:false}}))")
                     page.wait_for_function("matrixRuntimeDiagnostics.frames > 8")
                     if backend == "regl":
                         ticks = page.evaluate("window.__matrixTickUniforms")
                         assert ticks and ticks[0] == 0 and 1 in ticks, f"GPU shader tick skipped initial state after pause: {ticks[:12]}"
                     assert max(ImageStat.Stat(capture(page)).stddev) > 3, "resumed original Matrix rendered a uniform frame"
-                    page.evaluate("window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:true}}))")
+                    # The count is read in the pause's own task, so the frame already requested
+                    # when the pause arrives must park too, and not draw once more.
+                    frames = page.evaluate("() => { window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:true}})); return matrixRuntimeDiagnostics.frames; }")
                     page.wait_for_timeout(50)
                     paused = capture(page)
-                    frames = page.evaluate("matrixRuntimeDiagnostics.frames")
                     page.wait_for_timeout(250)
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames, "paused original Matrix continued drawing"
                     assert ImageChops.difference(paused, capture(page)).getbbox() is None, "paused original Matrix changed pixels"
@@ -572,7 +719,10 @@ def main():
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames
                     # AUD-55: checked after teardown, so errors raised by disposal are seen too.
                     assert not errors, errors
-                    print(f"PASS original Matrix {backend}: initial pause, shader initialization, mid-run pause, resume and disposal", flush=True)
+                    print(f"PASS original Matrix {backend}: initial pause shows one frame, shader initialization, mid-run pause, resume and disposal", flush=True)
+                    scenes = check_scene_initial_pause(context, server.server_port, backend)
+                    print(f"PASS {backend} initial host pause shows one frozen frame in every scene, then resumes (canvas stddev "
+                          + ", ".join(f"{label} {stddev:.1f}" for label, stddev in scenes.items()) + ")", flush=True)
                     if backend == "regl":
                         failed = context.new_page()
                         failed.add_init_script("window.matrixHostBootstrapReady=new Promise((resolve,reject)=>{window.__rejectNativeBootstrap=reject;});")
@@ -588,8 +738,8 @@ def main():
                         check_regl_time_rebase(context, server.server_port)
                         print("PASS original Matrix regl time uniform stays small after four days of page time and tick keeps counting", flush=True)
                         pauses = check_regl_visible_pause(context, server.server_port)
-                        print("PASS original Matrix regl visible 61 s pause resumes where it froze ({:.2%} of pixels changed, 30 s control {:.2%}); a hidden one still restarts shader time ({:.2%})".format(
-                            pauses["visible"]["changed"], pauses["control"]["changed"], pauses["hidden"]["changed"]), flush=True)
+                        print("PASS original Matrix regl visible 61 s pause resumes where it froze ({:.2%} of pixels changed, 30 s control {:.2%}), so does one that spanned a lock ({:.2%}); a hidden one still restarts shader time ({:.2%})".format(
+                            pauses["visible"]["changed"], pauses["control"]["changed"], pauses["spanned"]["changed"], pauses["hidden"]["changed"]), flush=True)
                         intro = check_regl_intro_rebase(context, server.server_port)
                         print("PASS original Matrix regl shader time move with skipIntro=false restarts after the intro ({:.0f} s to {:.0f} s, {:.2%} to {:.2%} bright pixels)".format(
                             intro["before"], intro["after"], intro["brightBefore"], intro["brightAfter"]), flush=True)
@@ -599,6 +749,8 @@ def main():
                         print("PASS Plug me in survives a recovery reload and a navigation to the startup query; a changed configuration still shows the software rendering notice", flush=True)
                         playing = check_regl_paused_loop(context, server.server_port)
                         print(f"PASS original Matrix regl parks its frame loop through a visible host pause (0 frame requests in 2 s against {playing} in 1 s of play) and resumes", flush=True)
+                        skipped = check_regl_skip_then_pause(context, server.server_port)
+                        print(f"PASS original Matrix regl at 30 fps: a pause after a first frame that skipped rendering still draws one frozen frame (canvas stddev {skipped:.1f}), then resumes", flush=True)
                 finally:
                     context.close()
             browser.close()
