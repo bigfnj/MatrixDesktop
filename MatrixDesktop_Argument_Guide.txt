@@ -24,12 +24,12 @@ Companion configurator
 ----------------------
 MatrixDesktopConfigurator.exe provides a standalone UI for building these
 arguments, saving named presets, copying the generated command, and launching a
-safe windowed test run. It stores presets beside the executable when that
-folder accepts new files and any presets file already there is writable, and
-otherwise under LocalAppData\MatrixDesktop\Configurator. If it falls back while
-a presets file sits beside the executable, that file's presets are not shown,
-and LocalAppData\MatrixDesktop\MatrixDesktop.log records a warning naming both
-paths.
+safe windowed test run. It stores presets beside the executable, or under
+LocalAppData\MatrixDesktop\Configurator when the executable's folder refuses a
+new file, or when a presets file already there is read-only or its permissions
+deny Write. If it falls back while a presets file sits beside the executable,
+that file's presets are not shown, and a warning naming both paths goes to
+LocalAppData\MatrixDesktop\MatrixDesktop.log.
 
 
 1) How to pass arguments
@@ -48,7 +48,7 @@ of a JSON string literal that holds the value. Copy commands use it when a text
 value contains %, !, $ or a backtick, which cmd, batch files or PowerShell can
 expand even inside double quotes. Other text values are copied without json64
 encoding, in double quotes when they contain whitespace, a double quote, an
-apostrophe or any of the characters & | < > ^ ( ) ; { } @ #.
+apostrophe (') or any of the characters & | < > ^ ( ) ; { } @ #.
 Windows command lines are limited to 32767 UTF-16 characters; an oversized
 generated command or direct launch reports that limit instead of truncating it.
 
