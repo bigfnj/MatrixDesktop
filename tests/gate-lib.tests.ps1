@@ -844,6 +844,29 @@ try {
         )
     }
 
+    Invoke-TestCase 'R3-14 the parity parser splits a property list on commas too, so no property hides behind an ignored one' {
+        # (a) over the real release.yml. A pwsh step ends the statement at an unquoted ';', so
+        # ',' is the separator a release.yml edit would use; dotnet SDK 10.0.302 under pwsh
+        # read both appended properties. Before R3-14 each became part of the ignored value.
+        $gateArguments = @(Get-GatePublishArguments)
+        $lines = @([IO.File]::ReadAllText((Join-Path (Split-Path -Parent $here) '.github\workflows\release.yml')) -split "`r?`n")
+        $dir = @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*-p:PublishDir=\S+ `$') { $i } })
+        $last = @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*-p:FileVersion=[^`]*$') { $i } })
+        Assert-Equal '2,2' "$($dir.Count),$($last.Count)" 'release.yml has two publish steps with a PublishDir line and a last FileVersion line'
+        function Edit-Line { param([int]$Index, [string]$Text) $copy = $lines.Clone(); $copy[$Index] = $Text; return ($copy -join "`n") }
+        Assert-ParityVariants -GateArguments $gateArguments -Variants @(
+            @{ Label = ',PublishReadyToRun=false after step 2''s FileVersion'; Text = (Edit-Line $last[1] ($lines[$last[1]] + ',PublishReadyToRun=false'))
+                Want = 'publish step 2 (release.yml line *) sets PublishReadyToRun=false; the gate publishes with PublishReadyToRun=true' }
+            @{ Label = ',InvariantGlobalization=true after step 1''s PublishDir'; Text = (Edit-Line $dir[0] ($lines[$dir[0]] -replace ' `$', ',InvariantGlobalization=true `'))
+                Want = 'publish step 1 (release.yml line *) sets InvariantGlobalization=true, which only release.yml sets*' }
+        )
+        # (b) a compared property after a comma behind an ignored one counts as set.
+        $form = @(1, 2 | ForEach-Object { "      - name: Publish $_`n        run: dotnet publish P$_.csproj -c Release -r win-x64 --no-self-contained -p:Version=1.0.0,PublishReadyToRun=true -p:DebugType=embedded" }) -join "`n"
+        Assert-ParityVariants -GateArguments @('-c', 'Release', '-r', 'win-x64', '--no-self-contained', '-p:PublishReadyToRun=true', '-p:DebugType=embedded') -Variants @(
+            @{ Label = '-p:Version=1.0.0,PublishReadyToRun=true'; Text = $form; Want = @() }
+        )
+    }
+
     # ------------------------------------------------------------ R2-36 render verdict and display hold
 
     Invoke-TestCase 'R2-36 (a) a black frame is UNCHECKED when the case logged a display-off suspension, and a FAIL without one' {

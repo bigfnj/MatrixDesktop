@@ -579,7 +579,10 @@ function Split-PublishArguments {
 }
 
 # The MSBuild global properties a 'dotnet publish' argument list sets, the last value winning
-# as in MSBuild: -p:, -property:, --property:, /p: and /property: (several per flag with ';'),
+# as in MSBuild: -p:, -property:, --property:, /p: and /property: (several per flag, split on
+# ';' and on ',' as MSBuild splits them; in a pwsh step an unquoted ';' ends the statement, so
+# ',' is the separator that works there, and splitting on ';' alone hid a property behind an
+# ignored one such as FileVersion, R3-14),
 # -c and -r and their long forms, --self-contained [true|false] or --sc, --no-self-contained.
 # --nologo and -v change console output only. The first bare token is the project. Anything
 # else lands in Unknown, so a switch this function was never taught fails the parity check.
@@ -592,7 +595,7 @@ function ConvertTo-PublishProperties {
         $token = $Arguments[$i]
         $m = [regex]::Match($token, '^(?:--?property|-p|/p(?:roperty)?):(?<list>.*)$', 'IgnoreCase')
         if ($m.Success) {
-            foreach ($pair in @($m.Groups['list'].Value -split ';' | Where-Object { $_ })) {
+            foreach ($pair in @($m.Groups['list'].Value -split '[;,]' | Where-Object { $_ })) {
                 $eq = $pair.IndexOf('=')
                 if ($eq -lt 1) { $unknown += $token; continue }
                 $properties[$pair.Substring(0, $eq).Trim()] = $pair.Substring($eq + 1).Trim()
