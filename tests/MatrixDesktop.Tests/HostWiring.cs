@@ -91,25 +91,6 @@ internal static class HostWiring
             Check.True(release!.Offset < close!.Offset && release.Offset < rebuild!.Offset,
                 "RecoverSurface must release the hook before it closes the old surface and builds the new one");
         });
-        // R2-51. HostPermissionPolicy has its own native test; this proves MainForm asks it about
-        // every permission request and applies the answer it gives.
-        failures += Run($"MainForm answers permission requests through HostPermissionPolicy: {path}", () =>
-        {
-            const string core = "Microsoft.Web.WebView2.Core.CoreWebView2::";
-            const string request = "Microsoft.Web.WebView2.Core.CoreWebView2PermissionRequestedEventArgs::";
-            const string decide = "MatrixDesktop.HostPermissionPolicy::Decide";
-            Check.True(calls.Any(call => call.Caller.StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal) && call.Callee == core + "add_PermissionRequested"),
-                "MainForm must subscribe CoreWebView2.PermissionRequested");
-            Check.True(calls.Any(call => call.Caller == "MatrixDesktop.MainForm::DetachWebViewHandlers" && call.Callee == core + "remove_PermissionRequested"),
-                "MainForm must detach its PermissionRequested handler with the others");
-            var handlers = calls.Where(call => call.Callee == decide).Select(call => call.Caller).Distinct().ToArray();
-            Check.True(handlers.Length == 1 && handlers[0].StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal),
-                "exactly one MainForm handler must ask HostPermissionPolicy.Decide: " + string.Join("; ", handlers));
-            var body = calls.Where(call => call.Caller == handlers[0]).ToList();
-            var asked = body.First(call => call.Callee == decide);
-            foreach (var setter in new[] { "set_State", "set_SavesInProfile", "set_Handled" })
-                Check.True(body.Any(call => call.Callee == request + setter && call.Offset > asked.Offset), $"the handler must apply the policy's answer through {setter}");
-        });
         // R2-52. HostPermissionPolicy.ForgetsSavedState has its own native test; this proves each
         // WebView2 initialisation clears what it picks, to the Default state, before navigating.
         failures += Run($"MainForm clears a saved camera denial before it navigates: {path}", () =>
@@ -397,13 +378,7 @@ internal static class HostWiring
         // AUD-07. MainForm's ProcessFailed handler: its kind mapping, its marshal and its guard.
         failures += Run($"the ProcessFailed handler raises RendererFailed with the same-named kind, on the UI thread, unless shutting down: {path}", () =>
         {
-            // The nearest ldftn before the store; a lambda that captures nothing is cached first.
-            var handlers = new List<string>();
-            foreach (var code in bodies.Values.OfType<List<Instruction>>())
-                for (var index = 1; index < code.Count; index++)
-                    if (code[index].Code == OpCodes.Stfld && code[index].Name == "MatrixDesktop.MainForm::_processFailedHandler"
-                        && code.Take(index).TakeLast(8).LastOrDefault(instruction => instruction.Code == OpCodes.Ldftn) is { Name: string built })
-                        handlers.Add(built);
+            var handlers = BuiltFrom(bodies, "MatrixDesktop.MainForm::_processFailedHandler");
             Check.Equal(1, handlers.Count, "witness: the scan must find the one method _processFailedHandler is built from");
             var handler = Body(bodies, handlers[0]);
             var raises = handler.Select((instruction, index) => (instruction, index)).Where(item => item.instruction.Code == OpCodes.Ldftn
@@ -436,6 +411,40 @@ internal static class HostWiring
                     wrong.Add(name + " -> " + string.Join("/", stored.Select(got => kinds.FirstOrDefault(kind => kind.Value == got).Key ?? got?.ToString() ?? "unknown")));
             }
             Check.True(wrong.Count == 0, "each WebView2 failure kind must reach RendererFailurePolicy as the same-named kind, any other as Other: " + string.Join("; ", wrong));
+        });
+        // R2-51, R3-22. HostPermissionPolicy has its own native test; this walks MainForm's
+        // PermissionRequested handler with the answer pinned. Decide must be asked about this
+        // form's _hostKind; an unhandled answer must leave the request to WebView2's prompt; a
+        // handled one must apply the answer's State and SavesInProfile, not constants. Handled is
+        // not required: on a CoreWebView2-level handler it decides nothing.
+        failures += Run($"MainForm answers permission requests through HostPermissionPolicy: {path}", () =>
+        {
+            const string core = "Microsoft.Web.WebView2.Core.CoreWebView2::";
+            const string request = "Microsoft.Web.WebView2.Core.CoreWebView2PermissionRequestedEventArgs::";
+            const string answer = "MatrixDesktop.HostPermissionPolicy/Answer::";
+            const string decide = "MatrixDesktop.HostPermissionPolicy::Decide";
+            bool Calls(string caller, string callee) => bodies.GetValueOrDefault(caller)?.Any(instruction => IsCall(instruction) && instruction.Name == callee) == true;
+            Check.True(bodies.Keys.Any(caller => caller.StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal) && Calls(caller, core + "add_PermissionRequested")),
+                "MainForm must subscribe CoreWebView2.PermissionRequested");
+            Check.True(Calls("MatrixDesktop.MainForm::DetachWebViewHandlers", core + "remove_PermissionRequested"), "MainForm must detach its PermissionRequested handler with the others");
+            var handlers = BuiltFrom(bodies, "MatrixDesktop.MainForm::_permissionRequestedHandler");
+            Check.Equal(1, handlers.Count, "witness: the scan must find the one method _permissionRequestedHandler is built from");
+            var handler = Body(bodies, handlers[0]);
+            // Sentinels no constant in the handler could stand in for.
+            const long host = 77, state = 78, saves = 79;
+            var asked = Paths(handler, new() { ["MatrixDesktop.MainForm::_hostKind"] = host })
+                .Select(steps => steps.FirstOrDefault(step => !step.Store && step.Name == decide)).ToList();
+            Check.True(asked.Count > 0 && asked.All(step => step is { Values: [long kind, _] } && kind == host),
+                $"the handler must ask HostPermissionPolicy.Decide about this form's _hostKind ({host}), got "
+                + string.Join(", ", asked.Select(step => step is null ? "no Decide" : step.Values[0]?.ToString() ?? "?")));
+            string Applied(List<Step> steps) => string.Join(" ", steps.Where(step => !step.Store && step.Name is request + "set_State" or request + "set_SavesInProfile")
+                .Select(step => step.Name[request.Length..] + "=" + (step.Values[1]?.ToString() ?? "?")));
+            var unhandled = Paths(handler, new() { [answer + "get_Handled"] = 0 }).Select(Applied).Distinct().ToList();
+            Check.True(unhandled is [""], "an answer that is not Handled must leave the request to WebView2's prompt, got '" + string.Join("' or '", unhandled) + "'");
+            var handled = Paths(handler, new() { [answer + "get_Handled"] = 1, [answer + "get_State"] = state, [answer + "get_SavesInProfile"] = saves })
+                .Select(Applied).Distinct().ToList();
+            Check.True(handled is [var only] && only == $"set_State={state} set_SavesInProfile={saves}",
+                $"a Handled answer must set the request's State and SavesInProfile to the answer's ({state}, {saves}), got '" + string.Join("' or '", handled) + "'");
         });
         failures += Run($"OnRendererFailed reloads, rebuilds or exits as RendererFailurePolicy decides: {path}", () =>
         {
@@ -550,6 +559,19 @@ internal static class HostWiring
         if (steps.Any(step => step.Store && step.Name == Context + "_retryAt")) parts.Add("rebuild");
         if (!parts.Any(part => part is "close" or "exit" or "rebuild")) parts.Add("keep");
         return string.Join(" ", parts);
+    }
+
+    // The method a delegate field is built from: the nearest ldftn before each store of it. A
+    // lambda that captures nothing is cached first, in MainForm/<>c.
+    private static List<string> BuiltFrom(Dictionary<string, List<Instruction>?> bodies, string field)
+    {
+        var built = new List<string>();
+        foreach (var code in bodies.Values.OfType<List<Instruction>>())
+            for (var index = 1; index < code.Count; index++)
+                if (code[index].Code == OpCodes.Stfld && code[index].Name == field
+                    && code.Take(index).TakeLast(8).LastOrDefault(instruction => instruction.Code == OpCodes.Ldftn) is { Name: string method })
+                    built.Add(method);
+        return built;
     }
 
     private static List<Instruction> Body(Dictionary<string, List<Instruction>?> bodies, string method) =>
