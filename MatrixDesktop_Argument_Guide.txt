@@ -27,9 +27,14 @@ arguments, saving named presets, copying the generated command, and launching a
 safe windowed test run. It stores presets beside the executable, or under
 LocalAppData\MatrixDesktop\Configurator when the executable's folder refuses a
 new file, or when a presets file already there is read-only or its permissions
-deny Write. If it falls back while a presets file sits beside the executable,
-that file's presets are not shown, and a warning naming both paths goes to
-LocalAppData\MatrixDesktop\MatrixDesktop.log.
+refuse any of Read permissions, Write attributes or writing its data, or refuse
+both Delete on the file and Delete subfolders and files on its folder (Save
+replaces the file, which needs one of those two). If it falls back while a
+presets file sits beside the executable, that file's presets are not shown, and
+a warning naming both paths goes to
+LocalAppData\MatrixDesktop\MatrixDesktop.log. When those permissions cannot be
+read or checked in full, as can happen on a network share, the file is not
+refused for the part left unchecked, and that log gets an INFO line naming it.
 
 
 1) How to pass arguments
@@ -46,9 +51,11 @@ In the flag and key=value forms below, the text arguments url, pictureDirectory,
 donorDirectory and musicFile also accept json64: followed by the same encoding
 of a JSON string literal that holds the value. Copy commands use it when a text
 value contains %, !, $ or a backtick, which cmd, batch files or PowerShell can
-expand even inside double quotes. Other text values are copied without json64
-encoding, in double quotes when they contain whitespace, a double quote, an
-apostrophe (') or any of the characters & | < > ^ ( ) ; { } @ #.
+expand even inside double quotes, or a typographic double quote (U+201C, U+201D
+or U+201E), which ends a PowerShell double-quoted string. Other text values are
+copied without json64 encoding, in double quotes when they contain whitespace, a
+double quote, an apostrophe (' or a typographic one, U+2018 to U+201B) or any of
+the characters & | < > ^ ( ) ; { } @ #.
 Windows command lines are limited to 32767 UTF-16 characters; an oversized
 generated command or direct launch reports that limit instead of truncating it.
 
