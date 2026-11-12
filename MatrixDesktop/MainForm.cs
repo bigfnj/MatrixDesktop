@@ -866,7 +866,9 @@ public sealed class MainForm : Form
         if (_isShuttingDown || IsDisposed || _webView.CoreWebView2 is null) return false;
         // Before the first navigation there is nothing to reload: that navigation is still ahead.
         if (_rendererTarget is null) return true;
-        try { _webView.CoreWebView2.Navigate(_rendererTarget); return true; }
+        // R3-25: Navigate resumes a suspended WebView, so the flag must not outlive it, or the
+        // suspend the reconcile after this reload asks for is skipped. Visibility stays as it is.
+        try { _webView.CoreWebView2.Navigate(_rendererTarget); _isSuspended = false; return true; }
         catch (Exception error) { Shared.Logger.Warn($"Could not reload the renderer: {error.Message}"); return false; }
     }
 
