@@ -10,6 +10,8 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 from playwright.sync_api import sync_playwright
 
+import browser_launch
+
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "MatrixDesktop" / "web"
 
@@ -527,7 +529,7 @@ def main():
         with sync_playwright() as playwright:
             flags = ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist"]
             flags += ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] if args.renderer == "regl" and not args.channel else ["--use-angle=d3d11"]
-            browser = playwright.chromium.launch(channel=args.channel, args=flags)
+            browser = browser_launch.launch(playwright.chromium, channel=args.channel, args=flags)
             for backend in (["regl", "webgpu"] if args.renderer == "both" else [args.renderer]):
                 context = browser.new_context(viewport={"width": 640, "height": 360}, device_scale_factor=1)
                 page = context.new_page()

@@ -15,6 +15,8 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 from playwright.sync_api import sync_playwright
 
+import browser_launch
+
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "MatrixDesktop" / "web"
 OUTPUT = ROOT / "artifacts" / "uc3d"
@@ -146,7 +148,7 @@ def main():
             # The CI lane deliberately exercises WebGL through the CPU implementation;
             # the host both-backend lane uses the installed driver and asserts WebGPU.
             flags += ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] if args.renderer == "regl" and not args.channel else ["--use-angle=d3d11"]
-            browser = pw.chromium.launch(channel=args.channel, args=flags)
+            browser = browser_launch.launch(pw.chromium, channel=args.channel, args=flags)
             # Its own failure record, so neither this check nor the backend loop masks the other.
             if args.renderer in ("regl", "both"):
                 try:

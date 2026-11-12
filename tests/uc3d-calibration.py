@@ -17,6 +17,8 @@ from urllib.parse import urlencode, urlsplit
 from PIL import Image, ImageChops
 from playwright.sync_api import sync_playwright
 
+import browser_launch
+
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "MatrixDesktop" / "web"
 
@@ -109,7 +111,7 @@ def main():
             # A hidden adapter means nothing should touch the GPU, so it gets SwiftShader too.
             software = (args.renderer == "regl" or HIDE_ADAPTER) and not args.channel
             flags += ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] if software else ["--use-angle=d3d11"]
-            browser = pw.chromium.launch(channel=args.channel, args=flags)
+            browser = browser_launch.launch(pw.chromium, channel=args.channel, args=flags)
             for backend in (["regl", "webgpu"] if args.renderer == "both" else [args.renderer]):
                 context = browser.new_context(device_scale_factor=1)
                 if HIDE_ADAPTER:

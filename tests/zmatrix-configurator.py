@@ -18,6 +18,8 @@ from collections import Counter
 from urllib.parse import quote
 from pathlib import Path
 
+import browser_launch
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGURATOR = ROOT / "MatrixDesktopConfigurator" / "configurator"
 HARNESS = ROOT / "tests" / "MatrixDesktop.Tests" / "bin" / "Release" / "MatrixDesktop.Tests.exe"
@@ -1476,7 +1478,9 @@ def main():
     try:
         with sync_playwright() as playwright:
             try:
-                browser = playwright.chromium.launch()
+                browser = browser_launch.launch(playwright.chromium)
+            except browser_launch.LaunchArgumentsError:
+                raise
             except Exception as error:
                 print("UNVERIFIED: Chromium unavailable:", error)
                 return 2

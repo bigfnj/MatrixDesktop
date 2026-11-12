@@ -35,6 +35,8 @@ import sys
 import threading
 from pathlib import Path
 
+import browser_launch
+
 REPO = Path(__file__).resolve().parent.parent
 CONFIGURATOR = REPO / "MatrixDesktopConfigurator" / "configurator"
 WEB = REPO / "MatrixDesktop" / "web"
@@ -1263,8 +1265,10 @@ def check_no_favicon_request(browser, origin):
 
     name = "index.html makes no /favicon.ico request"
     try:
-        full = browser.browser_type.launch(channel="chromium", args=["--use-gl=angle", "--use-angle=swiftshader",
-                                                                     "--enable-unsafe-swiftshader"])
+        full = browser_launch.launch(browser.browser_type, channel="chromium",
+                                     args=["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
+    except browser_launch.LaunchArgumentsError:
+        raise
     except Exception as exc:
         fail(name, f"the full Chromium build would not start ({type(exc).__name__}), and the headless shell never "
                    "requests a favicon; install it with: python -m playwright install chromium")
@@ -1349,8 +1353,10 @@ def main():
     try:
         with sync_playwright() as pw:
             try:
-                browser = pw.chromium.launch(args=["--use-gl=angle", "--use-angle=swiftshader",
-                                                   "--enable-unsafe-swiftshader"])
+                browser = browser_launch.launch(pw.chromium, args=["--use-gl=angle", "--use-angle=swiftshader",
+                                                                   "--enable-unsafe-swiftshader"])
+            except browser_launch.LaunchArgumentsError:
+                raise
             except Exception as exc:
                 print(f"UNVERIFIED: chromium is unavailable: {exc}", file=sys.stderr)
                 return 2

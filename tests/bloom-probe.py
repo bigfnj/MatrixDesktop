@@ -12,6 +12,8 @@ import threading
 
 from playwright.sync_api import sync_playwright
 
+import browser_launch
+
 WEB = Path(__file__).resolve().parents[1] / "MatrixDesktop" / "web"
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -100,7 +102,7 @@ def main():
             if "--hardware" not in sys.argv:
                 flags += ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
             channel = sys.argv[sys.argv.index("--channel") + 1] if "--channel" in sys.argv else None
-            browser = pw.chromium.launch(args=flags, channel=channel)
+            browser = browser_launch.launch(pw.chromium, args=flags, channel=channel)
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/__probe")
             page.add_script_tag(url=f"http://127.0.0.1:{server.server_port}/lib/regl.min.js")

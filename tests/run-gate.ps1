@@ -718,6 +718,7 @@ try {
         Test-Unchecked 'UC3D importer tests' 'Python is unavailable'
         Test-Unchecked 'native smoke process lifecycle' 'Python with Playwright is unavailable'
         Test-Unchecked 'screensaver foreground wait and ownership' 'Python is unavailable'
+        Test-Unchecked 'browser launch keeps Playwright defaults and disables TcpPortRandomizationWin' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D WebGL smoke' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D original WebGL calibration' 'Python with Playwright is unavailable'
         Test-Unchecked 'UC3D calibration reports a hidden WebGPU adapter as unverified' 'Python with Playwright is unavailable'
@@ -730,6 +731,9 @@ try {
             @{ Name = 'UC3D importer tests'; Script = 'tools\test_import_uc3d_media.py'; Arguments = '' },
             @{ Name = 'native smoke process lifecycle'; Script = 'tests\test_native_smoke.py'; Arguments = '' },
             @{ Name = 'screensaver foreground wait and ownership'; Script = 'tests\screensaver-focus.test.py'; Arguments = '' },
+            # Every Chromium the suites below launch goes through tests\browser_launch.py; this proves
+            # its merged --disable-features verification passes a good launch and names each bad one.
+            @{ Name = 'browser launch keeps Playwright defaults and disables TcpPortRandomizationWin'; Script = 'tests\browser-launch.test.py'; Arguments = '' },
             @{ Name = 'UC3D WebGL smoke'; Script = 'tests\uc3d-browser.py'; Arguments = ' --renderer regl' },
             @{ Name = 'UC3D original WebGL calibration'; Script = 'tests\uc3d-calibration.py'; Arguments = ' --renderer regl' },
             # AUD-59: with no WebGPU adapter the calibration must report unverified coverage

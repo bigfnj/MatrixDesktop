@@ -9,6 +9,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+import browser_launch
+
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "MatrixDesktop" / "web"
 
@@ -46,7 +48,7 @@ def main():
     results, failures = [], []
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(channel=args.channel)
+            browser = browser_launch.launch(playwright.chromium, channel=args.channel)
             for name in ([args.only] if args.only else ["running", "initial"]):
                 context = browser.new_context()
                 context.add_init_script(f"window.matrixHostPlaybackState={{paused:{str(name == 'initial').lower()}}}")
