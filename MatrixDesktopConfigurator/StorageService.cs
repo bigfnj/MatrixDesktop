@@ -310,7 +310,7 @@ internal sealed class StorageService
     }
 
     // An existing store is refused only for the ReadOnly attribute or an ACL that refuses
-    // writes. A name that is gone by the time it is examined is the owner's Save between
+    // Save. A name that is gone by the time it is examined is the owner's Save between
     // File.Replace's two renames (the live store moved to .bak, the new copy not yet on its
     // name): that is a missing store, which the folder probe decides (R3-10).
     private static bool ExistingStoreAllowsSaving(string path, Action<string>? afterStoreStep)
@@ -335,24 +335,97 @@ internal sealed class StorageService
         return !OperatingSystem.IsWindows() || AclAllowsWrites(path);
     }
 
-    // FILE_WRITE_ATTRIBUTES is granted by the same ACL entries as writing the data (the
-    // standard Write and Modify permissions carry both), but unlike data access it takes no
-    // part in file sharing, so this open neither waits for a reader nor makes one fail. The
-    // raw call gets the extended-length path that .NET's own file APIs add for themselves, or
-    // a store path of MAX_PATH or more reads as not found (R3-11). A name that is not found is
-    // R3-10's rename gap, not a refusal; every other failure still is, so an open that did
-    // take part in sharing would send a launch to AppData while the store is being read, which
-    // ProbingLeavesReadersAlone catches.
+    // The store is opened for FILE_WRITE_ATTRIBUTES and READ_CONTROL only. Neither takes part
+    // in file sharing, so this open neither waits for a reader nor makes one fail; opening for
+    // the data or DELETE rights Save needs would fail with a sharing violation while Load reads
+    // the store (R2-18). The raw call gets the extended-length path that .NET's own file APIs
+    // add for themselves, or a store path of MAX_PATH or more reads as not found (R3-11). A
+    // name that is not found is R3-10's rename gap, not a refusal; every other failure still
+    // is, so an open that did take part in sharing would send a launch to AppData while the
+    // store is being read, which ProbingLeavesReadersAlone catches.
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static bool AclAllowsWrites(string path)
     {
-        using var handle = CreateFile(ExtendedLengthPath(path), FileWriteAttributes, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
+        using var handle = CreateFile(ExtendedLengthPath(path), FileWriteAttributes | ReadControl, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
         if (handle.IsInvalid)
         {
             return Marshal.GetLastPInvokeError() is ErrorFileNotFound or ErrorPathNotFound;
         }
 
-        return true;
+        return DaclAllowsSaving(handle, path);
+    }
+
+    // FILE_WRITE_ATTRIBUTES alone is not the question Save asks. A hand-built ACL can keep it
+    // while denying the data rights and DELETE: File.Replace and its File.Move fallback both
+    // need DELETE on the store, or FILE_DELETE_CHILD on its folder (R3-12, MD517-01). Those
+    // rights are read from the DACL, evaluated against this process's token, never by opening
+    // for them. The evaluation is trusted only where it agrees with the kernel's answer for
+    // FILE_WRITE_ATTRIBUTES above: a share whose DACL names the server's own accounts, or a
+    // volume without ACLs, is not modelled by the local token, and there the kernel's answer
+    // stands as it did before.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static bool DaclAllowsSaving(SafeFileHandle store, string path)
+    {
+        var granted = MaximumAllowed(store);
+        if (granted is not int file || (file & FileWriteAttributes) == 0)
+        {
+            return true;
+        }
+
+        if ((file & (FileWriteData | FileAppendData)) != (FileWriteData | FileAppendData))
+        {
+            return false;
+        }
+
+        if ((file & Delete) != 0)
+        {
+            return true;
+        }
+
+        using var folder = CreateFile(ExtendedLengthPath(Path.GetDirectoryName(Path.GetFullPath(path))!), ReadControl, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FileFlagBackupSemantics, IntPtr.Zero);
+        var folderGranted = folder.IsInvalid ? null : MaximumAllowed(folder);
+        return folderGranted is not int children || (children & FileDeleteChild) != 0;
+    }
+
+    // The rights AccessCheck grants this process's token under the handle's owner, group and
+    // DACL, or null when they cannot be read or evaluated.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static int? MaximumAllowed(SafeFileHandle handle)
+    {
+        if (GetSecurityInfo(handle, SeFileObject, OwnerGroupDaclInformation, out _, out _, out _, out _, out var descriptor) != 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(), TokenQuery | TokenDuplicate, out var process))
+            {
+                return null;
+            }
+
+            using (process)
+            {
+                if (!DuplicateToken(process, SecurityImpersonation, out var token))
+                {
+                    return null;
+                }
+
+                using (token)
+                {
+                    var mapping = new GenericMapping { Read = 0x120089, Write = 0x120116, Execute = 0x1200A0, All = 0x1F01FF };
+                    var privileges = new byte[256];
+                    var privilegesLength = privileges.Length;
+                    return AccessCheck(descriptor, token, MaximumAllowedAccess, ref mapping, privileges, ref privilegesLength, out var grantedAccess, out _)
+                        ? grantedAccess
+                        : null;
+                }
+            }
+        }
+        finally
+        {
+            LocalFree(descriptor);
+        }
     }
 
     // The extended-length form of a path, for raw Win32 calls that do not add it themselves.
@@ -367,12 +440,55 @@ internal sealed class StorageService
         return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
+    private const int FileWriteData = 0x0002;
+    private const int FileAppendData = 0x0004;
+    private const int FileDeleteChild = 0x0040;
     private const int FileWriteAttributes = 0x0100;
+    private const int Delete = 0x10000;
+    private const int ReadControl = 0x20000;
+    private const int MaximumAllowedAccess = 0x02000000;
+    private const int FileFlagBackupSemantics = 0x02000000;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
+    private const int SeFileObject = 1;
+    private const int OwnerGroupDaclInformation = 0x1 | 0x2 | 0x4;
+    private const int TokenDuplicate = 0x0002;
+    private const int TokenQuery = 0x0008;
+    private const int SecurityImpersonation = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GenericMapping
+    {
+        public int Read;
+        public int Write;
+        public int Execute;
+        public int All;
+    }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(
         string fileName, int desiredAccess, FileShare shareMode, IntPtr securityAttributes,
         FileMode creationDisposition, int flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("advapi32.dll")]
+    private static extern int GetSecurityInfo(
+        SafeFileHandle handle, int objectType, int securityInfo,
+        out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, int desiredAccess, out SafeAccessTokenHandle token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DuplicateToken(SafeAccessTokenHandle existingToken, int impersonationLevel, out SafeAccessTokenHandle duplicateToken);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AccessCheck(
+        IntPtr securityDescriptor, SafeAccessTokenHandle clientToken, int desiredAccess, ref GenericMapping genericMapping,
+        byte[] privilegeSet, ref int privilegeSetLength, out int grantedAccess, out bool accessStatus);
 }

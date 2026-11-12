@@ -27,6 +27,7 @@ internal static class StorageTests
         ("A portable folder that refuses new files falls back to AppData", DeniedFolderFallsBack),
         ("A launch overlapping the owner's Save resolves the portable store", SaveGapResolvesPortable),
         ("A portable store at or past MAX_PATH still resolves portable", LongPathStoreResolvesPortable),
+        ("A portable store whose ACL keeps write attributes but refuses Save falls back to AppData", SaveRefusingAclFallsBack),
     ];
 
     private static void Cleanup(StorageService storage)
@@ -633,4 +634,103 @@ internal static class StorageTests
         return Path.Combine(folder, name);
     }
 
+    private static void SaveRefusingAclFallsBack()
+    {
+        // R3-12 (MD517-01). R2-18 tested an existing store with a FILE_WRITE_ATTRIBUTES open
+        // alone, so an ACL that keeps that right but refuses the data rights or DELETE passed,
+        // and every Save then failed. Each leg keeps FILE_WRITE_ATTRIBUTES. Killing mutation:
+        // revert to the FILE_WRITE_ATTRIBUTES-only check; the three refusing legs resolve
+        // portable. ProbingLeavesReadersAlone guards the wrong fix (opening for those rights).
+        // Each leg also runs Save under the same ACL, so the refusals are Save's own. The third
+        // leg is the exception: File.Replace only renames, so Save gets past a store that
+        // refuses writing data, but such a store is not written, as with DeniedStoreFallsBack's
+        // Write deny.
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("NOTE  Save-refusing ACL case UNCHECKED: not Windows");
+            return;
+        }
+
+        var root = NewResolverRoot();
+        var folder = Path.Combine(root, "portable");
+        var portable = Path.Combine(folder, "presets.json");
+        var appData = Path.Combine(root, "appdata", "presets.json");
+        new StorageService(portable).Save(StateWith("live"));
+
+        const System.Security.AccessControl.FileSystemRights data = System.Security.AccessControl.FileSystemRights.WriteData | System.Security.AccessControl.FileSystemRights.AppendData;
+        const System.Security.AccessControl.FileSystemRights delete = System.Security.AccessControl.FileSystemRights.Delete;
+        const System.Security.AccessControl.FileSystemRights deleteChild = System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles;
+        var legs = new (string Name, System.Security.AccessControl.FileSystemRights Store, bool DenyFolderDeleteChild, bool SaveWorks, bool Portable)[]
+        {
+            ("data, append and delete denied, folder refuses deleting children", data | delete, true, false, false),
+            ("delete denied, folder refuses deleting children (Write without Modify)", delete, true, false, false),
+            ("data and append denied, delete allowed", data, false, true, false),
+            ("delete denied, folder grants deleting children", delete, false, true, true),
+        };
+        try
+        {
+            foreach (var leg in legs)
+            {
+                var warnings = new List<string>();
+                (string Path, bool Portable) resolved;
+                Exception? saveFailure = null;
+                SetCurrentUserRule(folder, deleteChild, leg.DenyFolderDeleteChild ? System.Security.AccessControl.AccessControlType.Deny : System.Security.AccessControl.AccessControlType.Allow, add: true);
+                DenyCurrentUser(portable, leg.Store, deny: true);
+                try
+                {
+                    resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add);
+                    try { new StorageService(portable).Save(StateWith("saved under " + leg.Name)); }
+                    catch (Exception ex) { saveFailure = ex; }
+                }
+                finally
+                {
+                    ClearCurrentUserRules(folder);
+                }
+
+                var expected = leg.Portable ? (portable, true) : (appData, false);
+                Check.True(resolved == expected, $"a store with {leg.Name} must resolve '{expected.Item1}'; got '{resolved.Path}'");
+                Check.True(leg.Portable ? warnings.Count == 0 : warnings.Count == 1 && warnings[0].Contains(portable, StringComparison.Ordinal) && warnings[0].Contains(appData, StringComparison.Ordinal),
+                    $"a fallback from a store with {leg.Name} is reported naming both stores, and keeping the store is not; got {warnings.Count} warning(s)");
+                Check.True(leg.SaveWorks == (saveFailure is null),
+                    $"Save under {leg.Name} {(leg.SaveWorks ? "succeeds" : "fails")}; got {saveFailure?.GetType().Name ?? "success"}");
+            }
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            ClearCurrentUserRules(folder);
+            DeleteResolverRoot(root);
+        }
+    }
+
+    // Adds or removes one explicit rule for the current user on a file or folder.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void SetCurrentUserRule(string path, System.Security.AccessControl.FileSystemRights rights, System.Security.AccessControl.AccessControlType type, bool add)
+    {
+        var rule = new System.Security.AccessControl.FileSystemAccessRule(System.Security.Principal.WindowsIdentity.GetCurrent().User!, rights, type);
+        var folder = new DirectoryInfo(path);
+        var acl = folder.GetAccessControl();
+        if (add) acl.AddAccessRule(rule); else acl.RemoveAccessRule(rule);
+        folder.SetAccessControl(acl);
+    }
+
+    // Removes every explicit rule for the current user from a fixture folder and the files in
+    // it. Save's File.Replace carries the store's explicit rules onto the new store, so a leg
+    // can leave them on more than one file.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void ClearCurrentUserRules(string folder)
+    {
+        var user = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+        var folderInfo = new DirectoryInfo(folder);
+        var folderAcl = folderInfo.GetAccessControl();
+        folderAcl.PurgeAccessRules(user);
+        folderInfo.SetAccessControl(folderAcl);
+        foreach (var path in Directory.GetFiles(folder))
+        {
+            var file = new FileInfo(path);
+            var acl = file.GetAccessControl();
+            acl.PurgeAccessRules(user);
+            file.SetAccessControl(acl);
+        }
+    }
 }
