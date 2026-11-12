@@ -43,6 +43,16 @@ function Get-GateCaseVerdict {
         }
         return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "harness error: exit 2 without a cannot-verify witness; $where" }
     }
+    # Exit 3 is the child's own harness error only with its 'HARNESS ERROR' line: a suite whose
+    # browser launch failed argument verification (browser_launch.LaunchArgumentsError) prints
+    # one and exits 3 (MDST-05). A bare exit 3 stays a FAIL, because it has other sources, such
+    # as abort() in a native extension.
+    if ($ExitCode -eq 3) {
+        $m = [regex]::Match($text, '(?m)^[ \t]*HARNESS ERROR\b.*$')
+        if ($m.Success) {
+            return [pscustomobject]@{ Outcome = 'harness'; ExitCode = $ExitCode; Detail = "$($m.Value.Trim()); $where" }
+        }
+    }
     return [pscustomobject]@{ Outcome = 'fail'; ExitCode = $ExitCode; Detail = "exit $ExitCode; $where" }
 }
 
@@ -291,6 +301,20 @@ function Get-ProfileLeakLines {
     return @(@($lines | Where-Object { $_ -like 'LEAKED *' }) + @($lines | Where-Object { $_ -notlike 'LEAKED *' }))
 }
 
+# tests\browser_launch.py prints a line starting 'DEGRADED ' for each launch whose argv it could
+# not read, so TcpPortRandomizationWin was not disabled or not verified, and the suite then
+# passes or fails on its own checks. The exit code cannot carry that, so a degraded launch read
+# exactly like a verified one at the gate (MDST-02). Returns every such line from $Log and
+# "$Log.err"; only column 0 counts, as the helper prints it.
+function Get-DegradedLaunchLines {
+    param([Parameter(Mandatory = $true)][string]$Log)
+    $lines = @()
+    foreach ($path in @($Log, "$Log.err")) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) { $lines += @([IO.File]::ReadAllLines($path) | Where-Object { $_ -match '^DEGRADED ' }) }
+    }
+    return $lines
+}
+
 # Top-level folders under $Path that are not in the $Before snapshot, sorted. Replaces a
 # Test-Path for one literal 'userdata' name: any folder the app creates beside the exe counts.
 function Get-NewTopLevelDirectories {
@@ -450,7 +474,8 @@ function Invoke-GatePythonCase {
     if ($Case.ContainsKey('Arguments')) { $arguments += $Case.Arguments }
     $environment = if ($Case.ContainsKey('Environment')) { $Case.Environment } else { @{} }
     $verdict = Invoke-GateChildCase -FilePath $Python -ArgumentList $arguments -Log $Log -Environment $environment
-    if (-not $Case.ContainsKey('ExpectCannotVerify')) { return $verdict }
+    # A harness error says nothing about the cannot-verify path either (MDST-05).
+    if (-not $Case.ContainsKey('ExpectCannotVerify') -or $verdict.Outcome -eq 'harness') { return $verdict }
     $forbidden = if ($Case.ContainsKey('Forbidden')) { $Case.Forbidden } else { '' }
     return Get-ExpectedCannotVerifyVerdict -ExitCode $verdict.ExitCode -Log $Log -Witness $Case.ExpectCannotVerify -Forbidden $forbidden
 }

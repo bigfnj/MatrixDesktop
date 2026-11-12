@@ -100,7 +100,8 @@ function Test-Unchecked {
     Write-Host "  UNCHECKED  $Msg" -ForegroundColor Yellow
     Write-Host "               $Why" -ForegroundColor Yellow
 }
-# A check whose own harness broke (web-smoke.py's exit 3). The run continues, and the gate ends
+# A check whose own harness broke (web-smoke.py's exit 3, or a tier-1 Python case's exit 3 with
+# its HARNESS ERROR line, MDST-05). The run continues, and the gate ends
 # in exit 3 unless a check failed, because a broken harness is never a verdict on the app (R3-26).
 function Test-Harness {
     param([string]$Msg, [string]$Detail)
@@ -722,6 +723,16 @@ try {
                 }
                 default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
             }
+            # A launch that could not verify its arguments prints DEGRADED and the smoke still exits
+            # on its own checks, so the log is read for it: UNCHECKED beside the verdict (MDST-02).
+            $smokeDegraded = @(Get-DegradedLaunchLines -Log $smokeLog)
+            if ($smokeDegraded.Count -gt 0) { Test-Unchecked 'browser launch verification [headless web smoke]' (($smokeDegraded -join ' | ') + "; see $smokeLog") }
+            # A check this environment cannot run (its UNVERIFIED line) beside a FAIL or a harness
+            # error is named as well; on exit 2 it is the verdict's own reason (MDST-02).
+            if ($smokeExit -eq 1 -or $smokeExit -eq 3) {
+                $smokeMissing = @([regex]::Matches($smokeOut, '(?m)^UNVERIFIED:.*$') | ForEach-Object { $_.Value.Trim() })
+                if ($smokeMissing.Count -gt 0) { Test-Unchecked 'headless web smoke checks this environment cannot run' (($smokeMissing -join ' | ') + "; see $smokeLog.err") }
+            }
         }
     }
 
@@ -782,12 +793,18 @@ try {
             $verdict = Invoke-GatePythonCase -Python $py -ScriptPath $path -Case $case -Log $log
             if ($verdict.Outcome -eq 'ok') { Test-Ok $case.Name }
             elseif ($verdict.Outcome -eq 'unchecked') { Test-Unchecked $case.Name $verdict.Detail }
+            # Exit 3 with a HARNESS ERROR line, as when a browser launch failed argument
+            # verification, is the gate's harness error, never a product FAIL (MDST-05).
+            elseif ($verdict.Outcome -eq 'harness') { Test-Harness $case.Name $verdict.Detail }
             else {
                 Test-Fail $case.Name $verdict.Detail
                 foreach ($line in @(Get-Content -LiteralPath $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40)) {
                     Write-Host ("    " + $line)
                 }
             }
+            # As for the web smoke: a degraded launch is UNCHECKED beside the case's verdict (MDST-02).
+            $caseDegraded = @(Get-DegradedLaunchLines -Log $log)
+            if ($caseDegraded.Count -gt 0) { Test-Unchecked "browser launch verification [$($case.Name)]" (($caseDegraded -join ' | ') + "; see $log") }
         }
     }
 

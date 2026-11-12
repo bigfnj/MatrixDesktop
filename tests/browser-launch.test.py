@@ -131,7 +131,8 @@ def main():
         finally:
             degraded.close()
         said = printed.getvalue().strip()
-        print(said, flush=True)
+        # Indented, because the gate reads a DEGRADED line at column 0 as a real degraded launch (MDST-02).
+        print("  synthetic: " + said, flush=True)
         check("an unreadable argv prints DEGRADED and leaves the suite's launch as it was",
               said.startswith("DEGRADED ") and "synthetic unreadable argv" in said and "NOT disabled" in said
               and degraded_switches == baseline, f"printed {said!r}; switches {degraded_switches}")

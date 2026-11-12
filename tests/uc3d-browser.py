@@ -247,6 +247,8 @@ def main():
                 print("PASS actual backend:", json.dumps(report))
                 context.close()
             browser.close()
+    except browser_launch.LaunchArgumentsError:
+        raise  # a harness error, never a product FAIL: the entry point reports it (MDST-05)
     except Exception as error:
         failures.append(str(error))
         print("FAIL UC3D browser:", error)
@@ -257,4 +259,10 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except browser_launch.LaunchArgumentsError as error:
+        # The browser did not get the arguments the helper verifies, so nothing it ran is a
+        # verdict on the product: a harness error, exit 3 with this line for the gate (MDST-05).
+        print(f"HARNESS ERROR: uc3d-browser.py: {error}", flush=True)
+        raise SystemExit(3)
