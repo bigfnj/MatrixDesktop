@@ -15,8 +15,8 @@ Choose **Wallpaper** in the configurator's window mode, or launch any scene with
 `--wallpaper`. The tray menu provides pause/resume, settings, exit and explicit
 per-user startup control. **Start with Windows** is ticked only when the startup shortcut
 starts this launch's settings; when it starts other settings, the item reads **Start with
-Windows (other settings)** and one click stores this launch's settings instead. Wallpaper
-mode leaves typing and desktop icons usable;
+Windows (other settings)** and one click stores this launch's settings instead.
+Wallpaper mode leaves typing and desktop icons usable;
 desktop pointer effects are optional. Fullscreen applications pause it by default,
 and battery pause is available separately. A paused wallpaper keeps its last frame
 on the desktop; only a locked or disconnected session, sleep or Windows turning the
@@ -52,7 +52,7 @@ until Windows closes the preview window, and a hung screensaver until input ends
 
 A ZMatrix wallpaper's tray menu also offers **Refresh desktop**, which re-reads what the
 scene takes from Windows (the desktop wallpaper, the font-smoothing settings and the
-installed fonts, so a font installed after the wallpaper started is picked up) and
+installed fonts, so a refresh picks up a font installed after the wallpaper started) and
 updates the scene only if anything changed. The same refresh runs about 400 ms after
 Windows reports a wallpaper, desktop pattern, high-contrast, font-smoothing, system color
 or theme change, and waits for resume while the wallpaper is paused.
@@ -486,7 +486,7 @@ limits animation speed to 0 to 4.
 
 #### Feature toggles and click controls
 
-- `camera` (bool): enables webcam input for the mirror effect only; other effects ignore it and never open the webcam. Windowed and fullscreen launches show WebView2's camera prompt, and a Block there lasts only for that launch. A wallpaper, screensaver or preview cannot show the prompt, so it runs without the camera unless the camera was already allowed in a windowed launch, such as the configurator's Test.
+- `camera` (bool): enables webcam input for the mirror effect only; other effects ignore it and never open the webcam. Windowed and fullscreen launches show WebView2's camera prompt, and a Block there lasts only for that launch. A wallpaper, screensaver or preview cannot show the prompt, so it runs without the camera unless the camera was already allowed in a windowed or fullscreen launch, such as the configurator's Test.
 - `clickRipples` (bool): enables click-triggered ripples in non-mirror rain effects such as `stripes`, `palette`, or `image`.
 - `clickRippleShape` (string): click ripple shape: `circle` (default), `box`, `triangle`, or `star`. Invalid values fall back to `circle`.
 - `volumetric` (bool): enables volumetric/3D rendering.
@@ -636,9 +636,9 @@ One tier-1 check is about the gate itself: it asserts that each of `release.yml`
 publish steps sets the same effective MSBuild properties as the gate's own publish, in both
 directions, with comments ignored, continued lines joined and the last value of a property
 winning. Only the output folder and the version stamps may differ, and a publish profile or
-a switch the check does not understand fails it. Without that the gate measures a payload nobody ships,
-which is exactly what it used to do. Another asserts that `release.yml` runs the tag version
-check and the CI result check before its first `dotnet publish`.
+a switch the check does not understand fails it. Without that the gate measures a payload
+nobody ships, which is exactly what it used to do. Another asserts that `release.yml` runs
+the tag version check and the CI result check before its first `dotnet publish`.
 
 The headless DOM smoke (`tests/web-smoke.py`, Playwright + Chromium) is worth calling out,
 because it exists to catch the one thing the runtime tiers structurally cannot. Those tiers
@@ -710,7 +710,7 @@ which is what `ci.yml` does. Exit 1 and 3 fail the build.
     loading renderer: the GPU renderer was lost ... and could not be recovered automatically.
     Restart MatrixDesktop to try again." The same notice appears at once, without a reload,
     when the WebGL renderer cannot start because the browser refuses the page a new WebGL
-    context, as Chromium does for the rest of its session after repeated GPU resets; no reload
+    context, as Chromium does for the rest of the browser session after repeated GPU resets; no reload
     can help then.
 
 ## Attribution / License
