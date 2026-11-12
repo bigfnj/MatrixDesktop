@@ -466,7 +466,8 @@ internal static class HostWiring
                 $"InitializeCurrentWebViewAsync must await the clear, not discard its task (next {awaited.Code.Name} {awaited.Name})");
             var result = Find(init, "System.Runtime.CompilerServices.TaskAwaiter::GetResult", cleared);
             Check.True(result >= 0 && result < navigate, "the clear's await must complete before InitializeCurrentWebViewAsync navigates");
-            var helper = Body(bodies, StateMachine(bodies, "MatrixDesktop.MainForm/<ForgetSavedCameraDenialAsync>"));
+            var moveNext = StateMachine(bodies, "MatrixDesktop.MainForm/<ForgetSavedCameraDenialAsync>");
+            var helper = Body(bodies, moveNext);
             var read = Find(helper, profile + "GetNonDefaultPermissionSettingsAsync");
             var decided = Find(helper, "MatrixDesktop.HostPermissionPolicy::ForgetsSavedState");
             Check.True(read >= 0 && decided > read, "the helper must read the saved settings and ask HostPermissionPolicy which to clear");
@@ -481,8 +482,16 @@ internal static class HostWiring
                 $"the helper must branch on ForgetsSavedState's answer (next {branch.Code.Name})");
             var target = helper.FindIndex(instruction => instruction.Offset == branch.Value);
             var (whenTrue, whenFalse) = branch.Code.Name.StartsWith("brtrue", StringComparison.Ordinal) ? (target, decided + 2) : (decided + 2, target);
-            var ungated = resets.Where(index => Flows(helper, 0, index, decided) || Flows(helper, whenFalse, index, decided))
-                .Select(index => $"IL_{helper[index].Offset:X4}").ToList();
+            // Flows does not enter a handler, and a handler runs whatever the policy answered, so
+            // each catch, filter, fault and finally entry is a root too: a reset added to the catch
+            // reset the app origin's camera setting, a saved Allow included, whenever the listing threw.
+            var regions = Regions(path, moveNext);
+            var handlers = regions.SelectMany(region => region.Kind == ExceptionRegionKind.Filter ? new[] { region.FilterOffset, region.HandlerOffset } : new[] { region.HandlerOffset })
+                .Select(offset => (Index: helper.FindIndex(instruction => instruction.Offset == offset), Name: $"the handler at IL_{offset:X4}")).ToList();
+            Check.True(handlers.Count > 0 && handlers.All(handler => handler.Index >= 0), $"witness: the scan must see the helper's exception handlers ({regions.Count} regions)");
+            var roots = new[] { (Index: 0, Name: "the method entry"), (Index: whenFalse, Name: "the question's false edge") }.Concat(handlers).ToList();
+            var ungated = resets.Select(index => (Index: index, From: roots.Where(root => Flows(helper, root.Index, index, decided)).Select(root => root.Name).FirstOrDefault()))
+                .Where(item => item.From is not null).Select(item => $"IL_{helper[item.Index].Offset:X4} (from {item.From})").ToList();
             Check.True(Flows(helper, whenTrue, reset, decided) && ungated.Count == 0,
                 "the helper must reset a saved setting only when ForgetsSavedState answers true, and keep it (a saved Allow, another origin's state) otherwise"
                 + (ungated.Count > 0 ? "; reached without its true answer: " + string.Join(", ", ungated) : ""));
@@ -499,6 +508,16 @@ internal static class HostWiring
             var code = Body(bodies, wndProc);
             string Seen(List<Step> steps) => string.Join(" ", steps.Where(step => step.Store ? step.Name == flag : step.Name == dispatch)
                 .Select(step => step.Store ? "flag=" + (step.Values[0]?.ToString() ?? "?") : "dispatch"));
+            // The sweep pins get_Msg by name, for any receiver and for the whole walk, so it holds
+            // only while each read is m's own and nothing has rewritten Msg before it: 'var probe =
+            // m; if (probe.Msg == 0x0112) probe.Msg = 0x0011;' set the flag while 0x112 was dispatched.
+            const string getMsg = "System.Windows.Forms.Message::get_Msg";
+            var reads = Enumerable.Range(0, code.Count).Where(index => IsCall(code[index]) && code[index].Name == getMsg).ToList();
+            var notM = reads.Where(index => index == 0 || code[index - 1].Code != OpCodes.Ldarg_1).Select(index => $"IL_{code[index].Offset:X4}").ToList();
+            var rewrites = Enumerable.Range(0, code.Count).Where(index => IsCall(code[index]) && code[index].Name == "System.Windows.Forms.Message::set_Msg"
+                && reads.Any(get => Flows(code, index, get, -1))).Select(index => $"IL_{code[index].Offset:X4}").ToList();
+            Check.True(reads.Count > 0 && notM.Count == 0 && rewrites.Count == 0, $"every Message.Msg read in WndProc must be m's own (ldarg.1 right before it) and no Msg write may come before one; "
+                + $"{reads.Count} reads, not of m: {(notM.Count == 0 ? "none" : string.Join(", ", notM))}; writes a read follows: {(rewrites.Count == 0 ? "none" : string.Join(", ", rewrites))}");
             // Every message id, not two samples: 'm.Msg != 0x0011 && m.Msg != 0x0112' also set the
             // flag while WM_SYSCOMMAND was dispatched, so the WM_CLOSE that Alt+F4 nests inside it
             // reached OnFormClosing with the flag set and TearsDownOnClosing(true) skipped teardown.
@@ -522,6 +541,12 @@ internal static class HostWiring
             var guarded = FinallyRegions(path, "MatrixDesktop.MainForm::WndProc")
                 .Where(region => code[query].Offset >= region.TryOffset && code[query].Offset < region.TryOffset + region.TryLength).ToList();
             Check.Equal(1, guarded.Count, $"WndProc must dispatch WM_QUERYENDSESSION (the call at IL_{code[query].Offset:X4}, after the flag's store of true) inside one try/finally");
+            // Neither walk follows an exception edge, so this is structural: a call that threw
+            // between the store of true and the try left the flag set for good, and every later
+            // close skipped teardown. The store must be in the try or be the instruction before it.
+            var stored = code[sets[0]].Offset;
+            Check.True(stored >= guarded[0].TryOffset && stored < guarded[0].TryOffset + guarded[0].TryLength || code[sets[0] + 1].Offset == guarded[0].TryOffset,
+                $"nothing may come between the flag's store of true (IL_{stored:X4}) and the try at IL_{guarded[0].TryOffset:X4} whose finally resets it; next is IL_{code[sets[0] + 1].Offset:X4} {code[sets[0] + 1].Code.Name}");
             // Every dispatch the store of true reaches, not only the first: a guarded one when
             // _isShuttingDown is false and a bare one otherwise left the flag set after the query.
             // The sweep cannot see that shape, since the walk leaves the try past its handler.
@@ -701,7 +726,11 @@ internal static class HostWiring
     }
 
     // The try/finally regions of the one body named method ("Type::Method"), as IL offsets.
-    private static List<ExceptionRegion> FinallyRegions(string path, string method)
+    private static List<ExceptionRegion> FinallyRegions(string path, string method) =>
+        Regions(path, method).Where(region => region.Kind == ExceptionRegionKind.Finally).ToList();
+
+    // Every exception region (catch, filter, fault, finally) of the one body named method.
+    private static List<ExceptionRegion> Regions(string path, string method)
     {
         using var stream = File.OpenRead(path);
         using var pe = new PEReader(stream);
@@ -709,7 +738,7 @@ internal static class HostWiring
         var found = reader.TypeDefinitions.Select(reader.GetTypeDefinition).SelectMany(type => type.GetMethods().Select(reader.GetMethodDefinition)
             .Where(definition => definition.RelativeVirtualAddress != 0 && TypeName(reader, type) + "::" + reader.GetString(definition.Name) == method)).ToList();
         Check.Equal(1, found.Count, "witness: the scan must find one " + method);
-        return pe.GetMethodBody(found[0].RelativeVirtualAddress).ExceptionRegions.Where(region => region.Kind == ExceptionRegionKind.Finally).ToList();
+        return pe.GetMethodBody(found[0].RelativeVirtualAddress).ExceptionRegions.ToList();
     }
 
     // The MoveNext of the one async state machine whose type name starts with prefix.
@@ -762,18 +791,21 @@ internal static class HostWiring
     }
 
     // Every path through code from its first instruction. Each path lists the calls, with the
-    // argument values the walk could tell, and the field stores along it.
+    // argument values the walk could tell, and the field stores along it. It follows normal flow
+    // only: no exception edge, no handler entered, and leave jumps past a finally. Once a path
+    // takes a local's address (ldloca), every later read of that local on it is unknown, since
+    // anything handed the address can write it: 'Remap(ref msg)' turned 0x112 into 0x11 unseen.
     private static List<List<Step>> Paths(List<Instruction> code, Dictionary<string, long> facts)
     {
         var at = new Dictionary<int, int>();
         for (var index = 0; index < code.Count; index++) at[code[index].Offset] = index;
         var done = new List<List<Step>>();
-        var work = new Stack<(int Index, List<long?> Stack, Dictionary<long, long?> Locals, List<Step> Steps)>();
-        work.Push((0, new List<long?>(), new Dictionary<long, long?>(), new List<Step>()));
+        var work = new Stack<(int Index, List<long?> Stack, Dictionary<long, long?> Locals, HashSet<long> Addressed, List<Step> Steps)>();
+        work.Push((0, new List<long?>(), new Dictionary<long, long?>(), new HashSet<long>(), new List<Step>()));
         var budget = 200_000;
         while (work.Count > 0)
         {
-            var (index, stack, locals, steps) = work.Pop();
+            var (index, stack, locals, addressed, steps) = work.Pop();
             while (true)
             {
                 if (--budget < 0) throw new InvalidOperationException("the IL walk did not finish");
@@ -782,7 +814,7 @@ internal static class HostWiring
                 var name = op.Name!;
                 long? Pop() { var top = stack[^1]; stack.RemoveAt(stack.Count - 1); return top; }
                 long? Fact() => instruction.Name is not null && facts.TryGetValue(instruction.Name, out var known) ? known : null;
-                void Fork(int target) => work.Push((at[target], new List<long?>(stack), new Dictionary<long, long?>(locals), new List<Step>(steps)));
+                void Fork(int target) => work.Push((at[target], new List<long?>(stack), new Dictionary<long, long?>(locals), new HashSet<long>(addressed), new List<Step>(steps)));
                 if (op == OpCodes.Ret && stack.Count > 0) steps.Add(new Step(Return, [stack[^1]], Store: false));
                 if (op == OpCodes.Ret || op == OpCodes.Throw || op == OpCodes.Rethrow || op == OpCodes.Endfinally) { done.Add(steps); break; }
                 if (op == OpCodes.Switch)
@@ -810,7 +842,8 @@ internal static class HostWiring
                 }
                 if (name.StartsWith("ldc.i", StringComparison.Ordinal)) stack.Add(instruction.Value);
                 else if (op == OpCodes.Ldnull) stack.Add(0);
-                else if (name.StartsWith("ldloc", StringComparison.Ordinal) && !name.StartsWith("ldloca", StringComparison.Ordinal)) stack.Add(locals.GetValueOrDefault(instruction.Value));
+                else if (name.StartsWith("ldloca", StringComparison.Ordinal)) { addressed.Add(instruction.Value); stack.Add(null); }
+                else if (name.StartsWith("ldloc", StringComparison.Ordinal)) stack.Add(addressed.Contains(instruction.Value) ? null : locals.GetValueOrDefault(instruction.Value));
                 else if (name.StartsWith("stloc", StringComparison.Ordinal)) locals[instruction.Value] = Pop();
                 else if (op == OpCodes.Dup) { var top = Pop(); stack.Add(top); stack.Add(top); }
                 else if (op == OpCodes.Ldfld || op == OpCodes.Isinst) { Pop(); stack.Add(Fact()); }
