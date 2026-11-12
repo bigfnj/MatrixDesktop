@@ -25,6 +25,10 @@ internal static class StorageTests
         ("Probing an existing store neither yields to nor disturbs a launch reading it", ProbingLeavesReadersAlone),
         ("A portable store that refuses writes falls back to AppData and says so", DeniedStoreFallsBack),
         ("A portable folder that refuses new files falls back to AppData", DeniedFolderFallsBack),
+        ("A launch overlapping the owner's Save resolves the portable store", SaveGapResolvesPortable),
+        ("A portable store at or past MAX_PATH still resolves portable", LongPathStoreResolvesPortable),
+        ("A portable store whose ACL keeps write attributes but refuses Save falls back to AppData", SaveRefusingAclFallsBack),
+        ("A store whose ACL check cannot run in full keeps the kernel's answer and says so", UnevaluableAclKeepsStoreAndSaysSo),
     ];
 
     private static void Cleanup(StorageService storage)
@@ -509,6 +513,304 @@ internal static class StorageTests
         finally
         {
             DeleteResolverRoot(root);
+        }
+    }
+
+    private static void SaveGapResolvesPortable()
+    {
+        // R3-10. Save swaps an existing store in with File.Replace, which renames the live store
+        // to .bak and then the new copy onto its name, so a launch can find the name gone after
+        // File.Exists said it was there. Each leg holds the name absent across one check.
+        // Killing mutations: let GetAttributes' FileNotFoundException reach the outer catch (the
+        // "exists" leg resolves AppData); treat every failed ACL open as a refusal (the
+        // "attributes" leg resolves AppData).
+        var root = NewResolverRoot();
+        try
+        {
+            var portable = Path.Combine(root, "portable", "presets.json");
+            var renamed = portable + ".bak";
+            var appData = Path.Combine(root, "appdata", "presets.json");
+            new StorageService(portable).Save(StateWith("live"));
+
+            foreach (var gapAt in new[] { "exists", "attributes" })
+            {
+                var warnings = new List<string>();
+                var steps = new List<string>();
+                var restored = false;
+                var resolved = StorageService.ResolveStoragePath(portable, appData,
+                    whileProbeOpen: _ =>
+                    {
+                        // The owner's second rename lands while this launch probes the folder.
+                        if (!File.Exists(renamed)) return;
+                        File.Move(renamed, portable);
+                        restored = true;
+                    },
+                    warn: warnings.Add,
+                    afterStoreStep: step =>
+                    {
+                        steps.Add(step);
+                        if (step == gapAt) File.Move(portable, renamed);
+                    });
+                if (File.Exists(renamed)) File.Move(renamed, portable);
+
+                Check.True(steps.Contains(gapAt), $"the '{gapAt}' leg must reach its step with the store present; steps were [{string.Join(", ", steps)}]");
+                Check.True(resolved == (portable, true) && warnings.Count == 0,
+                    $"a launch that finds the store's name gone after '{gapAt}' must resolve the portable store without a warning; got '{resolved.Path}' with {warnings.Count} warning(s)");
+                Check.True(restored, $"and its folder probe runs, which is where the '{gapAt}' leg puts the name back");
+            }
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    private static void LongPathStoreResolvesPortable()
+    {
+        // R3-11. The ACL check opens the store with a raw CreateFileW, which needs the
+        // extended-length prefix that .NET's file APIs add for themselves; without it a store
+        // path of MAX_PATH or more reads as not found. Killing mutation: pass the plain path to
+        // CreateFileW again; the denied 270-character leg then resolves portable because the
+        // ACL is never consulted.
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("NOTE  long-path store case UNCHECKED: not Windows");
+            return;
+        }
+
+        Check.Equal(@"\\?\C:\a\presets.json", StorageService.ExtendedLengthPath(@"C:\a\presets.json"), "a drive path gains the extended-length prefix");
+        Check.Equal(@"\\?\UNC\server\share\presets.json", StorageService.ExtendedLengthPath(@"\\server\share\presets.json"), "a UNC path gains the extended UNC prefix");
+        Check.Equal(@"\\?\C:\a\presets.json", StorageService.ExtendedLengthPath(@"\\?\C:\a\presets.json"), "an extended path is kept as it is");
+
+        var root = NewResolverRoot();
+        var appData = Path.Combine(root, "appdata", "presets.json");
+        try
+        {
+            foreach (var length in new[] { 250, 270 })
+            {
+                var portable = StoreOfLength(root, length);
+                Check.Equal(length, portable.Length, "the padded store path has the length this leg names");
+                new StorageService(portable).Save(StateWith("long"));
+                var warnings = new List<string>();
+                var resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add);
+                Check.True(resolved == (portable, true) && warnings.Count == 0,
+                    $"a writable {length}-character store must resolve to itself without a warning; got '{resolved.Path}' with {warnings.Count} warning(s)");
+            }
+
+            var longest = StoreOfLength(root, 270);
+            Check.True(longest.Length >= 260, "the denied leg's store must be at least MAX_PATH long, or it cannot catch a missing prefix");
+            var deniedWarnings = new List<string>();
+            (string Path, bool Portable) refused;
+            DenyCurrentUser(longest, System.Security.AccessControl.FileSystemRights.Write, deny: true);
+            try { refused = StorageService.ResolveStoragePath(longest, appData, warn: deniedWarnings.Add); }
+            finally { DenyCurrentUser(longest, System.Security.AccessControl.FileSystemRights.Write, deny: false); }
+            Check.True(refused == (appData, false), $"a {longest.Length}-character store whose ACL refuses writes must fall back to AppData; got '{refused.Path}'");
+            Check.True(deniedWarnings.Count == 1 && deniedWarnings[0].Contains(longest, StringComparison.Ordinal),
+                "and the fallback is reported, naming the long store");
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    // A store path of exactly `length` characters under the owned root, padded with nested
+    // folders of at most 100 characters each, created on disk.
+    private static string StoreOfLength(string root, int length)
+    {
+        const string name = "presets.json";
+        var folder = Path.Combine(root, "portable");
+        var remaining = length - name.Length - 1 - folder.Length;
+        Check.True(remaining >= 2, $"the owned root '{root}' is too deep for a {length}-character store");
+        var segments = (remaining + 100) / 101;
+        var characters = remaining - segments;
+        for (var i = 0; i < segments; i++)
+        {
+            var size = characters / segments + (i < characters % segments ? 1 : 0);
+            folder = Path.Combine(folder, (length + new string('p', size))[..size]);
+        }
+        Directory.CreateDirectory(folder);
+        return Path.Combine(folder, name);
+    }
+
+    private static void SaveRefusingAclFallsBack()
+    {
+        // R3-12 (MD517-01). R2-18 tested an existing store with a FILE_WRITE_ATTRIBUTES open
+        // alone, so an ACL that keeps that right but refuses the data rights or DELETE passed,
+        // and every Save then failed. Each leg keeps FILE_WRITE_ATTRIBUTES. Killing mutation:
+        // revert to the FILE_WRITE_ATTRIBUTES-only check; the three refusing legs resolve
+        // portable. ProbingLeavesReadersAlone guards the wrong fix (opening for those rights).
+        // The folder's FILE_DELETE_CHILD is the kernel's answer: report every folder as granting
+        // it and the Write-without-Modify leg resolves portable; as refusing it and the last leg
+        // resolves AppData. No leg may report the check degraded on this local volume.
+        // Each leg also runs Save under the same ACL, so the refusals are Save's own. The third
+        // leg is the exception: File.Replace only renames, so Save gets past a store that
+        // refuses writing data, but such a store is not written, as with DeniedStoreFallsBack's
+        // Write deny.
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("NOTE  Save-refusing ACL case UNCHECKED: not Windows");
+            return;
+        }
+
+        var root = NewResolverRoot();
+        var folder = Path.Combine(root, "portable");
+        var portable = Path.Combine(folder, "presets.json");
+        var appData = Path.Combine(root, "appdata", "presets.json");
+        new StorageService(portable).Save(StateWith("live"));
+
+        const System.Security.AccessControl.FileSystemRights data = System.Security.AccessControl.FileSystemRights.WriteData | System.Security.AccessControl.FileSystemRights.AppendData;
+        const System.Security.AccessControl.FileSystemRights delete = System.Security.AccessControl.FileSystemRights.Delete;
+        const System.Security.AccessControl.FileSystemRights deleteChild = System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles;
+        var legs = new (string Name, System.Security.AccessControl.FileSystemRights Store, bool DenyFolderDeleteChild, bool SaveWorks, bool Portable)[]
+        {
+            ("data, append and delete denied, folder refuses deleting children", data | delete, true, false, false),
+            ("delete denied, folder refuses deleting children (Write without Modify)", delete, true, false, false),
+            ("data and append denied, delete allowed", data, false, true, false),
+            ("delete denied, folder grants deleting children", delete, false, true, true),
+        };
+        try
+        {
+            foreach (var leg in legs)
+            {
+                var warnings = new List<string>();
+                var degraded = new List<string>();
+                (string Path, bool Portable) resolved;
+                Exception? saveFailure = null;
+                SetCurrentUserRule(folder, deleteChild, leg.DenyFolderDeleteChild ? System.Security.AccessControl.AccessControlType.Deny : System.Security.AccessControl.AccessControlType.Allow, add: true);
+                DenyCurrentUser(portable, leg.Store, deny: true);
+                try
+                {
+                    resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add, degraded: degraded.Add);
+                    try { new StorageService(portable).Save(StateWith("saved under " + leg.Name)); }
+                    catch (Exception ex) { saveFailure = ex; }
+                }
+                finally
+                {
+                    ClearCurrentUserRules(folder);
+                }
+
+                var expected = leg.Portable ? (portable, true) : (appData, false);
+                Check.True(resolved == expected, $"a store with {leg.Name} must resolve '{expected.Item1}'; got '{resolved.Path}'");
+                Check.True(leg.Portable ? warnings.Count == 0 : warnings.Count == 1 && warnings[0].Contains(portable, StringComparison.Ordinal) && warnings[0].Contains(appData, StringComparison.Ordinal),
+                    $"a fallback from a store with {leg.Name} is reported naming both stores, and keeping the store is not; got {warnings.Count} warning(s)");
+                Check.True(leg.SaveWorks == (saveFailure is null),
+                    $"Save under {leg.Name} {(leg.SaveWorks ? "succeeds" : "fails")}; got {saveFailure?.GetType().Name ?? "success"}");
+                Check.True(degraded.Count == 0,
+                    $"on a local volume the ACL check of a store with {leg.Name} runs in full, so nothing reports it degraded; got [{string.Join(" | ", degraded)}]");
+            }
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            ClearCurrentUserRules(folder);
+            DeleteResolverRoot(root);
+        }
+    }
+
+    private static void UnevaluableAclKeepsStoreAndSaysSo()
+    {
+        // R3-12. Where the ACL check of an existing store cannot run in full, the kernel's
+        // FILE_WRITE_ATTRIBUTES answer keeps the store as it did before R3-12, and that must be
+        // said on every resolution: the store's DACL could not be read or evaluated; the
+        // evaluation grants no write attributes although the kernel did (a share whose DACL names
+        // the server's own accounts); or the folder could not be asked about FILE_DELETE_CHILD.
+        // A local volume reaches none of them, so the verdict is driven directly and the resolver
+        // through its storeRights seam. Killing mutations: trust the token evaluation everywhere
+        // (drop the agreement check; the disagreeing leg refuses the store); refuse a store whose
+        // DACL could not be evaluated; refuse on any folder error; drop one report; drop the
+        // degraded callback on its way down from ResolveStoragePath (the resolver leg hears nothing).
+        const string store = @"C:\portable\presets.json";
+        const int writeData = 0x2, appendData = 0x4, writeAttributes = 0x100, delete = 0x10000, readControl = 0x20000;
+        const int saveRights = writeAttributes | writeData | appendData;
+        var legs = new (string Name, int? Rights, int FolderError, bool Kept, bool FolderAsked, string? Report)[]
+        {
+            ("a DACL that could not be evaluated", null, 0, true, false, "could not be read or evaluated"),
+            ("an evaluation granting neither write attributes nor data although the kernel granted write attributes", readControl, 0, true, false, "no write attributes although the kernel did"),
+            ("no DELETE and a folder that could not be asked", readControl | saveRights, 87, true, true, "could not be asked (win32 87)"),
+            ("every right Save needs", readControl | saveRights | delete, 0, true, false, null),
+            ("no DELETE and a folder that grants deleting children", readControl | saveRights, 0, true, true, null),
+            ("no DELETE and a folder that refuses deleting children", readControl | saveRights, 5, false, true, null),
+            ("write attributes without the data rights", readControl | writeAttributes, 0, false, false, null),
+        };
+        foreach (var leg in legs)
+        {
+            var reports = new List<string>();
+            var asked = false;
+            var kept = StorageService.SavingAllowed(store, leg.Rights, () => { asked = true; return leg.FolderError; }, reports.Add);
+            Check.True(kept == leg.Kept, $"a store with {leg.Name} must be {(leg.Kept ? "kept" : "refused")}; it was {(kept ? "kept" : "refused")}");
+            Check.True(asked == leg.FolderAsked, $"a store with {leg.Name} {(leg.FolderAsked ? "asks" : "does not ask")} about its folder");
+            Check.True(leg.Report is null
+                    ? reports.Count == 0
+                    : reports.Count == 1 && reports[0].Contains(store, StringComparison.Ordinal) && reports[0].Contains(leg.Report, StringComparison.Ordinal),
+                $"a store with {leg.Name} {(leg.Report is null ? "reports nothing" : $"is reported once, naming the store and '{leg.Report}'")}; got [{string.Join(" | ", reports)}]");
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("NOTE  resolver leg of the unevaluable-ACL case UNCHECKED: not Windows");
+            return;
+        }
+
+        var root = NewResolverRoot();
+        try
+        {
+            var portable = Path.Combine(root, "portable", "presets.json");
+            var appData = Path.Combine(root, "appdata", "presets.json");
+            new StorageService(portable).Save(StateWith("live"));
+            var warnings = new List<string>();
+            var degraded = new List<string>();
+            int? evaluated = null;
+            var resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add, degraded: degraded.Add,
+                storeRights: rights => { evaluated = rights; return null; });
+            Check.True(evaluated is int granted && (granted & (saveRights | delete)) == (saveRights | delete),
+                $"the fixture store's own evaluation must run and grant every right Save needs; got {(evaluated is int g ? $"0x{g:X}" : "none")}");
+            Check.True(resolved == (portable, true) && warnings.Count == 0,
+                $"a store whose DACL could not be evaluated keeps the portable store without a fallback warning; got '{resolved.Path}' with {warnings.Count} warning(s)");
+            Check.True(degraded.Count == 1 && degraded[0].Contains(portable, StringComparison.Ordinal) && degraded[0].Contains("could not be read or evaluated", StringComparison.Ordinal),
+                $"and the resolution reports the degraded check once, naming the store; got [{string.Join(" | ", degraded)}]");
+
+            degraded.Clear();
+            Check.True(StorageService.ResolveStoragePath(portable, appData, degraded: degraded.Add) == (portable, true) && degraded.Count == 0,
+                $"the same store evaluated in full reports nothing; got [{string.Join(" | ", degraded)}]");
+            Check.False(Directory.Exists(Path.GetDirectoryName(appData)), "the AppData store is never touched");
+        }
+        finally
+        {
+            DeleteResolverRoot(root);
+        }
+    }
+
+    // Adds or removes one explicit rule for the current user on a file or folder.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void SetCurrentUserRule(string path, System.Security.AccessControl.FileSystemRights rights, System.Security.AccessControl.AccessControlType type, bool add)
+    {
+        var rule = new System.Security.AccessControl.FileSystemAccessRule(System.Security.Principal.WindowsIdentity.GetCurrent().User!, rights, type);
+        var folder = new DirectoryInfo(path);
+        var acl = folder.GetAccessControl();
+        if (add) acl.AddAccessRule(rule); else acl.RemoveAccessRule(rule);
+        folder.SetAccessControl(acl);
+    }
+
+    // Removes every explicit rule for the current user from a fixture folder and the files in
+    // it. Save's File.Replace carries the store's explicit rules onto the new store, so a leg
+    // can leave them on more than one file.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void ClearCurrentUserRules(string folder)
+    {
+        var user = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+        var folderInfo = new DirectoryInfo(folder);
+        var folderAcl = folderInfo.GetAccessControl();
+        folderAcl.PurgeAccessRules(user);
+        folderInfo.SetAccessControl(folderAcl);
+        foreach (var path in Directory.GetFiles(folder))
+        {
+            var file = new FileInfo(path);
+            var acl = file.GetAccessControl();
+            acl.PurgeAccessRules(user);
+            file.SetAccessControl(acl);
         }
     }
 }

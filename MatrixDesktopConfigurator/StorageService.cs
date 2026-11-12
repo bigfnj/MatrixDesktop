@@ -230,19 +230,25 @@ internal sealed class StorageService
         return ResolveStoragePath(
             Path.Combine(AppContext.BaseDirectory, FileName),
             Path.Combine(appData, "MatrixDesktop", "Configurator", FileName),
-            warn: Logger.Warn);
+            warn: Logger.Warn,
+            degraded: Logger.Info);
     }
 
     // Program.cs takes the store-keyed single-instance guard AFTER this runs, so two launches
     // started together must resolve the same store here; otherwise each takes a different
     // store's guard, both open, and one saves to AppData (R2-18, MDR-04). Only a real refusal
-    // falls back: neither check below can fail because another launch is probing or loading
-    // the store at the same moment. whileProbeOpen is a test seam that runs while the folder
-    // probe is held.
+    // falls back: no check below fails because another launch is probing or loading the
+    // store at the same moment, or because the owner's Save has the store's name briefly
+    // absent (R3-10). degraded hears every resolution in which the ACL check of an existing
+    // store could not run in full and kept the kernel's write-attributes answer instead.
+    // whileProbeOpen is a test seam that runs while the folder probe is held; afterStoreStep
+    // runs after the existence check ("exists") and after the attribute check ("attributes") of
+    // an existing store; storeRights replaces the rights the ACL evaluation granted on it.
     internal static (string Path, bool Portable) ResolveStoragePath(
-        string portablePath, string appDataPath, Action<string>? whileProbeOpen = null, Action<string>? warn = null)
+        string portablePath, string appDataPath, Action<string>? whileProbeOpen = null, Action<string>? warn = null,
+        Action<string>? afterStoreStep = null, Action<string>? degraded = null, Func<int?, int?>? storeRights = null)
     {
-        if (CanWriteStorageFile(portablePath, whileProbeOpen))
+        if (CanWriteStorageFile(portablePath, whileProbeOpen, afterStoreStep, degraded, storeRights))
         {
             return (portablePath, true);
         }
@@ -257,7 +263,8 @@ internal sealed class StorageService
         return (appDataPath, false);
     }
 
-    private static bool CanWriteStorageFile(string path, Action<string>? whileProbeOpen)
+    private static bool CanWriteStorageFile(
+        string path, Action<string>? whileProbeOpen, Action<string>? afterStoreStep, Action<string>? degraded, Func<int?, int?>? storeRights)
     {
         try
         {
@@ -279,9 +286,7 @@ internal sealed class StorageService
             // launch to AppData, and while it was held that Load failed, took the live store
             // for corrupt and moved it aside. The attribute and ACL checks answer the same
             // question without taking part in file sharing.
-            if (File.Exists(path)
-                && ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0
-                    || (OperatingSystem.IsWindows() && !AclAllowsWrites(path))))
+            if (File.Exists(path) && !ExistingStoreAllowsSaving(path, afterStoreStep, degraded, storeRights))
             {
                 return false;
             }
@@ -308,19 +313,224 @@ internal sealed class StorageService
         }
     }
 
-    // FILE_WRITE_ATTRIBUTES is granted by the same ACL entries as writing the data (the
-    // standard Write and Modify permissions carry both), but unlike data access it takes no
-    // part in file sharing, so this open neither waits for a reader nor makes one fail.
-    private static bool AclAllowsWrites(string path)
+    // An existing store is refused only for the ReadOnly attribute or an ACL that refuses
+    // Save. A name that is gone by the time it is examined is the owner's Save between
+    // File.Replace's two renames (the live store moved to .bak, the new copy not yet on its
+    // name): that is a missing store, which the folder probe decides (R3-10).
+    private static bool ExistingStoreAllowsSaving(
+        string path, Action<string>? afterStoreStep, Action<string>? degraded, Func<int?, int?>? storeRights)
     {
-        using var handle = CreateFile(path, FileWriteAttributes, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
-        return !handle.IsInvalid;
+        afterStoreStep?.Invoke("exists");
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        if ((attributes & FileAttributes.ReadOnly) != 0)
+        {
+            return false;
+        }
+
+        afterStoreStep?.Invoke("attributes");
+        return !OperatingSystem.IsWindows() || AclAllowsWrites(path, degraded, storeRights);
     }
 
-    private const int FileWriteAttributes = 0x0100;
+    // The store is opened for FILE_WRITE_ATTRIBUTES and READ_CONTROL only. Neither takes part
+    // in file sharing, so this open neither waits for a reader nor makes one fail; opening for
+    // the data or DELETE rights Save needs would fail with a sharing violation while Load reads
+    // the store (R2-18). The raw call gets the extended-length path that .NET's own file APIs
+    // add for themselves, or a store path of MAX_PATH or more reads as not found (R3-11). A
+    // name that is not found is R3-10's rename gap, not a refusal; every other failure still
+    // is, so an open that did take part in sharing would send a launch to AppData while the
+    // store is being read, which ProbingLeavesReadersAlone catches.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static bool AclAllowsWrites(string path, Action<string>? degraded, Func<int?, int?>? storeRights)
+    {
+        using var handle = CreateFile(ExtendedLengthPath(path), FileWriteAttributes | ReadControl, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            return Marshal.GetLastPInvokeError() is ErrorFileNotFound or ErrorPathNotFound;
+        }
 
-    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode)]
+        var granted = MaximumAllowed(handle);
+        return SavingAllowed(path, storeRights is null ? granted : storeRights(granted), () => FolderDeleteChildError(path), degraded);
+    }
+
+    // The verdict on an existing store whose open for FILE_WRITE_ATTRIBUTES the kernel granted.
+    // That right alone is not the question Save asks: a hand-built ACL can keep it while denying
+    // the data rights and DELETE, and File.Replace and its File.Move fallback both need DELETE
+    // on the store or FILE_DELETE_CHILD on its folder (R3-12, MD517-01). storeRights is what
+    // AccessCheck grants this process under the store's DACL, or null when that could not be
+    // read or evaluated; the data rights and DELETE come from it, never from opening for them.
+    // It is trusted only where it agrees with the kernel about FILE_WRITE_ATTRIBUTES: a share
+    // whose DACL names the server's own accounts, or a volume without ACLs, is not modelled by
+    // the local token. FILE_DELETE_CHILD takes no part in file sharing, so the folder's answer
+    // comes from the kernel (the server, on a share): folderDeleteChildError returns 0 when it
+    // is granted, otherwise the win32 error of the open that asked. Wherever an answer is
+    // missing, the kernel's write-attributes answer stands as it did before R3-12, and degraded
+    // says so on that resolution, naming the store.
+    internal static bool SavingAllowed(string path, int? storeRights, Func<int> folderDeleteChildError, Action<string>? degraded)
+    {
+        const string kept = "so the store is kept on the kernel's write-attributes answer alone, and a Save its ACL refuses is not caught here";
+        if (storeRights is not int granted)
+        {
+            degraded?.Invoke($"The ACL of the portable preset store '{path}' could not be read or evaluated, {kept}.");
+            return true;
+        }
+
+        if ((granted & FileWriteAttributes) == 0)
+        {
+            degraded?.Invoke($"The ACL of the portable preset store '{path}' grants this process no write attributes although the kernel did (a share whose ACL names the server's own accounts does this), {kept}.");
+            return true;
+        }
+
+        if ((granted & (FileWriteData | FileAppendData)) != (FileWriteData | FileAppendData))
+        {
+            return false;
+        }
+
+        if ((granted & Delete) != 0)
+        {
+            return true;
+        }
+
+        var error = folderDeleteChildError();
+        if (error == ErrorAccessDenied)
+        {
+            return false;
+        }
+
+        if (error != 0)
+        {
+            degraded?.Invoke($"Whether the folder of the portable preset store '{path}' lets this process delete its files could not be asked (win32 {error}), {kept}.");
+        }
+
+        return true;
+    }
+
+    // 0 when the kernel grants this process FILE_DELETE_CHILD on the store's folder, otherwise
+    // the win32 error of the open that asked (-1 if the open failed without one).
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static int FolderDeleteChildError(string path)
+    {
+        using var folder = CreateFile(ExtendedLengthPath(Path.GetDirectoryName(Path.GetFullPath(path))!), FileDeleteChild, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FileFlagBackupSemantics, IntPtr.Zero);
+        if (!folder.IsInvalid)
+        {
+            return 0;
+        }
+
+        var error = Marshal.GetLastPInvokeError();
+        return error == 0 ? -1 : error;
+    }
+
+    // The rights AccessCheck grants this process's token under the handle's owner, group and
+    // DACL, or null when they cannot be read or evaluated.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static int? MaximumAllowed(SafeFileHandle handle)
+    {
+        if (GetSecurityInfo(handle, SeFileObject, OwnerGroupDaclInformation, out _, out _, out _, out _, out var descriptor) != 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(), TokenQuery | TokenDuplicate, out var process))
+            {
+                return null;
+            }
+
+            using (process)
+            {
+                if (!DuplicateToken(process, SecurityImpersonation, out var token))
+                {
+                    return null;
+                }
+
+                using (token)
+                {
+                    var mapping = new GenericMapping { Read = 0x120089, Write = 0x120116, Execute = 0x1200A0, All = 0x1F01FF };
+                    var privileges = new byte[256];
+                    var privilegesLength = privileges.Length;
+                    return AccessCheck(descriptor, token, MaximumAllowedAccess, ref mapping, privileges, ref privilegesLength, out var grantedAccess, out _)
+                        ? grantedAccess
+                        : null;
+                }
+            }
+        }
+        finally
+        {
+            LocalFree(descriptor);
+        }
+    }
+
+    // The extended-length form of a path, for raw Win32 calls that do not add it themselves.
+    internal static string ExtendedLengthPath(string path)
+    {
+        var full = Path.GetFullPath(path);
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal) || full.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            return full;
+        }
+
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
+    }
+
+    private const int FileWriteData = 0x0002;
+    private const int FileAppendData = 0x0004;
+    private const int FileDeleteChild = 0x0040;
+    private const int FileWriteAttributes = 0x0100;
+    private const int Delete = 0x10000;
+    private const int ReadControl = 0x20000;
+    private const int MaximumAllowedAccess = 0x02000000;
+    private const int FileFlagBackupSemantics = 0x02000000;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
+    private const int ErrorAccessDenied = 5;
+    private const int SeFileObject = 1;
+    private const int OwnerGroupDaclInformation = 0x1 | 0x2 | 0x4;
+    private const int TokenDuplicate = 0x0002;
+    private const int TokenQuery = 0x0008;
+    private const int SecurityImpersonation = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GenericMapping
+    {
+        public int Read;
+        public int Write;
+        public int Execute;
+        public int All;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(
         string fileName, int desiredAccess, FileShare shareMode, IntPtr securityAttributes,
         FileMode creationDisposition, int flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("advapi32.dll")]
+    private static extern int GetSecurityInfo(
+        SafeFileHandle handle, int objectType, int securityInfo,
+        out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, int desiredAccess, out SafeAccessTokenHandle token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DuplicateToken(SafeAccessTokenHandle existingToken, int impersonationLevel, out SafeAccessTokenHandle duplicateToken);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AccessCheck(
+        IntPtr securityDescriptor, SafeAccessTokenHandle clientToken, int desiredAccess, ref GenericMapping genericMapping,
+        byte[] privilegeSet, ref int privilegeSetLength, out int grantedAccess, out bool accessStatus);
 }
