@@ -201,10 +201,18 @@ def main():
 
                 # This must be true photo RGB in the glyph field, rather than the normal
                 # green palette or a raw picture placed behind otherwise unchanged rain.
+                # R3-06: both relief legs hold only a fully formed picture. pictureDuration 8
+                # fades in over 1.07 s, about 0.0156 weight per 60 Hz frame, so a hold above .98
+                # could land at 0.984, where each glyph keeps 1.6% of its rain position and
+                # scatters green past the picture: the flat count rose about 10% and the ratio
+                # failed with nothing broken. The weight then stays 1 for 5.6 s, and each held
+                # frame's weight is read back so a hold that lands early fails by name.
                 page.goto(base + "&volumetric=true&showPictures=true&pictureSource=custom&pictureDelay=0&pictureDuration=8&pictureMonochrome=false&pictureCaptions=true&pictureDepth=1&showClock=true", wait_until="load")
-                page.wait_for_function("window.matrixRuntimeDiagnostics?.pictureStatus === 'ready' && matrixRuntimeDiagnostics.pictureWeight > .98 && matrixRuntimeDiagnostics.frames > 5", timeout=20000)
+                page.wait_for_function("window.matrixRuntimeDiagnostics?.pictureStatus === 'ready' && matrixRuntimeDiagnostics.pictureWeight >= .999 && matrixRuntimeDiagnostics.frames > 5", timeout=20000)
                 page.evaluate("__uc3dSmokeClock.held=__uc3dSmokeClock.last")
                 picture = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
+                raised_weight = page.evaluate("matrixRuntimeDiagnostics.pictureWeight")
+                assert raised_weight >= .999, f"raised relief frame held before the picture formed: weight={raised_weight}"
                 pixels = list(picture.get_flattened_data() if hasattr(picture, "get_flattened_data") else picture.getdata())
                 red = sum(r > 50 and r > g * 1.8 and r > b * 1.8 for r, g, b in pixels)
                 green = sum(g > 50 and g > r * 1.8 and g > b * 1.8 for r, g, b in pixels)
@@ -215,9 +223,11 @@ def main():
                 assert not page.locator(".uc3d-overlays script").count(), "caption interpreted markup"
                 picture.save(OUTPUT / f"{backend}-photo.png")
                 page.goto(base + "&volumetric=true&showPictures=true&pictureSource=custom&pictureDelay=0&pictureDuration=8&pictureMonochrome=false&pictureCaptions=false&pictureDepth=0", wait_until="load")
-                page.wait_for_function("window.matrixRuntimeDiagnostics?.pictureStatus === 'ready' && matrixRuntimeDiagnostics.pictureWeight > .98", timeout=20000)
+                page.wait_for_function("window.matrixRuntimeDiagnostics?.pictureStatus === 'ready' && matrixRuntimeDiagnostics.pictureWeight >= .999", timeout=20000)
                 page.evaluate("__uc3dSmokeClock.held=__uc3dSmokeClock.last")
                 flat = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
+                flat_weight = page.evaluate("matrixRuntimeDiagnostics.pictureWeight")
+                assert flat_weight >= .999, f"flat relief frame held before the picture formed: weight={flat_weight}"
                 flat_pixels = list(flat.get_flattened_data() if hasattr(flat, "get_flattened_data") else flat.getdata())
                 flat_green = sum(g > 50 and g > r * 1.8 and g > b * 1.8 for r, g, b in flat_pixels)
                 assert green > flat_green * 1.1, f"picture depth expands bright relief [{shader_path}]: raised={green}, flat={flat_green}"
@@ -232,7 +242,7 @@ def main():
                 assert page.evaluate("matrixRuntimeDiagnostics.frames") == count, "render callback survived disposal"
                 assert not page.locator(".uc3d-overlays").count(), "overlay survived disposal"
                 assert not errors, errors
-                report = {"backend": backend, "redPixels": red, "greenPixels": green, "errors": errors}
+                report = {"backend": backend, "redPixels": red, "greenPixels": green, "flatGreenPixels": flat_green, "raisedWeight": raised_weight, "flatWeight": flat_weight, "errors": errors}
                 reports.append(report)
                 print("PASS actual backend:", json.dumps(report))
                 context.close()
