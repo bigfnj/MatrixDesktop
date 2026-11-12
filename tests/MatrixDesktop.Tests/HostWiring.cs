@@ -503,10 +503,14 @@ internal static class HostWiring
                 var seen = Paths(code, new() { ["System.Windows.Forms.Message::get_Msg"] = message }).Select(Seen).Distinct().ToList();
                 Check.True(seen is [var only] && only == expected, $"WndProc must turn message 0x{message:X2} into '{expected}', got '{string.Join("' or '", seen)}'");
             }
-            var dispatches = code.Where(instruction => IsCall(instruction) && instruction.Name == dispatch).Select(instruction => instruction.Offset).ToList();
+            // The finally must cover the dispatch that follows the store of true, not any dispatch:
+            // one around the other branch's left the flag set after the query.
+            var sets = Enumerable.Range(1, code.Count - 1).Where(index => code[index].Code == OpCodes.Stfld && code[index].Name == flag && code[index - 1].Code == OpCodes.Ldc_I4_1).ToList();
+            var query = sets is [var set] ? code.FindIndex(set, instruction => IsCall(instruction) && instruction.Name == dispatch) : -1;
+            Check.True(query >= 0, $"witness: WndProc must store true in the flag once ({sets.Count} stores) and dispatch after it");
             var guarded = FinallyRegions(path, "MatrixDesktop.MainForm::WndProc")
-                .Where(region => dispatches.Any(offset => offset >= region.TryOffset && offset < region.TryOffset + region.TryLength)).ToList();
-            Check.Equal(1, guarded.Count, "WndProc must dispatch WM_QUERYENDSESSION inside one try/finally");
+                .Where(region => code[query].Offset >= region.TryOffset && code[query].Offset < region.TryOffset + region.TryLength).ToList();
+            Check.Equal(1, guarded.Count, $"WndProc must dispatch WM_QUERYENDSESSION (the call at IL_{code[query].Offset:X4}, after the flag's store of true) inside one try/finally");
             var handler = code.Where(instruction => instruction.Offset >= guarded[0].HandlerOffset && instruction.Offset < guarded[0].HandlerOffset + guarded[0].HandlerLength).ToList();
             var reset = Paths(handler, new()).Select(Seen).Distinct().ToList();
             Check.True(reset is ["flag=0"], "the finally around the dispatch must reset the flag to false, got '" + string.Join("' or '", reset) + "'");
