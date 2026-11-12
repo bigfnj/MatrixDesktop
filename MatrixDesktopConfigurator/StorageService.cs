@@ -230,7 +230,8 @@ internal sealed class StorageService
         return ResolveStoragePath(
             Path.Combine(AppContext.BaseDirectory, FileName),
             Path.Combine(appData, "MatrixDesktop", "Configurator", FileName),
-            warn: Logger.Warn);
+            warn: Logger.Warn,
+            degraded: Logger.Info);
     }
 
     // Program.cs takes the store-keyed single-instance guard AFTER this runs, so two launches
@@ -238,14 +239,16 @@ internal sealed class StorageService
     // store's guard, both open, and one saves to AppData (R2-18, MDR-04). Only a real refusal
     // falls back: no check below fails because another launch is probing or loading the
     // store at the same moment, or because the owner's Save has the store's name briefly
-    // absent (R3-10). whileProbeOpen is a test seam that runs while the folder probe is held;
-    // afterStoreStep runs after the existence check ("exists") and after the attribute check
-    // ("attributes") of an existing store.
+    // absent (R3-10). degraded hears every resolution in which the ACL check of an existing
+    // store could not run in full and kept the kernel's write-attributes answer instead.
+    // whileProbeOpen is a test seam that runs while the folder probe is held; afterStoreStep
+    // runs after the existence check ("exists") and after the attribute check ("attributes") of
+    // an existing store; storeRights replaces the rights the ACL evaluation granted on it.
     internal static (string Path, bool Portable) ResolveStoragePath(
         string portablePath, string appDataPath, Action<string>? whileProbeOpen = null, Action<string>? warn = null,
-        Action<string>? afterStoreStep = null)
+        Action<string>? afterStoreStep = null, Action<string>? degraded = null, Func<int?, int?>? storeRights = null)
     {
-        if (CanWriteStorageFile(portablePath, whileProbeOpen, afterStoreStep))
+        if (CanWriteStorageFile(portablePath, whileProbeOpen, afterStoreStep, degraded, storeRights))
         {
             return (portablePath, true);
         }
@@ -260,7 +263,8 @@ internal sealed class StorageService
         return (appDataPath, false);
     }
 
-    private static bool CanWriteStorageFile(string path, Action<string>? whileProbeOpen, Action<string>? afterStoreStep)
+    private static bool CanWriteStorageFile(
+        string path, Action<string>? whileProbeOpen, Action<string>? afterStoreStep, Action<string>? degraded, Func<int?, int?>? storeRights)
     {
         try
         {
@@ -282,7 +286,7 @@ internal sealed class StorageService
             // launch to AppData, and while it was held that Load failed, took the live store
             // for corrupt and moved it aside. The attribute and ACL checks answer the same
             // question without taking part in file sharing.
-            if (File.Exists(path) && !ExistingStoreAllowsSaving(path, afterStoreStep))
+            if (File.Exists(path) && !ExistingStoreAllowsSaving(path, afterStoreStep, degraded, storeRights))
             {
                 return false;
             }
@@ -313,7 +317,8 @@ internal sealed class StorageService
     // Save. A name that is gone by the time it is examined is the owner's Save between
     // File.Replace's two renames (the live store moved to .bak, the new copy not yet on its
     // name): that is a missing store, which the folder probe decides (R3-10).
-    private static bool ExistingStoreAllowsSaving(string path, Action<string>? afterStoreStep)
+    private static bool ExistingStoreAllowsSaving(
+        string path, Action<string>? afterStoreStep, Action<string>? degraded, Func<int?, int?>? storeRights)
     {
         afterStoreStep?.Invoke("exists");
         FileAttributes attributes;
@@ -332,7 +337,7 @@ internal sealed class StorageService
         }
 
         afterStoreStep?.Invoke("attributes");
-        return !OperatingSystem.IsWindows() || AclAllowsWrites(path);
+        return !OperatingSystem.IsWindows() || AclAllowsWrites(path, degraded, storeRights);
     }
 
     // The store is opened for FILE_WRITE_ATTRIBUTES and READ_CONTROL only. Neither takes part
@@ -344,7 +349,7 @@ internal sealed class StorageService
     // is, so an open that did take part in sharing would send a launch to AppData while the
     // store is being read, which ProbingLeavesReadersAlone catches.
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static bool AclAllowsWrites(string path)
+    private static bool AclAllowsWrites(string path, Action<string>? degraded, Func<int?, int?>? storeRights)
     {
         using var handle = CreateFile(ExtendedLengthPath(path), FileWriteAttributes | ReadControl, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0, IntPtr.Zero);
         if (handle.IsInvalid)
@@ -352,39 +357,75 @@ internal sealed class StorageService
             return Marshal.GetLastPInvokeError() is ErrorFileNotFound or ErrorPathNotFound;
         }
 
-        return DaclAllowsSaving(handle, path);
+        var granted = MaximumAllowed(handle);
+        return SavingAllowed(path, storeRights is null ? granted : storeRights(granted), () => FolderDeleteChildError(path), degraded);
     }
 
-    // FILE_WRITE_ATTRIBUTES alone is not the question Save asks. A hand-built ACL can keep it
-    // while denying the data rights and DELETE: File.Replace and its File.Move fallback both
-    // need DELETE on the store, or FILE_DELETE_CHILD on its folder (R3-12, MD517-01). Those
-    // rights are read from the DACL, evaluated against this process's token, never by opening
-    // for them. The evaluation is trusted only where it agrees with the kernel's answer for
-    // FILE_WRITE_ATTRIBUTES above: a share whose DACL names the server's own accounts, or a
-    // volume without ACLs, is not modelled by the local token, and there the kernel's answer
-    // stands as it did before.
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static bool DaclAllowsSaving(SafeFileHandle store, string path)
+    // The verdict on an existing store whose open for FILE_WRITE_ATTRIBUTES the kernel granted.
+    // That right alone is not the question Save asks: a hand-built ACL can keep it while denying
+    // the data rights and DELETE, and File.Replace and its File.Move fallback both need DELETE
+    // on the store or FILE_DELETE_CHILD on its folder (R3-12, MD517-01). storeRights is what
+    // AccessCheck grants this process under the store's DACL, or null when that could not be
+    // read or evaluated; the data rights and DELETE come from it, never from opening for them.
+    // It is trusted only where it agrees with the kernel about FILE_WRITE_ATTRIBUTES: a share
+    // whose DACL names the server's own accounts, or a volume without ACLs, is not modelled by
+    // the local token. FILE_DELETE_CHILD takes no part in file sharing, so the folder's answer
+    // comes from the kernel (the server, on a share): folderDeleteChildError returns 0 when it
+    // is granted, otherwise the win32 error of the open that asked. Wherever an answer is
+    // missing, the kernel's write-attributes answer stands as it did before R3-12, and degraded
+    // says so on that resolution, naming the store.
+    internal static bool SavingAllowed(string path, int? storeRights, Func<int> folderDeleteChildError, Action<string>? degraded)
     {
-        var granted = MaximumAllowed(store);
-        if (granted is not int file || (file & FileWriteAttributes) == 0)
+        const string kept = "so the store is kept on the kernel's write-attributes answer alone, and a Save its ACL refuses is not caught here";
+        if (storeRights is not int granted)
         {
+            degraded?.Invoke($"The ACL of the portable preset store '{path}' could not be read or evaluated, {kept}.");
             return true;
         }
 
-        if ((file & (FileWriteData | FileAppendData)) != (FileWriteData | FileAppendData))
+        if ((granted & FileWriteAttributes) == 0)
+        {
+            degraded?.Invoke($"The ACL of the portable preset store '{path}' grants this process no write attributes although the kernel did (a share whose ACL names the server's own accounts does this), {kept}.");
+            return true;
+        }
+
+        if ((granted & (FileWriteData | FileAppendData)) != (FileWriteData | FileAppendData))
         {
             return false;
         }
 
-        if ((file & Delete) != 0)
+        if ((granted & Delete) != 0)
         {
             return true;
         }
 
-        using var folder = CreateFile(ExtendedLengthPath(Path.GetDirectoryName(Path.GetFullPath(path))!), ReadControl, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FileFlagBackupSemantics, IntPtr.Zero);
-        var folderGranted = folder.IsInvalid ? null : MaximumAllowed(folder);
-        return folderGranted is not int children || (children & FileDeleteChild) != 0;
+        var error = folderDeleteChildError();
+        if (error == ErrorAccessDenied)
+        {
+            return false;
+        }
+
+        if (error != 0)
+        {
+            degraded?.Invoke($"Whether the folder of the portable preset store '{path}' lets this process delete its files could not be asked (win32 {error}), {kept}.");
+        }
+
+        return true;
+    }
+
+    // 0 when the kernel grants this process FILE_DELETE_CHILD on the store's folder, otherwise
+    // the win32 error of the open that asked (-1 if the open failed without one).
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static int FolderDeleteChildError(string path)
+    {
+        using var folder = CreateFile(ExtendedLengthPath(Path.GetDirectoryName(Path.GetFullPath(path))!), FileDeleteChild, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FileFlagBackupSemantics, IntPtr.Zero);
+        if (!folder.IsInvalid)
+        {
+            return 0;
+        }
+
+        var error = Marshal.GetLastPInvokeError();
+        return error == 0 ? -1 : error;
     }
 
     // The rights AccessCheck grants this process's token under the handle's owner, group and
@@ -450,6 +491,7 @@ internal sealed class StorageService
     private const int FileFlagBackupSemantics = 0x02000000;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
+    private const int ErrorAccessDenied = 5;
     private const int SeFileObject = 1;
     private const int OwnerGroupDaclInformation = 0x1 | 0x2 | 0x4;
     private const int TokenDuplicate = 0x0002;
