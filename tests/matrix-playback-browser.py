@@ -218,6 +218,71 @@ def check_scene_initial_pause(context, port, backend):
     return results
 
 
+SKIP_THEN_PAUSE = """(() => {
+  // Pause in the task of the renderer's first frame, right after it, so the second frame is
+  // the first paused one. Every frame callback is wrapped; the first to end with one frame
+  // counted sends the host's pause.
+  const request = window.requestAnimationFrame.bind(window);
+  window.__pausedAtFrames = null;
+  window.requestAnimationFrame = callback => request(time => {
+    try { callback(time); }
+    finally {
+      if (window.__pausedAtFrames === null && window.matrixRuntimeDiagnostics?.frames === 1) {
+        window.__pausedAtFrames = window.matrixRuntimeDiagnostics.frames;
+        window.matrixHostPlaybackState = { paused: true };
+        window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: window.matrixHostPlaybackState }));
+      }
+    }
+  });
+})();"""
+
+
+def check_regl_skip_then_pause(context, port):
+    """A pause after a first frame that skipped rendering must still show a frame (R3-01).
+
+    Below 60 fps the first frame only starts the frame clock and shows the pipeline's empty
+    output, so nothing is on screen yet. A host pause that lands before the next frame must
+    not find the loop marked as presented: that frame renders once and parks, or the wallpaper
+    stays black under the pause. The WebGPU node case 'a pause after a frame that skipped
+    rendering must still render one' is the same contract.
+    """
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(SKIP_THEN_PAUSE)
+    host = "paused => { window.matrixHostPlaybackState = { paused }; window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: window.matrixHostPlaybackState })); }"
+    try:
+        page.goto(f"http://127.0.0.1:{port}/index.html?renderer=regl&suppressWarnings=true&resolution=1&fps=30", wait_until="load")
+        try:
+            page.wait_for_function("window.__pausedAtFrames !== null", timeout=30000)
+        except Exception:
+            raise AssertionError("the renderer never drew its first frame, so the skip-then-pause check proved nothing") from None
+        page.wait_for_timeout(1000)
+        held = capture(page)
+        state = page.evaluate("({ pausedAt: window.__pausedAtFrames, frames: matrixRuntimeDiagnostics.frames, backend: matrixRuntimeDiagnostics.backend })")
+        stddev = max(ImageStat.Stat(held).stddev)
+        assert state["backend"] == "regl", "requested backend silently fell back"
+        assert state["pausedAt"] == 1, f"the pause landed after frame {state['pausedAt']}, not the first, so the check proved nothing"
+        assert state["frames"] == 2, (f"original Matrix at 30 fps regl: a pause after a first frame that skipped rendering left "
+                                      f"{state['frames']} frames, not 2, and the paused screen shows canvas stddev {stddev:.2f}")
+        assert stddev > 3, f"original Matrix at 30 fps regl: the frame drawn under a pause after a skipped first frame is a uniform fill (stddev {stddev:.2f})"
+        page.wait_for_timeout(250)
+        later = page.evaluate("matrixRuntimeDiagnostics.frames")
+        assert later == 2, f"a paused renderer kept drawing after its frozen frame ({later} frames)"
+        assert ImageChops.difference(held, capture(page)).getbbox() is None, "the frozen frame after a skipped first frame changed"
+        page.evaluate(host, False)
+        try:
+            page.wait_for_function("matrixRuntimeDiagnostics.frames > 4", timeout=10000)
+        except Exception:
+            raise AssertionError("the renderer did not draw again within 10 s of a resume after a skip-then-pause") from None
+        page.evaluate("matrixRuntimeDiagnostics.dispose()")
+        page.wait_for_timeout(100)
+        assert not errors, errors
+        return stddev
+    finally:
+        page.close()
+
+
 def lose_regl_context(page):
     """Lose the running renderer's WebGL context; it must clear ready and report the loss once.
 
@@ -684,6 +749,8 @@ def main():
                         print("PASS Plug me in survives a recovery reload and a navigation to the startup query; a changed configuration still shows the software rendering notice", flush=True)
                         playing = check_regl_paused_loop(context, server.server_port)
                         print(f"PASS original Matrix regl parks its frame loop through a visible host pause (0 frame requests in 2 s against {playing} in 1 s of play) and resumes", flush=True)
+                        skipped = check_regl_skip_then_pause(context, server.server_port)
+                        print(f"PASS original Matrix regl at 30 fps: a pause after a first frame that skipped rendering still draws one frozen frame (canvas stddev {skipped:.1f}), then resumes", flush=True)
                 finally:
                     context.close()
             browser.close()
