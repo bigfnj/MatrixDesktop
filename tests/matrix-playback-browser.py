@@ -1,4 +1,5 @@
-"""Verify the original Matrix renderer survives an initial and mid-run pause."""
+"""Verify the original Matrix renderer survives an initial and mid-run pause, and that every scene
+shows a frame under a pause in force at load."""
 import argparse
 import functools
 import http.server
@@ -142,6 +143,79 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def capture(page):
     return Image.open(io.BytesIO(page.locator("canvas").first.screenshot())).convert("RGB")
+
+
+HELD_BOOTSTRAP = """(() => {
+  // Hold the renderer before it starts, so the test can pause the loaded page first.
+  window.matrixHostBootstrapReady = new Promise(resolve => { window.__resolveNativeBootstrap = resolve; });
+})();"""
+
+
+def check_initial_pause_frame(page, label):
+    """A pause already in force at the first frame must leave that frame on screen (R3-01).
+
+    A manual, fullscreen-app or battery pause leaves the page visible (AUD-06), and it outlives
+    a surface rebuild and a reload, so a renderer that parked before its first frame showed
+    black for the whole pause. It draws one frame and parks: one frame, and no other.
+    """
+    try:
+        page.wait_for_function("window.matrixRuntimeDiagnostics?.frames >= 1", timeout=10000)
+    except Exception:
+        image = capture(page)
+        frames = page.evaluate("window.matrixRuntimeDiagnostics?.frames")
+        raise AssertionError(f"{label}: a renderer paused before its first frame drew {frames} frames in 10 s, "
+                             f"so the paused screen is blank (canvas stddev {max(ImageStat.Stat(image).stddev):.2f})") from None
+    page.wait_for_timeout(750)
+    held = capture(page)
+    frames = page.evaluate("matrixRuntimeDiagnostics.frames")
+    stddev = max(ImageStat.Stat(held).stddev)
+    assert frames == 1, f"{label}: a renderer paused before its first frame drew {frames} frames, not one"
+    assert stddev > 3, f"{label}: the frame drawn under a pause in force at load is a uniform fill (stddev {stddev:.2f})"
+    page.wait_for_timeout(250)
+    later = page.evaluate("matrixRuntimeDiagnostics.frames")
+    assert later == 1, f"{label}: a paused renderer kept drawing after its first frame ({later} frames)"
+    assert ImageChops.difference(held, capture(page)).getbbox() is None, f"{label}: the paused first frame changed"
+    return stddev
+
+
+def check_scene_initial_pause(context, port, backend):
+    """Every scene keeps a frame on screen under a pause that arrives before its first frame (R3-01).
+
+    In the host's order: the host pauses at NavigationCompleted (MainForm.SetHostPausedAsync),
+    and the renderer starts after the native bootstrap and its own assets. The Matrix case runs
+    at 30 fps, where a frame may skip rendering; the UC3D and ZMatrix frames are warmed as once
+    warms them, so the frozen frame is not empty.
+    """
+    # The host's own script: renderer modules not yet imported read the state when they load.
+    host = "paused => { window.matrixHostPlaybackState = { paused }; window.dispatchEvent(new CustomEvent('matrix-host-state', { detail: window.matrixHostPlaybackState })); }"
+    results = {}
+    for label, query in (
+        ("original Matrix at 30 fps", f"renderer={backend}&suppressWarnings=true&resolution=1&fps=30"),
+        ("UC3D", f"scene=uc3d&renderer={backend}&suppressWarnings=true&resolution=1"),
+        ("ZMatrix", f"scene=zmatrix&renderer={backend}&suppressWarnings=true&resolution=1&fps=30"
+                    "&zmMaxStream=80&zmRefreshTime=20&zmBackgroundMode=color&zmBackgroundColor=9,18,27"),
+    ):
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.add_init_script(HELD_BOOTSTRAP)
+        try:
+            page.goto(f"http://127.0.0.1:{port}/index.html?{query}", wait_until="load")
+            page.evaluate(host, True)
+            page.evaluate("window.__resolveNativeBootstrap()")
+            results[label] = check_initial_pause_frame(page, f"{label} {backend}")
+            assert page.evaluate("matrixRuntimeDiagnostics.backend") == backend, f"{label}: requested backend silently fell back"
+            page.evaluate(host, False)
+            try:
+                page.wait_for_function("matrixRuntimeDiagnostics.frames > 3", timeout=10000)
+            except Exception:
+                raise AssertionError(f"{label} {backend}: the renderer did not draw again within 10 s of a resume") from None
+            page.evaluate("matrixRuntimeDiagnostics.dispose()")
+            page.wait_for_timeout(100)
+            assert not errors, errors
+        finally:
+            page.close()
+    return results
 
 
 def lose_regl_context(page):
@@ -548,18 +622,18 @@ def main():
                         continue
                     page.wait_for_function("window.matrixRuntimeDiagnostics?.initialized", timeout=30000)
                     assert page.evaluate("matrixRuntimeDiagnostics.backend") == backend, "requested backend silently fell back"
-                    page.wait_for_timeout(750)
-                    assert page.evaluate("matrixRuntimeDiagnostics.frames") == 0, "initially paused renderer executed GPU passes"
+                    check_initial_pause_frame(page, f"original Matrix {backend}")
                     page.evaluate("window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:false}}))")
                     page.wait_for_function("matrixRuntimeDiagnostics.frames > 8")
                     if backend == "regl":
                         ticks = page.evaluate("window.__matrixTickUniforms")
                         assert ticks and ticks[0] == 0 and 1 in ticks, f"GPU shader tick skipped initial state after pause: {ticks[:12]}"
                     assert max(ImageStat.Stat(capture(page)).stddev) > 3, "resumed original Matrix rendered a uniform frame"
-                    page.evaluate("window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:true}}))")
+                    # The count is read in the pause's own task, so the frame already requested
+                    # when the pause arrives must park too, and not draw once more.
+                    frames = page.evaluate("() => { window.dispatchEvent(new CustomEvent('matrix-host-state',{detail:{paused:true}})); return matrixRuntimeDiagnostics.frames; }")
                     page.wait_for_timeout(50)
                     paused = capture(page)
-                    frames = page.evaluate("matrixRuntimeDiagnostics.frames")
                     page.wait_for_timeout(250)
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames, "paused original Matrix continued drawing"
                     assert ImageChops.difference(paused, capture(page)).getbbox() is None, "paused original Matrix changed pixels"
@@ -572,7 +646,10 @@ def main():
                     assert page.evaluate("matrixRuntimeDiagnostics.frames") == frames
                     # AUD-55: checked after teardown, so errors raised by disposal are seen too.
                     assert not errors, errors
-                    print(f"PASS original Matrix {backend}: initial pause, shader initialization, mid-run pause, resume and disposal", flush=True)
+                    print(f"PASS original Matrix {backend}: initial pause shows one frame, shader initialization, mid-run pause, resume and disposal", flush=True)
+                    scenes = check_scene_initial_pause(context, server.server_port, backend)
+                    print(f"PASS {backend} initial host pause shows one frozen frame in every scene, then resumes (canvas stddev "
+                          + ", ".join(f"{label} {stddev:.1f}" for label, stddev in scenes.items()) + ")", flush=True)
                     if backend == "regl":
                         failed = context.new_page()
                         failed.add_init_script("window.matrixHostBootstrapReady=new Promise((resolve,reject)=>{window.__rejectNativeBootstrap=reject;});")

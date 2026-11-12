@@ -186,13 +186,19 @@ export default async (canvas, config) => {
 	// after a cancel regl's next request stays pending, and a loop made again at that moment
 	// would run twice per frame. regl.poll() and the flush are what regl.frame did around each
 	// callback.
+	// R3-01: a pause can already be in force at the first frame (it outlives a surface rebuild
+	// and a reload), and parking then left the canvas black for the whole pause. A paused frame
+	// with nothing presented yet draws once, at tick 0, and parks; later paused frames park with
+	// the last frame on screen.
+	let presented = false;
 	const draw = () => {
 		frameRequest = null;
 		// AUD-19: isContextLost() turns true before the browser queues webglcontextlost, so a
 		// frame in between finds the canvas blank and must clear ready, as UC3D and ZMatrix do.
 		if (contextLost || regl._gl.isContextLost()) { diagnostics.ready = false; return; }
-		if (clock.paused) { parked = true; return; }
-		if (!singleFrame) frameRequest = requestAnimationFrame(draw);
+		const paused = clock.paused;
+		if (paused && presented) { parked = true; return; }
+		if (!singleFrame && !paused) frameRequest = requestAnimationFrame(draw);
 		regl.poll();
 		const viewportWidth = regl._gl.drawingBufferWidth, viewportHeight = regl._gl.drawingBufferHeight;
 
@@ -202,7 +208,7 @@ export default async (canvas, config) => {
 			last = now;
 		}
 
-		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame;
+		const shouldRender = config.fps >= 60 || now - last >= targetFrameTimeMilliseconds || singleFrame || paused;
 
 		if (shouldRender) {
 			while (now - targetFrameTimeMilliseconds > last) {
@@ -230,11 +236,14 @@ export default async (canvas, config) => {
 		activeFrames++;
 		diagnostics.frames = activeFrames; diagnostics.ready = true;
 		diagnostics.simulationTime = clock.seconds();
+		// A frame that skipped rendering (below 60 fps) shows the last output, which is empty
+		// before the first rendered frame.
+		if (shouldRender) presented = true;
 		if (singleFrame) {
 			// Keep the rendered still frame visible; pagehide owns final GPU teardown.
 			stillShown = true;
 			if (config.useCamera) stopCamera();
-		}
+		} else if (paused) parked = true;
 		regl._gl.flush();
 	};
 	stopListening = subscribeHostPlayback((paused) => {

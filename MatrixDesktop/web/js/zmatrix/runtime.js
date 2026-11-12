@@ -165,7 +165,7 @@ export async function createRuntime(canvas, options, backend, maximumDimension =
 export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
   const clock = environment.clock ?? createPlaybackClock();
   const requested = Number(runtime.config.fps ?? 60), fps = Number.isFinite(requested) ? Math.max(0, Math.min(120, requested)) : 60;
-  let frame = 0, dead = false, parked = false, previous = -Infinity, warmed = false;
+  let frame = 0, dead = false, parked = false, previous = -Infinity, warmed = false, presented = false;
   const dispose = () => {
     if (dead) return; dead = true; cancelAnimationFrame(frame); window.removeEventListener("pagehide", dispose);
     unsubscribe(); clock.dispose(); runtime.dispose(); cleanup();
@@ -175,6 +175,7 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
     // A draw that returns false presented nothing: a lost context waits for its event.
     if (draw(state) === false) { runtime.diagnostics.ready = false; return; }
     runtime.diagnostics.frames++; runtime.diagnostics.lastPresentedRevision = state.revision; runtime.diagnostics.ready = true;
+    presented = true;
   };
   const fail = error => {
     if (runtime.diagnostics.errors.length < 32) runtime.diagnostics.errors.push(error.message);
@@ -190,12 +191,15 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
   const tick = now => {
     if (dead) return;
     const seconds = clock.seconds(now);
-    // A paused host keeps the last frame on screen: park without requesting another frame.
-    if (clock.paused) { parked = true; return; }
+    // A paused host keeps the last presented frame on screen: park without requesting another
+    // frame. R3-01: a pause in force before any frame presented (it outlives a surface rebuild
+    // and a reload) draws one warmed frame first, as once does, or the screen stays blank.
+    const paused = clock.paused;
+    if (paused && presented) { parked = true; return; }
     if (fps === 0 || runtime.config.once || now - previous >= 1000 / fps - .5) {
       try {
         let state = runtime.update(seconds);
-        if ((runtime.config.once || fps === 0) && !warmed) {
+        if ((runtime.config.once || fps === 0 || paused) && !warmed) {
           const ticks = Math.min(200, Math.ceil(10000 / runtime.config.zmRefreshTime));
           for (let i = 0; i < ticks; i += 100) state = runtime.advanceTicks(Math.min(100, ticks - i));
           runtime.diagnostics.warmupTicks = ticks; warmed = true;
@@ -204,6 +208,7 @@ export function startLoop(canvas, runtime, draw, cleanup, environment = {}) {
       } catch (error) { fail(error); return; }
       if (runtime.config.once || fps === 0) return;
     }
+    if (paused) { parked = true; return; }
     frame = requestAnimationFrame(tick);
   };
   // The host's resume re-arms a parked loop once. The listener also runs on subscribing.

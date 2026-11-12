@@ -307,16 +307,26 @@ await test("once mode warms bounded ticks and stops RAF while preserving frame",
     loop.stop(); loop.stop(); assert.deepEqual(loop.counts(), { disposed: 1, cleaned: 1, clockDisposed: 1 }); assert.equal(loop.listeners.get("pagehide").size, 0);
   } finally { loop.restore(); }
 });
-await test("host paused loop does not simulate present or accumulate inactive clocktime", () => {
+// R3-01: a visible pause outlives a surface rebuild and a reload, so it can be in force before the
+// first frame; that frame is drawn and warmed, as once warms it, or the screen stays a flat fill.
+await test("host paused loop draws one warmed first frame, then does not simulate present or accumulate inactive clocktime", () => {
   const loop = mockLoop({});
-  try { loop.host(true); loop.run(0); assert.deepEqual(loop.updates, []);
+  try { loop.host(true); loop.run(0);
+    assert.deepEqual([loop.updates, loop.steps, loop.runtime.diagnostics.frames], [[0], [100, 100], 1], "a pause in force before the first frame must draw that frame, warmed");
     assert.equal(loop.callbacks.size, 0, "a paused loop must stop requesting animation frames");
     loop.clock.value = .5; loop.host(false); assert.equal(loop.callbacks.size, 1, "the host's resume must re-arm the parked loop");
-    loop.run(500); assert.deepEqual(loop.updates, [.5]);
-    loop.host(true); loop.run(20000); assert.equal(loop.runtime.diagnostics.frames, 1); assert.equal(loop.callbacks.size, 0);
+    loop.run(500); assert.deepEqual(loop.updates, [0, .5]); assert.deepEqual(loop.steps, [100, 100], "a resumed loop must not warm again");
+    loop.host(true); loop.run(20000); assert.equal(loop.runtime.diagnostics.frames, 2); assert.equal(loop.callbacks.size, 0);
     loop.clock.value = .6; loop.host(false); loop.host(false); assert.equal(loop.callbacks.size, 1, "a repeated resume must not arm a second loop");
-    loop.run(21000); assert.deepEqual(loop.updates, [.5, .6]);
+    loop.run(21000); assert.deepEqual(loop.updates, [0, .5, .6]);
     loop.stop(); assert.equal(loop.callbacks.size, 0); assert.equal(loop.hosts.size, 0, "teardown must unsubscribe from host playback");
+  } finally { loop.restore(); }
+});
+await test("a paused first frame that presented nothing (a lost context) is drawn again on the next paused frame", () => {
+  let attempts = 0;
+  const loop = mockLoop({}, () => { attempts++; return false; });
+  try { loop.host(true); loop.run(0); assert.deepEqual([attempts, loop.runtime.diagnostics.frames, loop.callbacks.size], [1, 0, 0], "a paused draw that presented nothing still parks");
+    loop.host(false); loop.host(true); loop.run(100); assert.equal(attempts, 2, "a paused frame must draw again while nothing has presented");
   } finally { loop.restore(); }
 });
 await test("explicit teardown cancels pending RAF and prevents future scheduling", () => {

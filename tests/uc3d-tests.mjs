@@ -388,6 +388,48 @@ test("a host pause parks the UC3D loop and the host's resume re-arms it once", (
     stop(); assert.equal(callbacks.size, 0); assert.equal(hosts.size, 0, "teardown must unsubscribe from host playback");
   } finally { globalThis.window = oldWindow; globalThis.requestAnimationFrame = oldRequest; globalThis.cancelAnimationFrame = oldCancel; }
 });
+// R3-01: a visible pause outlives a surface rebuild and a reload, so it can be in force before
+// the first frame; parking then left the wallpaper black for the whole pause.
+test("a pause in force before the first frame draws one settled frame, parks, and resumes from it", () => {
+  const oldWindow = globalThis.window, oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
+  const callbacks = new Map(); let serial = 0;
+  globalThis.window = { devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+  globalThis.requestAnimationFrame = callback => { callbacks.set(++serial, callback); return serial; };
+  globalThis.cancelAnimationFrame = id => callbacks.delete(id);
+  const run = now => { const [id, callback] = callbacks.entries().next().value; callbacks.delete(id); callback(now); };
+  const start = (controls, draw) => {
+    const hosts = new Set(), clock = { paused: true, seconds: now => now / 1000, dispose() {} }, observed = [];
+    const runtime = { config: { fps: 60, resolution: 1, uc3dControls: controls }, diagnostics: { errors: [], frames: 0 },
+      update: seconds => { observed.push(seconds); return {}; }, dispose() {} };
+    const stop = startLoop({ clientWidth: 20, clientHeight: 10 }, runtime, draw, () => {}, Infinity,
+      { clock, subscribe: listener => { hosts.add(listener); listener(clock.paused); return () => hosts.delete(listener); } });
+    return { runtime, observed, stop, host: paused => { clock.paused = paused; for (const listener of [...hosts]) listener(paused); } };
+  };
+  try {
+    for (const controls of ["original", "legacy"]) {
+      let draws = 0;
+      const loop = start(controls, () => { draws++; });
+      try {
+        run(0);
+        assert.deepEqual([draws, loop.runtime.diagnostics.frames], [1, 1], `${controls}: a pause in force before the first frame must still draw that frame`);
+        assert.equal(callbacks.size, 0, `${controls}: after its first frame a paused loop must park`);
+        // Original controls settle as once does; legacy time zero already shows rain.
+        assert.deepEqual(loop.observed, [controls === "original" ? 10 : 0], `${controls}: the paused first frame's scene time`);
+        loop.host(false); assert.equal(callbacks.size, 1, `${controls}: the resume must re-arm the loop`);
+        run(100); assert.equal(draws, 2, `${controls}: the resumed loop must draw`);
+        assert(Math.abs(loop.observed[1] - (controls === "original" ? 10.1 : 0.1)) < 1e-9, `${controls}: the resume must continue from the paused frame, not restart: ${loop.observed[1]}`);
+      } finally { loop.stop(); }
+    }
+    // Only a presented frame counts: a lost context's draw returns false, and the next paused frame tries again.
+    let attempts = 0;
+    const lost = start("original", () => { attempts++; return false; });
+    try {
+      run(0); assert.deepEqual([attempts, lost.runtime.diagnostics.frames, callbacks.size], [1, 0, 0], "a paused draw that presented nothing still parks");
+      lost.host(false); lost.host(true); run(100);
+      assert.equal(attempts, 2, "a paused frame must draw again while nothing has presented");
+    } finally { lost.stop(); }
+  } finally { globalThis.window = oldWindow; globalThis.requestAnimationFrame = oldRequest; globalThis.cancelAnimationFrame = oldCancel; }
+});
 const previousDocument = globalThis.document, previousAudio = globalThis.Audio;
 const listeners = new Map(), buttons = [];
 globalThis.document = {

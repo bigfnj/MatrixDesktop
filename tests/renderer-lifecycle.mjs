@@ -893,4 +893,46 @@ await test("WebGPU Matrix renderer parks its frame loop through a host pause (R2
 	}
 });
 
+// R3-01: a visible pause outlives a surface rebuild and a reload, so it can be in force before the
+// first frame; parking then left the canvas black for the whole pause.
+await test("WebGPU Matrix renderer under a pause in force at load draws one frame, parks, and resumes (R3-01)", async () => {
+	assert.equal(typeof hostState, "function", "js/hostPlayback.js no longer listens for matrix-host-state on window");
+	const host = (paused) => hostState({ detail: { paused } });
+	host(true);
+	const run = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "30" } });
+	try {
+		run.frame(16);
+		assert(run.device.renderPasses > 0, "a pause in force before the first frame must still render that frame");
+		assert.deepEqual([run.diagnostics.frames, run.diagnostics.ready], [1, true]);
+		assert.equal(pendingFrame, null, "after its first frame a paused renderer must park");
+		host(false);
+		assert.notEqual(pendingFrame, null, "a resume must request a frame");
+		// A pause that arrives with that frame still pending parks it: the first frame is on screen.
+		host(true);
+		const passes = run.device.renderPasses;
+		run.frame(33);
+		assert.deepEqual([run.diagnostics.frames, run.device.renderPasses, pendingFrame], [1, passes, null], "a paused frame after the first must draw nothing");
+		host(false);
+		run.frame(50);
+		assert.equal(run.diagnostics.frames, 2, "the frame after a resume must draw");
+		assert.notEqual(pendingFrame, null, "the resumed renderer must keep requesting frames");
+	} finally {
+		host(false);
+		run.dispose();
+	}
+	// Below 60 fps the first frame skips rendering and presents nothing, so a pause after it still draws one.
+	const skipped = await startMatrixWebGPU({ adapterLimit: 8192, cssWidth: 640, cssHeight: 360, resolution: 1, params: { fps: "30" } });
+	try {
+		skipped.frame(16);
+		assert.equal(skipped.device.renderPasses, 0, "witness: the first frame below 60 fps skips rendering");
+		host(true);
+		skipped.frame(33);
+		assert(skipped.device.renderPasses > 0, "a pause after a frame that skipped rendering must still render one");
+		assert.equal(pendingFrame, null, "and then park");
+	} finally {
+		host(false);
+		skipped.dispose();
+	}
+});
+
 console.log(`${passes} renderer lifecycle checks passed; source=${fileURLToPath(root)}`);
