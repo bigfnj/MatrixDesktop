@@ -1047,7 +1047,8 @@ def check_matrix_web(page, origin):
     except NotReady as stall:
         stalled = stall
 
-    # A harness failure explains the console errors it caused, so it is the one verdict.
+    # A harness failure explains the console errors it caused, so its verdict (with any product
+    # failure that does not follow from it) replaces the console-error check.
     if stalled is not None and stalled.cause:
         report_not_ready("matrix web bundle sizes its canvas", stalled)
         return
@@ -1208,13 +1209,15 @@ class PageEvidence:
 
     Attached before page.goto, so a module request that fails in the first milliseconds is
     seen. A readiness failure reads it before the check closes the page and stops recording,
-    so the transfers page.close() aborts never reach a verdict.
+    so the transfers page.close() aborts never reach a verdict. expected holds the other-origin
+    URLs the check itself blocks, which are not a product failure beside a harness fault.
     """
 
-    def __init__(self, page, origin):
-        self.origin = origin
+    def __init__(self, page, origin, expected=()):
+        self.page, self.origin, self.expected = page, origin, set(expected)
         self.failed, self.statuses, self.console, self.page_errors = [], [], [], []
-        self.recording = True
+        self.recording, self.reloading = True, False
+        page.on("request", self._request)
         page.on("requestfailed", self._request_failed)
         page.on("response", self._response)
         page.on("console", self._console)
@@ -1223,11 +1226,28 @@ class PageEvidence:
     def own(self, url):
         return url.startswith(self.origin + "/")
 
+    def next_document(self):
+        """For a reload the check itself causes: call it before the reload, and the records
+        restart when the reload's main-frame navigation request is issued, before the new
+        document has made a request. A reset after the navigation wait, which returns at the new
+        document's load event, erased that document's own failures: a recovery page whose
+        /js/main.js answered 404 reported a renderer that never initialized and no failed
+        request (MDST-04). A request the old document still has in flight is not reported when
+        the reload aborts it (measured: a fetch to a socket that never answers, issued 330 ms
+        before the reload, gave no requestfailed event). Only what the old document reports
+        between the navigation request and the commit would still count, and the recovery
+        check's old document is idle then."""
+        self.reloading = True
+
     def new_document(self):
-        """Forget the previous document's records at a reload the check itself caused, whose
-        in-flight requests that reload aborts."""
+        """Forget the records so far (see next_document())."""
         for records in (self.failed, self.statuses, self.console, self.page_errors):
             records.clear()
+
+    def _request(self, request):
+        if self.reloading and request.is_navigation_request() and request.frame == self.page.main_frame:
+            self.reloading = False
+            self.new_document()
 
     def _request_failed(self, request):
         if self.recording:
@@ -1264,20 +1284,55 @@ def server_unreachable(origin):
     return None
 
 
+class HarnessCause(str):
+    """harness_cause()'s answer: why the harness stopped a renderer. product holds the page's
+    product failures that do not follow from that fault, which stay a FAIL beside it."""
+
+    def __new__(cls, text, product):
+        cause = super().__new__(cls, text)
+        cause.product = product
+        return cause
+
+
+def independent_failures(evidence):
+    """A page's product failures that do not follow from a harness fault, read from its requests:
+    an HTTP status >= 400 (a shipped file missing or broken) and a request to another origin the
+    check did not block on purpose.
+
+    Not its console or page errors. The product reports a load the fault broke through its own
+    error boundary, in words that name neither the request nor the fault: main.js's "Failed to
+    load renderer: Event" for a classic script, "...: TypeError: Failed to fetch" for a shader
+    text, "...: EncodingError: The source image cannot be decoded." for the glyph atlas. A rule
+    that counted every error but the import cascade made each of those a FAIL, so a harness
+    fault alone on any of the matrix page's 13 such requests exited 1, not 3 (MDST-01, round 3).
+    A fault on one request does not answer another with a status or send one to another origin:
+    with each own-origin request of the matrix, UC3D and ZMatrix pages failed alone, none did.
+    """
+    found = [f"{url} {status}" for url, status in evidence.statuses if url not in evidence.expected]
+    found += [f"{url} {error}" for url, error in evidence.failed
+              if not evidence.own(url) and url not in evidence.expected]
+    return found
+
+
 def harness_cause(evidence):
-    """The infrastructure failure behind a renderer that did not start, or None.
+    """The infrastructure failure behind a renderer that did not start, as a HarnessCause, or None.
 
     Only two causes belong to the harness: a smoke server that does not answer, and a request
     to its own origin that failed with a loopback resource error. Everything else stays the
     product's FAIL: an HTTP 404 of a shipped module, a request to another origin, a renderer
-    that initializes and draws nothing, a wrong app URL.
+    that initializes and draws nothing, a wrong app URL. On a page the harness broke, those stay
+    a FAIL too (the cause's product list): any harness hit used to make the whole page HARNESS,
+    so a 404 of one module beside a loopback error on its sibling was never a FAIL (MDST-01).
     """
     dead = server_unreachable(evidence.origin)
     if dead:
-        return f"the smoke server at {evidence.origin} does not answer ({dead})"
-    hits = [f"{url} {error}" for url, error in evidence.failed if evidence.own(url) and error in HARNESS_NET_ERRORS]
+        return HarnessCause(f"the smoke server at {evidence.origin} does not answer ({dead})",
+                            independent_failures(evidence))
+    hits = [(url, error) for url, error in evidence.failed if evidence.own(url) and error in HARNESS_NET_ERRORS]
     if hits:
-        return "a request to the smoke server's own origin failed with a loopback resource error: " + ", ".join(hits[:3])
+        return HarnessCause("a request to the smoke server's own origin failed with a loopback resource error: "
+                            + ", ".join(f"{url} {error}" for url, error in hits[:3]),
+                            independent_failures(evidence))
     return None
 
 
@@ -1291,13 +1346,22 @@ class NotReady(Exception):
 
 
 def verdict(stall):
-    """('HARNESS', detail) when the harness caused the stall, else ('FAIL', detail)."""
+    """('HARNESS', detail) when the harness caused the stall, else ('FAIL', detail). A harness
+    cause's independent product failures are reported beside it, as independent() words them."""
     return ("HARNESS", f"{stall.cause}; {stall}") if stall.cause else ("FAIL", str(stall))
+
+
+def independent(cause):
+    """The FAIL detail for a harness cause's independent product failures, or None."""
+    product = getattr(cause, "product", None)
+    return "independent of that harness fault: " + ", ".join(product) if product else None
 
 
 def report_not_ready(name, stall):
     kind, detail = verdict(stall)
     (harness if kind == "HARNESS" else fail)(name, detail)
+    if kind == "HARNESS" and independent(stall.cause):
+        fail(name, f"{independent(stall.cause)}; {stall}")
 
 
 def report_legs(name, legs, passed):
@@ -1306,10 +1370,12 @@ def report_legs(name, legs, passed):
 
     The legs the harness broke make one HARNESS line naming each leg, and every other leg's
     problem is still this check's FAIL, so main() exits 1. A check used to report only its
-    first harness-caused leg, which hid a product failure in another leg of the same check.
+    first harness-caused leg, which hid a product failure in another leg of the same check. A
+    broken leg's independent product failures are this check's FAIL as well.
     """
     broken = [f"{leg}: {cause}; {problem}" for leg, problem, cause in legs if cause]
-    failed = [f"{leg}: {problem}" for leg, problem, cause in legs if not cause]
+    failed = [f"{leg}: " + (f"{independent(cause)}; " if cause else "") + problem
+              for leg, problem, cause in legs if not cause or independent(cause)]
     if broken:
         harness(name, " | ".join(broken))
     if failed:
@@ -1554,13 +1620,17 @@ LOSE = ("() => { window.__beforeLoss = true; const gl = document.querySelector('
 LIT = 0.002  # a lost-and-restored canvas is exactly black; ZMatrix rain at 480x360 lights about 0.8%
 
 
-def check_context_loss_recovery(browser, origin):
-    """A lost WebGL context must come back as rendering rain, not a black page that looks healthy."""
-    for scene in ("matrix", "uc3d", "zmatrix"):
+def check_context_restore(browser, origin, scenes=("matrix", "uc3d", "zmatrix"), prepare=None, timeout=30000):
+    """A lost WebGL context must come back as rendering rain, not a black page that looks healthy.
+    prepare(page) runs before the first load and timeout bounds the recovery document's
+    readiness wait, both for the readiness control that faults the recovery document."""
+    for scene in scenes:
         name = f"{scene} renders again after a WebGL context loss and restore"
         page = browser.new_page(viewport={"width": 480, "height": 360})
         evidence = PageEvidence(page, origin)
         try:
+            if prepare:
+                prepare(page)
             open_page(page, evidence, f"{origin}/index.html?suppressWarnings=true&scene={scene}&numColumns=40")
             wait_ready(page, evidence, timeout=30000)
             page.wait_for_timeout(1500)
@@ -1570,14 +1640,14 @@ def check_context_loss_recovery(browser, origin):
                 continue
             page.evaluate(LOSE)
             page.wait_for_timeout(300)
+            evidence.next_document()
             try:
                 with page.expect_navigation(timeout=8000):
                     page.evaluate("window.__lose.restoreContext()")
             except Exception:
                 fail(name, "the page did not reload within 8 s of restoreContext()")
                 continue
-            evidence.new_document()
-            wait_ready(page, evidence, READY + " && window.__beforeLoss === undefined", timeout=30000)
+            wait_ready(page, evidence, READY + " && window.__beforeLoss === undefined", timeout=timeout)
             first = page.evaluate("window.matrixRuntimeDiagnostics.frames")
             for _ in range(12):  # rain builds up after the reload; ZMatrix starts sparse
                 page.wait_for_timeout(500)
@@ -1595,6 +1665,11 @@ def check_context_loss_recovery(browser, origin):
             fail(name, f"{type(exc).__name__}: {str(exc).splitlines()[0]}")
         finally:
             page.close()
+
+
+def check_context_loss_recovery(browser, origin):
+    """A lost GPU context: restored, never restored, and lost again past the reload budget."""
+    check_context_restore(browser, origin)
 
     name = "a WebGL context that is never restored still reloads"
     page = browser.new_page(viewport={"width": 480, "height": 360})
@@ -1644,7 +1719,7 @@ def image_offline_case(browser, origin, query, expected_block, init_script=None)
     the smoke server failing, and a request to an origin the case did not expect is a problem.
     """
     page = browser.new_page(viewport={"width": 480, "height": 360})
-    evidence = PageEvidence(page, origin)
+    evidence = PageEvidence(page, origin, expected=[expected_block] if expected_block else [])
     blocked, warnings = [], []
     page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
 
@@ -2026,6 +2101,139 @@ def check_readiness_reporting(browser, origin):
                 problems.append(f"no printed line starts {start.strip()!r}")
         return "; ".join(problems), "FAIL names effect=toString's 404, HARNESS names effect=constructor"
 
+    def harness_fault_beside_missing_module():
+        # One page, two faults in one module graph: regl/main.js's sibling imports bloomPass.js
+        # answered 404 and rainPass.js failed with the stand-in network error made the harness's
+        # for this run, as in the control above (ERR_NO_BUFFER_SPACE cannot be injected).
+        # Siblings, because the graph fails at its first failed fetch: with the 404 on
+        # hostPointer.js, a level deeper, it was never requested in 3 of 3 runs. The verdict goes
+        # through report_not_ready, whose lines are captured and taken back.
+        global HARNESS_NET_ERRORS
+        stand_in, name = "net::ERR_ADDRESS_UNREACHABLE", "a page with a missing module beside a harness fault"
+        missing, broken = "/js/regl/bloomPass.js", "/js/regl/rainPass.js"
+        page = browser.new_page(viewport={"width": 320, "height": 240})
+        evidence = PageEvidence(page, origin)
+        marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+        HARNESS_NET_ERRORS = saved + (stand_in,)
+        try:
+            page.route("**" + missing, lambda route: route.fulfill(status=404, content_type="text/plain", body="missing"))
+            page.route("**" + broken, lambda route: route.abort("addressunreachable"))
+            with contextlib.redirect_stdout(printed):
+                try:
+                    open_page(page, evidence, app)
+                    wait_ready(page, evidence, timeout=20000, errors_fatal=True)
+                    ok(name)
+                except NotReady as stall:
+                    report_not_ready(name, stall)
+        finally:
+            HARNESS_NET_ERRORS = saved
+            page.close()
+            failed, flagged = failures[marks[0]:], harness_errors[marks[1]:]
+            del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+        problems = []
+        if len(failed) != 1 or not failed[0][1].startswith(f"independent of that harness fault: {origin}{missing} 404; "):
+            problems.append(f"not one FAIL naming only the 404 of {missing}: {failed}")
+        if len(flagged) != 1 or f"{origin}{broken} {stand_in}" not in flagged[0][1].split("; ")[0]:
+            problems.append(f"not one HARNESS line naming {broken}: {flagged}")
+        return "; ".join(problems), f"FAIL names the 404 of {missing}, HARNESS names {broken}"
+
+    def harness_fault_alone():
+        # The stand-in harness error, as above, alone on one request of each kind the matrix page
+        # makes: a module import, a classic script regl/main.js's loadJS adds, a shader text
+        # regl/utils.js's loadText fetches, and the glyph atlas an Image decodes. main.js's error
+        # boundary reports the last three without their URL, and an error-text rule made each a
+        # FAIL beside its HARNESS line. Each page's lines are captured and taken back.
+        global HARNESS_NET_ERRORS
+        stand_in, name, problems = "net::ERR_ADDRESS_UNREACHABLE", "a page with only a harness fault", []
+        for path in ("/js/regl/rainPass.js", "/lib/regl.min.js", "/shaders/glsl/rainPass.vert.glsl",
+                     "/assets/matrixcode_msdf.png"):
+            served, page = [], browser.new_page(viewport={"width": 320, "height": 240})
+            evidence = PageEvidence(page, origin)
+            marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+            HARNESS_NET_ERRORS = saved + (stand_in,)
+            try:
+                page.route("**" + path, lambda route: (served.append(route.request.url), route.abort("addressunreachable")))
+                with contextlib.redirect_stdout(printed):
+                    try:
+                        open_page(page, evidence, app)
+                        wait_ready(page, evidence, timeout=20000, errors_fatal=True)
+                        ok(name)
+                    except NotReady as stall:
+                        report_not_ready(name, stall)
+            finally:
+                HARNESS_NET_ERRORS = saved
+                page.close()
+                failed, flagged = failures[marks[0]:], harness_errors[marks[1]:]
+                del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+            if served != [origin + path]:
+                problems.append(f"{path}: witness failed: the faulted requests were {served}")
+            elif failed:
+                problems.append(f"{path}: a FAIL beside the harness fault: {[detail.split('; ')[0] for _, detail in failed]}")
+            elif len(flagged) != 1 or f"{origin}{path} {stand_in}" not in flagged[0][1].split("; ")[0]:
+                problems.append(f"{path}: not one HARNESS line naming it: {flagged}")
+        return "; ".join(problems), "HARNESS alone for a module, a classic script, a shader fetch and an image"
+
+    def recovery_document_fault():
+        # check_context_restore's matrix leg with only the recovery document's /js/main.js (its
+        # second request) faulted: answered 404, then failed with the stand-in harness error, as
+        # above. main.js loads before the load event the navigation wait returns on, so a reset
+        # after that wait erases its failure every time. Lines captured and taken back.
+        global HARNESS_NET_ERRORS
+        stand_in, check = "net::ERR_ADDRESS_UNREACHABLE", "matrix renders again after a WebGL context loss and restore"
+        target, problems = f"{origin}/js/main.js", []
+        for label, fault in (("404", lambda route: route.fulfill(status=404, content_type="text/plain", body="missing")),
+                             (stand_in, lambda route: route.abort("addressunreachable"))):
+            served = []
+
+            def prepare(page, fault=fault, served=served):
+                def second_faulted(route):
+                    served.append(route.request.url)
+                    if len(served) == 1:
+                        route.continue_()
+                    else:
+                        fault(route)
+                page.route(lambda url: url == target, second_faulted)
+
+            marks, printed, saved = (len(failures), len(harness_errors), len(passes)), io.StringIO(), HARNESS_NET_ERRORS
+            HARNESS_NET_ERRORS = saved + (stand_in,)
+            try:
+                with contextlib.redirect_stdout(printed):
+                    check_context_restore(browser, origin, scenes=("matrix",), prepare=prepare, timeout=3000)
+            finally:
+                HARNESS_NET_ERRORS = saved
+                failed, broken = failures[marks[0]:], harness_errors[marks[1]:]
+                del failures[marks[0]:], harness_errors[marks[1]:], passes[marks[2]:]
+            if len(served) != 2:
+                problems.append(f"{label}: witness failed: {target} was requested {len(served)} time(s), not once per document")
+            elif label == "404":
+                if broken or [n for n, _ in failed] != [check] or f"HTTP >= 400: {target} 404" not in failed[0][1]:
+                    problems.append(f"404: not one FAIL naming the 404 of {target}: failures {failed}, harness {broken}")
+            elif failed or [n for n, _ in broken] != [check] or f"{target} {stand_in}" not in broken[0][1].split("; ")[0]:
+                problems.append(f"{stand_in}: not one HARNESS line naming {target}: failures {failed}, harness {broken}")
+
+        # Where the reset falls, from stand-in events: after next_document(), the old document's
+        # own request and a child frame's navigation come before the reload's main-frame
+        # navigation request, and only the reload's request starts the new document's records.
+        class Stand:
+            def __init__(self, **fields):
+                self.__dict__.update(fields)
+
+            def is_navigation_request(self):
+                return self.navigation
+
+        handlers, main = {}, object()
+        evidence = PageEvidence(Stand(on=handlers.__setitem__, main_frame=main), origin)
+        old = Stand(url=f"{origin}/js/old-document.js", navigation=False, frame=main)
+        evidence.next_document()
+        for event, item in (("request", old), ("request", Stand(url=f"{origin}/child.html", navigation=True, frame=object())),
+                            ("response", Stand(url=old.url, status=404)),
+                            ("request", Stand(url=f"{origin}/index.html", navigation=True, frame=main)),
+                            ("response", Stand(url=target, status=404))):
+            handlers[event](item)
+        if evidence.statuses != [(target, 404)]:
+            problems.append(f"the records did not restart at the reload's navigation request: HTTP >= 400 {evidence.statuses}")
+        return "; ".join(problems), f"FAIL names the 404 of {target}, HARNESS names its {stand_in}, reset at the reload's request"
+
     for name, control in (
             ("readiness: a renderer dependency that fails is reported in seconds, naming it", failed_dependency),
             ("readiness: an initialized renderer that draws no frame is a FAIL naming ready and frames", zero_frames),
@@ -2034,7 +2242,10 @@ def check_readiness_reporting(browser, origin):
             ("readiness: a shipped module answered 404 is a product FAIL", missing_module),
             ("readiness: a smoke server that does not answer is a harness error", dead_server),
             ("readiness: a page that cannot be read keeps the readiness error", unreadable_page),
-            ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg)):
+            ("readiness: a harness-caused leg does not hide a product FAIL in another leg", harness_leg_beside_failing_leg),
+            ("readiness: a harness fault does not hide a 404 on the same page", harness_fault_beside_missing_module),
+            ("readiness: a harness fault alone on a module, script, fetch or image load stays HARNESS", harness_fault_alone),
+            ("readiness: a reload keeps the failures of the document it loads", recovery_document_fault)):
         try:
             problem, detail = control()
         except Exception as error:  # a broken control is this check's FAIL, not exit 3
