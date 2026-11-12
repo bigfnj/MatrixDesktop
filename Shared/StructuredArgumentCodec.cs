@@ -46,13 +46,15 @@ internal static class StructuredArgumentCodec
 
     // A text value (an image URL, a folder or a file) uses the same alphabet in a copied
     // command when it holds a character cmd or PowerShell expands even inside double quotes:
-    // %, ! (delayed expansion), $ or a backtick. The payload is the value's JSON string
-    // literal, so a decoder can tell it from a structured object or array, and no real URL
-    // or Windows path starts with json64:. Anything else decodes to itself.
+    // %, ! (delayed expansion), $ or a backtick, or a typographic double quote (U+201C to
+    // U+201E), which ends a PowerShell double-quoted string (R3-07). The payload is the
+    // value's JSON string literal, so a decoder can tell it from a structured object or
+    // array, and no real URL or Windows path starts with json64:. Anything else decodes
+    // to itself.
     private static readonly System.Text.Json.JsonSerializerOptions TextJsonOptions = new()
         { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
-    public static bool TextNeedsEncoding(string text) => text.AsSpan().IndexOfAny("%!$`") >= 0;
+    public static bool TextNeedsEncoding(string text) => text.AsSpan().IndexOfAny("%!$`\u201C\u201D\u201E") >= 0;
 
     public static string EncodeText(string text) => Encode(System.Text.Json.JsonSerializer.Serialize(text, TextJsonOptions));
 
