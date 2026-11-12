@@ -12,6 +12,23 @@ Runtime and Microsoft Edge WebView2 Runtime. Browser probes use a Python
 interpreter with Playwright and Pillow. The gate accepts `MD_GATE_PYTHON` to
 select that interpreter. Its browser smoke also needs Playwright Chromium.
 
+The browser suites launch Chromium through `tests\browser_launch.py`, which disables
+`TcpPortRandomizationWin` merged into Playwright's own `--disable-features` and
+verifies the launched browser's argv on every launch. A launch whose argv fails
+that check is a harness error. When the argv cannot be read, the launch goes
+ahead and prints a `DEGRADED` line each time. The one captured web smoke
+renderer stall was a module request to its own loopback origin that failed with
+`net::ERR_NO_BUFFER_SPACE`, which is how Chromium reports Windows error 10055.
+Windows can return 10055 when a socket cannot get a local port, and Chromium's
+randomized local port pick on Windows (`TcpPortRandomizationWin`;
+microsoft/playwright#43545, #43605) can return it while ports are free. A
+bounded A/B on one machine strongly supports that feature as the cause; it is
+not proven. The favicon checks in the web smoke and the ZMatrix configurator
+suite need the full Chromium build (`python -m playwright install chromium`),
+because the headless shell never requests a favicon. Without that build each
+prints an `UNVERIFIED` line instead of failing, so a run with nothing else
+wrong exits 2.
+
 | Artifact | Producer and location |
 | --- | --- |
 | Local portable folder | `publish-portable-win-x64-fd.cmd`, producing `publish\win-x64-fd\`. |
@@ -40,7 +57,7 @@ parity check. `-Tier1Only` explicitly omits the interactive application tiers.
 | `0` | Every selected check ran and passed. |
 | `1` | At least one definite failure. |
 | `2` | At least one selected check could not be verified; inspect every `UNCHECKED` line. |
-| `3` | The verification harness broke. |
+| `3` | The verification harness broke, or a check's own harness broke and no check failed. The web smoke's exit 3 (a loopback error on its server's origin, a server that stopped answering, a missing fixture, a crash) is the second kind: the run continues, and the summary names each check reported as `HARNESS`. A FAIL in the same run keeps exit 1. |
 
 CI surfaces exit 2 as warning annotations rather than silently treating missing
 coverage as a pass. Exit 1 and 3 fail the workflow.
@@ -48,9 +65,14 @@ coverage as a pass. Exit 1 and 3 fail the workflow.
 Tier 1 builds with no warnings, runs native regressions and JavaScript lifecycle
 and UC3D scenarios, checks module syntax and referenced assets, and runs the
 configurator DOM/render smoke, UC3D/ZMatrix WebGL browser smoke and original
-Matrix pause/resume. Native GDI font tests exercise actual raster metrics,
-rotation, decorations, substitution, DPI and owned-handle cleanup without a shell
-window. The tier also exercises
+Matrix pause/resume. It also runs `tests\browser-launch.test.py`, which proves on
+real headless launches that an unreadable argv prints `DEGRADED` and, for both
+shapes Playwright's own switch can take, that the shared helper's launch passes
+argument verification and each of three broken merges is named exactly.
+`tests\test_web_smoke_verdict.py` holds a missing full Chromium build to the web
+smoke's `UNVERIFIED` exit 2, never a FAIL. Native GDI font tests exercise actual
+raster metrics, rotation, decorations, substitution, DPI and owned-handle cleanup
+without a shell window. The tier also exercises
 the importer's synthetic fixtures, embedded help and icons, version parity,
 published embedded source-line symbols and payload rules. Separate `.pdb`
 and dependency documentation `.xml` files are excluded from the portable folder.
@@ -63,7 +85,8 @@ The symbol check also scans the published `MatrixDesktop.dll` IL for the host's
 startup-failure, surface-close, wallpaper single-instance and takeover, WebView2
 process-failure, session-end, camera-permission, mouse-hook and tray Start with
 Windows wiring. It follows the surface-close, renderer-failure, rebuild-backoff
-and wallpaper-ownership decisions along every IL path with chosen inputs, so the
+and wallpaper-ownership decisions, and a renderer reload's reset of the
+suspended flag, along every IL path with chosen inputs, so the
 check still fails when a call survives behind an inverted condition or a
 constant argument. Version parity runs
 `tests\check-release-version.ps1`, which `release.yml` runs with the tag, and a
@@ -125,15 +148,20 @@ visible animation, pause/resume, resize and disposal. On REGL at 30 fps it also
 requires at least one `gl.getError` read and at most one every ten frames, not
 one every frame, and a recorded WebGL error to still fail the scene with its
 notice within 30 frames. Original Matrix
-also starts paused before renderer import; a real WebGL uniform witness must
+also starts paused before renderer import. Under that pause it must draw exactly
+one frame, not a uniform fill, and hold it, and a real WebGL uniform witness must
 begin at active shader tick zero so ping-pong initialization cannot be skipped.
-On REGL, the
+Original Matrix at 30 fps, UC3D and ZMatrix must likewise hold one frame when the
+host pause arrives before the renderer starts. On REGL, the
 original Matrix test also requires the shader time uniform to stay small after
 four days of page time while the tick keeps counting, and `fps=0` and `once=true`
 to each draw exactly one non-black frame that survives a window resize. A visible
-host pause must park the frame loop and resume where it froze; a hidden one still
-restarts shader time, and with `skipIntro=false` that restart does not replay
-the intro. Plug me in must survive a recovery reload. Browser fallback warnings
+host pause must park the frame loop and resume where it froze, also when a lock
+hid the page during the pause and the unlock showed it again before the resume;
+a hidden one still restarts shader time, and with `skipIntro=false` that restart
+does not replay the intro. At 30 fps, a pause that lands right after a first
+frame that skipped rendering must still draw one frame and hold it. Plug me in
+must survive a recovery reload. Browser fallback warnings
 are expected when no native GDI bridge is attached.
 
 Against a complete published folder:
@@ -207,8 +235,10 @@ python tests\uc3d-calibration.py --renderer both --channel msedge
 
 The probe asserts the selected backend rather than accepting silent fallback.
 It checks animated 2D rain, photo RGB in the code field, visible relief, literal
-caption text, the clock and disposal. On the REGL backend it also serves
-synthetic desktops one pixel over `MAX_TEXTURE_SIZE` on each axis, which must
+caption text, the clock and disposal. The relief check compares a raised and a
+flat picture frame, each held only once the picture weight reads 0.999 or more,
+and reads that weight back from each held frame. On the REGL backend it also
+serves synthetic desktops one pixel over `MAX_TEXTURE_SIZE` on each axis, which must
 render downscaled with their aspect kept and the right way up, and one at the
 limit, which must upload unchanged. It records the served shader's digest and,
 on REGL, the served `regl/uc3dPass.js` digest, and writes synthetic screenshots
@@ -241,7 +271,11 @@ local image resources, rejection of ungranted URLs, and configurator preview
 bootstrap data. Each launch's private profile is deleted when that launch ends,
 after the processes the application started exit (it waits up to 30 s). A
 profile that still cannot be deleted is named in a `WARN` line and counted in
-one `LEAKED` line when the probe exits. Profiles older than a day are pruned
+one `LEAKED` line when the probe exits. The gate reads the native smoke's log and
+each tier 3 case's log for those lines, and for a `WARN` that processes the
+application started outlived the wait, and reports
+`UNCHECKED  WebView2 profile cleanup [<case>]` beside the case's own verdict,
+naming the first such line and the log. Profiles older than a day are pruned
 when the probe starts. The optional
 donor input also exercises the imported manifest,
 glyph atlas and explicit sound-test action. Screenshots and reports under
@@ -289,6 +323,22 @@ starts with `CANNOT VERIFY`, `UNVERIFIED` or `UNCHECKED`. In the gate, the headl
 web smoke, the Python cases under `tier 1: UC3D importer and WebGL smoke` and the
 tier 3 wallpaper, screensaver and configurator cases treat exit 2 without that
 line as a failure, because argparse usage errors and missing scripts also exit 2.
+
+`tests\web-smoke.py` gives a check a `HARNESS` verdict for only two causes: a
+smoke server that does not answer `HEAD /` (probed directly, never through a
+proxy), or a request to its own origin that failed with
+`net::ERR_NO_BUFFER_SPACE`. Its `HARNESS` lines name the check, the leg for a
+check with several, and the URL and error or the server that did not answer.
+Every other renderer failure, including a 404 of a shipped module or a request
+to another origin, stays a FAIL. On a page the harness broke, an HTTP error
+status, or a request to another origin that the check did not block itself, is
+still a FAIL beside the `HARNESS` line, and a product failure in another leg of
+the same check is still that check's FAIL. The smoke exits 3 when it has
+`HARNESS` lines and no FAIL, and also when its loadState fixture is missing or it
+stops on an exception. Its exit mapping is itself a checked case
+("the exit code is 0 for a pass, 3 for harness errors alone and 1 for any
+FAIL"). The gate reports the web smoke's exit 3 as a `HARNESS` line, never a
+FAIL, and prints the smoke's `HARNESS` lines beside its ok and FAIL lines.
 
 ## Interactive and hardware checks
 

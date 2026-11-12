@@ -36,7 +36,8 @@ from its next update.
 Startup is an explicit per-user choice. Fullscreen pause defaults on; battery
 pause defaults off. Pause reasons combine, so resuming manually does not override
 a session lock or another automatic pause. Renderers use active time and exclude
-paused intervals.
+paused intervals. A pause already in force when a renderer starts still draws one
+frame and holds it.
 `--process-priority auto` uses Idle for wallpaper and Normal otherwise. This
 setting applies to the host process; it does not promise a WebView2 GPU priority.
 

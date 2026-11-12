@@ -94,6 +94,9 @@ uses a ten-second simulation snapshot at the selected animation speed for that
 frame; at speed 1 the startup ramp is complete. At animation speed 0 the streams
 first enter as they would in ten seconds at speed 1, so both the animated and the
 single-frame views show a populated frozen field.
+A host pause already in force before the first frame also draws one frame, from
+the same ten-second snapshot under Original controls, and holds it; the resume
+continues from that frame.
 Original pictures form through newly spawned streams, pan across the sampled
 image and retain those streams until they fall clear. The next image and selected
 gap begin after that clearance, so total time between pictures exceeds the forming
