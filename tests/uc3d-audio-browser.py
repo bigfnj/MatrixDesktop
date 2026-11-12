@@ -102,4 +102,10 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except browser_launch.LaunchArgumentsError as error:
+        # The browser did not get the arguments the helper verifies, so nothing it ran is a
+        # verdict on the product: a harness error, exit 3 with this line for the gate (MDST-05).
+        print(f"HARNESS ERROR: uc3d-audio-browser.py: {error}", flush=True)
+        raise SystemExit(3)

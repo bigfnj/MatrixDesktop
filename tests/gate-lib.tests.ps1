@@ -932,6 +932,239 @@ try {
         Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
     }
 
+    # ------------------------------------------------------------ MDST-02 / MDST-05 launch status at the gate
+
+    # A Python string literal for a stub line: JSON's string form is one, in both shells.
+    function ConvertTo-PyLiteral { param([string]$Text) return ($Text | ConvertTo-Json -Compress) }
+
+    # A stub suite: prints Out and Err, exits Exit. With MD_UC3D_HIDE_WEBGPU_ADAPTER=1 it runs
+    # Hidden instead (default: the calibration's cannot-verify witness and exit 2).
+    function New-SuiteStubCode {
+        param([hashtable]$Spec, [hashtable]$Hidden)
+        $leg = {
+            param([hashtable]$s, [string]$indent)
+            $code = ''
+            foreach ($line in @($s['Out'])) { if ($null -ne $line) { $code += "${indent}print($(ConvertTo-PyLiteral $line), flush=True)`n" } }
+            foreach ($line in @($s['Err'])) { if ($null -ne $line) { $code += "${indent}print($(ConvertTo-PyLiteral $line), file=sys.stderr, flush=True)`n" } }
+            return $code + "${indent}raise SystemExit($($s['Exit']))`n"
+        }
+        if (-not $Spec) { $Spec = @{ Out = @('PASS stub'); Exit = 0 } }
+        if (-not $Hidden) { $Hidden = @{ Out = @('CANNOT VERIFY WebGPU: stub adapter hidden'); Exit = 2 } }
+        return "import os, sys`nif os.environ.get('MD_UC3D_HIDE_WEBGPU_ADAPTER') == '1':`n" + (& $leg $Hidden '    ') + (& $leg $Spec '')
+    }
+
+    # The real tier-1 Python loop of run-gate.ps1, run against stub scripts under a scratch
+    # RepoRoot with recording stand-ins for the report functions. $Stubs maps a script's file
+    # name to its spec; a script not named passes. Returns the reports with '; see <log>' cut.
+    function Invoke-Tier1PythonLoop {
+        param([string]$Label, [hashtable]$Stubs, [hashtable]$Hidden)
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $loops = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Condition.Extent.Text -like '*tests\uc3d-browser.py*' }, $true))
+        Assert-Equal 1 $loops.Count 'run-gate.ps1 has one tier-1 Python loop'
+        $block = [scriptblock]::Create($loops[0].Extent.Text)
+        $script:Reported = New-Object 'Collections.Generic.List[string]'
+        function Test-Ok { param([string]$Msg) $script:Reported.Add("ok|$Msg") }
+        function Test-Fail { param([string]$Msg, [string]$Detail) $script:Reported.Add("FAIL|$Msg|$Detail") }
+        function Test-Unchecked { param([string]$Msg, [string]$Why) $script:Reported.Add("UNCHECKED|$Msg|$Why") }
+        function Test-Harness { param([string]$Msg, [string]$Detail) $script:Reported.Add("HARNESS|$Msg|$Detail") }
+        function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor) }
+        $RepoRoot = Join-Path $scratch $Label
+        foreach ($dir in 'tests', 'tools', 'temp') { New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot $dir) | Out-Null }
+        $scripts = @([regex]::Matches($loops[0].Condition.Extent.Text, "Script = '([^']+)'") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+        foreach ($relative in $scripts) {
+            $leaf = Split-Path -Leaf $relative
+            $spec = if ($Stubs.ContainsKey($leaf)) { $Stubs[$leaf] } else { $null }
+            $hide = if ($Hidden -and $Hidden.ContainsKey($leaf)) { $Hidden[$leaf] } else { $null }
+            [IO.File]::WriteAllText((Join-Path $RepoRoot $relative), (New-SuiteStubCode $spec $hide), (New-Object Text.UTF8Encoding($false)))
+        }
+        $py = $Python
+        $savedTemp = $env:TEMP
+        try {
+            $env:TEMP = Join-Path $RepoRoot 'temp'
+            . $block
+        } finally {
+            $env:TEMP = $savedTemp
+        }
+        foreach ($line in @($script:Reported)) {
+            if ($line -like 'UNCHECKED|*' -or $line -like 'HARNESS|*' -or $line -like 'FAIL|*') {
+                if ($line -notlike "*; see $RepoRoot\temp\*") { throw "a report does not name its case log ($line)" }
+            }
+        }
+        return @($script:Reported | ForEach-Object { $_ -replace '; see .*$', '' })
+    }
+
+    $degradedDefault = 'DEGRADED browser launch (default channel): argument verification unavailable (OSError: stub); TcpPortRandomizationWin NOT disabled, because the switch Playwright passes could not be read to merge with'
+    $degradedFull = 'DEGRADED browser launch (chromium) 151.0.7922.34: argument verification unavailable (OSError: stub); TcpPortRandomizationWin was requested but the browser''s argv could not be read back'
+
+    Invoke-TestCase 'MDST-02 (a) the tier-1 Python loop reports each DEGRADED launch as UNCHECKED beside the case''s own verdict, naming every line' {
+        if (-not $Python) { return 'CANNOT VERIFY MDST-02 (a): no Python interpreter for the stubs' }
+        $all = Invoke-Tier1PythonLoop 'mdst-02-a' @{
+            'uc3d-browser.py'          = @{ Out = @($degradedDefault, 'PASS stub'); Exit = 0 }
+            # One DEGRADED line on each stream, as from two launches.
+            'zmatrix-configurator.py'  = @{ Out = @('PASS stub', $degradedDefault); Err = @($degradedFull); Exit = 0 }
+            'zmatrix-browser.py'       = @{ Out = @($degradedFull, 'FAIL ZMatrix regl: stub'); Exit = 1 }
+            # browser-launch.test.py echoes its synthetic DEGRADED indented: not a launch of the run.
+            'browser-launch.test.py'   = @{ Out = @("  synthetic: $degradedDefault", 'PASS stub'); Exit = 0 }
+        }
+        $wrong = @()
+        foreach ($pair in @(
+                @('ok|UC3D WebGL smoke', "UNCHECKED|browser launch verification [UC3D WebGL smoke]|$degradedDefault"),
+                @('ok|ZMatrix configurator controls and imports', "UNCHECKED|browser launch verification [ZMatrix configurator controls and imports]|$degradedDefault | $degradedFull"),
+                @('FAIL|ZMatrix WebGL smoke|exit 1', "UNCHECKED|browser launch verification [ZMatrix WebGL smoke]|$degradedFull"))) {
+            $at = [array]::IndexOf($all, $pair[0])
+            if ($at -lt 0 -or $at + 1 -ge $all.Count -or $all[$at + 1] -ne $pair[1]) { $wrong += "not '$($pair[0])' followed by '$($pair[1])'" }
+        }
+        $unchecked = @($all | Where-Object { $_ -like 'UNCHECKED|*' })
+        if ($unchecked.Count -ne 3) { $wrong += "$($unchecked.Count) UNCHECKED report(s), expected 3: $($unchecked -join ' / ')" }
+        if (@($all | Where-Object { $_ -like 'FAIL|*' }).Count -ne 1) { $wrong += 'a stub other than zmatrix-browser.py failed' }
+        if ($all -notcontains 'ok|browser launch keeps Playwright defaults and disables TcpPortRandomizationWin') { $wrong += 'the browser-launch self-test stub did not pass' }
+        if ($wrong.Count -gt 0) { throw (($wrong -join ' || ') + " (reported: $($all -join ' / '))") }
+    }
+
+    # The real block of run-gate.ps1 that starts web-smoke.py, as R3-26 (a) runs it.
+    function Invoke-WebSmokeBlock {
+        param([string]$Label, [string[]]$Out, [string[]]$Err, [int]$Exit)
+        $gateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $here 'run-gate.ps1'), [ref]$null, [ref]$null)
+        $starts = @($gateAst.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$smokeRun' }, $true))
+        Assert-Equal 1 $starts.Count 'run-gate.ps1 starts the web smoke once'
+        $body = $starts[0].Parent.Extent.Text
+        $block = [scriptblock]::Create($body.Substring(1, $body.Length - 2))
+        $script:Reported = New-Object 'Collections.Generic.List[string]'
+        $script:Echoed = New-Object 'Collections.Generic.List[string]'
+        function Test-Ok { param([string]$Msg) $script:Reported.Add("ok|$Msg") }
+        function Test-Fail { param([string]$Msg, [string]$Detail) $script:Reported.Add("FAIL|$Msg|$Detail") }
+        function Test-Unchecked { param([string]$Msg, [string]$Why) $script:Reported.Add("UNCHECKED|$Msg|$Why") }
+        function Test-Harness { param([string]$Msg, [string]$Detail) $script:Reported.Add("HARNESS|$Msg|$Detail") }
+        function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor) $script:Echoed.Add([string]$Object) }
+        $savedTemp = $env:TEMP
+        try {
+            $env:TEMP = Join-Path $scratch $Label
+            New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+            $smokeScript = New-StubFile (($Label -replace '-', '_') + '.py') (New-SuiteStubCode @{ Out = $Out; Err = $Err; Exit = $Exit } $null)
+            $py = $Python
+            . $block
+            foreach ($line in @($script:Reported)) {
+                if ($line -like 'UNCHECKED|*' -and $line -notlike "*; see $env:TEMP\md-gate-web-smoke.log*") { throw "the report does not name the smoke log ($line)" }
+            }
+        } finally {
+            $env:TEMP = $savedTemp
+        }
+        # The FAIL detail keeps each line's CR (the smoke's output is joined with CRLF).
+        return @($script:Reported | ForEach-Object { ($_ -replace '; see .*$', '') -replace "`r", '' })
+    }
+
+    Invoke-TestCase 'MDST-02 (b) the web smoke reports each DEGRADED launch as UNCHECKED beside its own verdict, naming every line' {
+        if (-not $Python) { return 'CANNOT VERIFY MDST-02 (b): no Python interpreter for the stubs' }
+        $wrong = @()
+        $all = Invoke-WebSmokeBlock 'mdst-02-b-pass' @('  ok    a check', $degradedDefault, $degradedFull, 'WEB SMOKE PASSED: 1 checks') @() 0
+        $want = "ok|headless web smoke (1 checks) / UNCHECKED|browser launch verification [headless web smoke]|$degradedDefault | $degradedFull"
+        if (($all -join ' / ') -ne $want) { $wrong += "exit 0: reported '$($all -join ' / ')', expected '$want'" }
+        # Control: the same smoke without the DEGRADED lines is a plain pass.
+        $all = Invoke-WebSmokeBlock 'mdst-02-b-clean' @('  ok    a check', 'WEB SMOKE PASSED: 1 checks') @() 0
+        if (($all -join ' / ') -ne 'ok|headless web smoke (1 checks)') { $wrong += "control: reported '$($all -join ' / ')'" }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
+    Invoke-TestCase 'MDST-02 (c) a check the web smoke could not run is named beside its FAIL or harness error' {
+        if (-not $Python) { return 'CANNOT VERIFY MDST-02 (c): no Python interpreter for the stubs' }
+        $missing = 'UNVERIFIED: the full Chromium build is unavailable, so ''index.html makes no /favicon.ico request'' cannot run (Error)'
+        $harness = '  HARNESS  a renderer starts: matrix: GET http://127.0.0.1:9/js/main.js net::ERR_NO_BUFFER_SPACE'
+        $wrong = @()
+        foreach ($leg in @(
+                @{ Label = 'mdst-02-c-fail'; Out = @($harness, '  FAIL  a check: it broke', 'WEB SMOKE FAILED: 1 of 1 checks, and 1 harness error(s)'); Exit = 1; Want = 'FAIL|headless web smoke|a check: it broke' },
+                @{ Label = 'mdst-02-c-harness'; Out = @($harness, 'WEB SMOKE HARNESS ERROR: 1 check(s) could not run; 0 passed'); Exit = 3; Want = 'HARNESS|headless web smoke|a renderer starts: matrix: GET http://127.0.0.1:9/js/main.js net::ERR_NO_BUFFER_SPACE' })) {
+            $all = Invoke-WebSmokeBlock $leg.Label $leg.Out @($missing) $leg.Exit
+            $want = "$($leg.Want) / UNCHECKED|headless web smoke checks this environment cannot run|$missing"
+            if (($all -join ' / ') -ne $want) { $wrong += "exit $($leg.Exit): reported '$($all -join ' / ')', expected '$want'" }
+        }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
+    Invoke-TestCase 'MDST-05 (b) a tier-1 Python case''s exit 3 with its HARNESS ERROR line is the gate''s harness error, and a bare exit 3 or one beside a FAIL line a FAIL' {
+        if (-not $Python) { return 'CANNOT VERIFY MDST-05 (b): no Python interpreter for the stubs' }
+        $refused = 'browser launch (msedge) 157.0.4341.46: argument verification FAILED: TcpPortRandomizationWin is missing'
+        $all = Invoke-Tier1PythonLoop 'mdst-05-b' @{
+            'uc3d-audio-browser.py'      = @{ Out = @('SOURCE stub', "HARNESS ERROR: uc3d-audio-browser.py: $refused"); Exit = 3 }
+            # zmatrix-configurator.py's own form, on stderr, beside its informational 'HARNESS <path>' line.
+            'zmatrix-configurator.py'    = @{ Out = @('HARNESS C:\stub\MatrixDesktop.Tests.exe sha256=00'); Err = @("HARNESS ERROR: LaunchArgumentsError $refused"); Exit = 3 }
+            # abort() in a native extension also exits 3, and prints no witness.
+            'matrix-playback-browser.py' = @{ Err = @('Fatal Python error: Aborted'); Exit = 3 }
+        } @{
+            # The hidden-adapter case expects exit 2; a harness error is not that case's FAIL either.
+            'uc3d-calibration.py'        = @{ Out = @("HARNESS ERROR: uc3d-calibration.py: $refused"); Exit = 3 }
+        }
+        $want = @(
+            "HARNESS|UC3D real browser audio pause|HARNESS ERROR: uc3d-audio-browser.py: $refused"
+            "HARNESS|ZMatrix configurator controls and imports|HARNESS ERROR: LaunchArgumentsError $refused"
+            'FAIL|original Matrix host playback|exit 3'
+            "HARNESS|UC3D calibration reports a hidden WebGPU adapter as unverified|HARNESS ERROR: uc3d-calibration.py: $refused"
+        )
+        $wrong = @($want | Where-Object { $all -notcontains $_ } | ForEach-Object { "missing '$_'" })
+        $other = @($all | Where-Object { $_ -notlike 'ok|*' -and $want -notcontains $_ })
+        if ($other.Count -gt 0) { $wrong += "unexpected: $($other -join ' / ')" }
+        # A FAIL outranks a harness error. zmatrix-configurator.py prints FAIL for a check that
+        # failed, then its last check's full-Chromium launch raises LaunchArgumentsError and its
+        # __main__ prints HARNESS ERROR and exits 3; browser-launch.test.py can do the same after
+        # a FAIL. Both stay the product FAIL they were before MDST-05, naming both lines.
+        $mixed = Invoke-Tier1PythonLoop 'mdst-05-b-mixed' @{
+            'zmatrix-configurator.py' = @{ Out = @('HARNESS C:\stub\MatrixDesktop.Tests.exe sha256=00', 'PASS Every control has a label', 'FAIL Colour popover content stays inside its box: stub overflow')
+                Err = @('Traceback (most recent call last):', '  File "stub", line 1, in check', 'AssertionError: stub overflow', "HARNESS ERROR: LaunchArgumentsError $refused"); Exit = 3 }
+            'browser-launch.test.py'  = @{ Out = @('PASS keeps Playwright defaults', 'FAIL disables TcpPortRandomizationWin: stub'); Err = @('HARNESS ERROR: OSError: stub'); Exit = 3 }
+        }
+        $wantMixed = @(
+            "FAIL|ZMatrix configurator controls and imports|exit 3, a FAIL beside a harness error: FAIL Colour popover content stays inside its box: stub overflow | HARNESS ERROR: LaunchArgumentsError $refused"
+            'FAIL|browser launch keeps Playwright defaults and disables TcpPortRandomizationWin|exit 3, a FAIL beside a harness error: FAIL disables TcpPortRandomizationWin: stub | HARNESS ERROR: OSError: stub'
+        )
+        $wrongMixed = @($wantMixed | Where-Object { $mixed -notcontains $_ } | ForEach-Object { "missing '$_'" })
+        $otherMixed = @($mixed | Where-Object { $_ -notlike 'ok|*' -and $wantMixed -notcontains $_ })
+        if ($otherMixed.Count -gt 0) { $wrongMixed += "unexpected: $($otherMixed -join ' / ')" }
+        if ($wrongMixed.Count -gt 0) { $wrong += "FAIL beside HARNESS ERROR: $($wrongMixed -join ' || ') (reported: $($mixed -join ' / '))" }
+        if ($wrong.Count -gt 0) { throw (($wrong -join ' || ') + " (reported: $($all -join ' / '))") }
+    }
+
+    Invoke-TestCase 'MDST-05 (a) each browser suite reports a launch that failed argument verification as HARNESS ERROR and exit 3, never a FAIL' {
+        if (-not $Python) { return 'CANNOT VERIFY MDST-05 (a): no Python interpreter' }
+        if ((Invoke-NativeQuiet -FilePath $Python -ArgumentList @('-c', 'import playwright, PIL')) -ne 0) { return 'CANNOT VERIFY MDST-05 (a): this Python lacks Playwright or Pillow' }
+        # Each real suite file runs as __main__ (runpy) with the real browser_launch module's
+        # launch() replaced by one that raises its real LaunchArgumentsError. A stub module cannot
+        # stand in on sys.path: Python puts the script's own folder (tests\) first, ahead of any
+        # PYTHONPATH entry, and a copied suite would not be the file the gate runs.
+        $driver = New-StubFile 'mdst_05_refused_launch.py' @'
+import runpy, sys
+tests, suite = sys.argv[1], sys.argv[2]
+sys.path.insert(0, tests)
+import browser_launch
+
+def refused(browser_type, *, args=(), **kwargs):
+    print("STUB LAUNCH refused", flush=True)
+    raise browser_launch.LaunchArgumentsError("browser launch (stub): argument verification FAILED: TcpPortRandomizationWin is missing")
+
+browser_launch.launch = refused
+sys.argv = [suite] + sys.argv[3:]
+runpy.run_path(suite, run_name="__main__")
+'@
+        $out = Join-Path $scratch 'mdst-05-a-output'
+        $wrong = @()
+        foreach ($suite in @(
+                @{ Script = 'uc3d-browser.py'; Arguments = ' --renderer regl' },
+                @{ Script = 'uc3d-audio-browser.py'; Arguments = ' --output "' + $out + '\audio"' },
+                @{ Script = 'uc3d-calibration.py'; Arguments = ' --renderer regl --output "' + $out + '\calibration"' },
+                @{ Script = 'matrix-playback-browser.py'; Arguments = ' --renderer regl' },
+                @{ Script = 'zmatrix-browser.py'; Arguments = ' --renderer regl' })) {
+            $log = New-LogPath ('mdst-05-a-' + $suite.Script)
+            $verdict = Invoke-GateChildCase -FilePath $Python -ArgumentList ('"' + $driver + '" "' + $here + '" "' + (Join-Path $here $suite.Script) + '"' + $suite.Arguments) -Log $log
+            $text = [IO.File]::ReadAllText($log) + [IO.File]::ReadAllText("$log.err")
+            $problems = @()
+            if ($text -notmatch '(?m)^STUB LAUNCH refused') { $problems += 'the stub launch never ran' }
+            if ($verdict.ExitCode -ne 3) { $problems += "exit $($verdict.ExitCode)" }
+            # The suite's own line, read here: how the gate classifies it is MDST-05 (b).
+            if ($text -notmatch ('(?m)^HARNESS ERROR: ' + [regex]::Escape($suite.Script) + ': browser launch \(stub\): argument verification FAILED: ')) { $problems += "no HARNESS ERROR line naming the suite; see $log" }
+            if ($text -match '(?m)^\s*FAIL\b') { $problems += 'it printed a FAIL line' }
+            if ($problems.Count -gt 0) { $wrong += "$($suite.Script): $($problems -join '; ')" }
+        }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
     # ------------------------------------------------------------ R2-33 release publish parity
 
     # The gate's own publish arguments, read back from run-gate.ps1 as AUD-63 (b) reads them.
