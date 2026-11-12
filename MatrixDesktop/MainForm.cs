@@ -866,14 +866,18 @@ public sealed class MainForm : Form
         if (_isShuttingDown || IsDisposed || _webView.CoreWebView2 is null) return false;
         // Before the first navigation there is nothing to reload: that navigation is still ahead.
         if (_rendererTarget is null) return true;
-        try { _webView.CoreWebView2.Navigate(_rendererTarget); return true; }
+        // R3-25: Navigate resumes a suspended WebView, so the flag must not outlive it, or the
+        // suspend the reconcile after this reload asks for is skipped. Visibility stays as it is.
+        try { _webView.CoreWebView2.Navigate(_rendererTarget); _isSuspended = false; return true; }
         catch (Exception error) { Shared.Logger.Warn($"Could not reload the renderer: {error.Message}"); return false; }
     }
 
     // R2-52: one Block on WebView2's camera prompt was saved in the profile every host shares and
-    // switched the Mirror camera off for good. Before each navigation, a saved camera denial for
-    // this app is cleared (HostPermissionPolicy decides which), so the Camera setting decides again
-    // and the next interactive launch that asks shows the prompt. A saved Allow is kept.
+    // switched the Mirror camera off for good. Each time a WebView is initialised, before its first
+    // navigation, a saved camera denial for this app is cleared (HostPermissionPolicy decides
+    // which), so the Camera setting decides again. A renderer reload (ReloadRenderer) and the
+    // page's own recovery reload keep it, so a Block lasts until the next start or surface
+    // rebuild, and the next interactive launch that asks shows the prompt. A saved Allow is kept.
     private static async Task ForgetSavedCameraDenialAsync(CoreWebView2 core)
     {
         try

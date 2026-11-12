@@ -19,8 +19,15 @@ internal static class AutostartService
     // One click stores this launch's settings unless the shortcut already starts exactly them.
     internal static bool ClickEnables(AutostartState state) => state != AutostartState.ThisLaunch;
 
-    internal static string ShortcutArguments(IReadOnlyList<string> arguments) =>
-        string.Join(" ", arguments.Concat(["--wallpaper"]).Select(QuoteArgument));
+    // R3-03. Idempotent: the launch a shortcut starts carries the stored trailing --wallpaper in its
+    // own argv, so trailing --wallpaper tokens collapse to the one appended here. AppCli never takes
+    // a --wallpaper token as a value, so dropping a repeat changes nothing; an earlier one stays.
+    internal static string ShortcutArguments(IReadOnlyList<string> arguments)
+    {
+        var count = arguments.Count;
+        while (count > 0 && arguments[count - 1] == "--wallpaper") count--;
+        return string.Join(" ", arguments.Take(count).Concat(["--wallpaper"]).Select(QuoteArgument));
+    }
 
     // Exact match on target and arguments; a shortcut that cannot be read counts as other settings.
     internal static AutostartState StateAt(string shortcutPath, string executable, IReadOnlyList<string> arguments)

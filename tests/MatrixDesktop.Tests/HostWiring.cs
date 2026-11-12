@@ -456,6 +456,23 @@ internal static class HostWiring
             Check.True(wrong.Count == 0, "the context must reload only on Reload and keep a reloaded surface; otherwise close it, then rebuild a wallpaper or end any other host: "
                 + string.Join("; ", wrong));
         });
+        // R3-25. Navigate resumes a suspended WebView (WebView2's TrySuspendAsync remarks), so a
+        // renderer reload while locked left _isSuspended true over a running renderer, and
+        // TrySuspendWebViewAsync skipped the suspend the reconcile after the reload asked for.
+        failures += Run($"a renderer reload forgets an earlier suspend: {path}", () =>
+        {
+            const string navigate = "Microsoft.Web.WebView2.Core.CoreWebView2::Navigate";
+            var paths = Paths(Body(bodies, "MatrixDesktop.MainForm::ReloadRenderer"), new()
+            {
+                ["MatrixDesktop.MainForm::_isShuttingDown"] = 0, ["System.Windows.Forms.Control::get_IsDisposed"] = 0,
+                ["Microsoft.Web.WebView2.WinForms.WebView2::get_CoreWebView2"] = 1, ["MatrixDesktop.MainForm::_rendererTarget"] = 1,
+            });
+            Check.True(paths.Count > 0 && paths.All(steps => steps.Any(step => !step.Store && step.Name == navigate)),
+                "witness: every path through ReloadRenderer with a live WebView and a target must navigate");
+            var stale = paths.Where(steps => !steps.Skip(steps.FindIndex(step => !step.Store && step.Name == navigate) + 1)
+                .Any(step => step.Store && step.Name == "MatrixDesktop.MainForm::_isSuspended" && step.Values[0] == 0)).ToList();
+            Check.True(stale.Count == 0, $"ReloadRenderer must set _isSuspended to false after it navigates, because Navigate resumes a suspended WebView: {stale.Count} of {paths.Count} paths keep it");
+        });
         failures += Run($"the wallpaper tick resets the rebuild backoff once a renderer stayed ready: {path}", () =>
         {
             foreach (var healthy in new long[] { 1, 0 })

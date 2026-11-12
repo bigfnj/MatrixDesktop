@@ -99,8 +99,11 @@ internal static class SurfaceClosePolicy
 // reloaded, an unresponsive renderer is reported again about every 15 s until it answers, and
 // WebView2 restarts every other process itself. WebView2 reports a renderer unresponsive only
 // when input or a navigation goes unanswered, so only fullscreen and windowed hosts get that
-// report: the wallpaper and preview windows are disabled and never navigate while hung, so a
-// hung page there stays frozen until a display change, an Explorer restart or a relaunch.
+// report: the wallpaper and preview windows are disabled and never navigate while hung. Where no
+// report comes, a hung page stays frozen per host: a wallpaper until a display change or an
+// Explorer restart rebuilds its surface (MatrixApplicationContext rebuilds on those for the
+// wallpaper only), or until a relaunch; a preview until Windows closes the preview window; a
+// screensaver until input ends it.
 // These kinds are this file's own, so the core harness can test the table without WebView2.
 internal enum RendererFailureKind { Other, BrowserProcessExited, RenderProcessExited, RenderProcessUnresponsive }
 

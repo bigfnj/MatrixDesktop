@@ -12,7 +12,41 @@ internal static class AutostartTests
         ("Native startup shortcut preserves target and exact wallpaper arguments", () => OnStaThread(ShortcutRoundtrip)),
         ("Native startup shortcut state tells this launch's settings from another launch's", () => OnStaThread(ShortcutState)),
         ("Native startup tray click stores this launch's settings over another launch's", ClickDecision),
+        ("Native startup shortcut's own launch reads as this launch and stores the same text", () => OnStaThread(ShortcutOwnLaunch)),
     ];
+
+    // R3-03. The stored arguments always gained one more --wallpaper, so the wallpaper the shortcut
+    // started at sign-in compared "A --wallpaper" with "A --wallpaper --wallpaper", read as other
+    // settings, and a click meant to remove the shortcut re-saved it one token longer instead.
+    private static void ShortcutOwnLaunch()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "matrixdesktop-autostart-own-" + Guid.NewGuid().ToString("N"));
+        var executable = Path.Combine(root, "own launch 漢字.exe");
+        var shortcut = Path.Combine(root, "own launch 漢字.lnk");
+        Directory.CreateDirectory(root);
+        File.Copy(Environment.ProcessPath!, executable);
+        try
+        {
+            string[] launch = ["--wallpaper", "--scene", "zmatrix", "--zmPhrases", JsonSerializer.Serialize(new[] { "a \"quoted\" phrase" })];
+            AutostartService.SetEnabledAt(true, launch, shortcut, executable, root);
+            var stored = ReadShortcut(shortcut).Arguments;
+            var started = ParseArguments(stored);
+            Require(AutostartService.StateAt(shortcut, executable, started) == AutostartState.ThisLaunch,
+                "The launch the shortcut starts must read as this launch, not as other settings; stored: " + stored);
+            AutostartService.SetEnabledAt(true, started, shortcut, executable, root);
+            Require(ReadShortcut(shortcut).Arguments == stored, "Storing from the shortcut's own launch must save the same arguments, not one more --wallpaper.");
+            string[] typedLast = ["--scene", "zmatrix", "--wallpaper"];
+            AutostartService.SetEnabledAt(true, typedLast, shortcut, executable, root);
+            Require(ParseArguments(ReadShortcut(shortcut).Arguments).SequenceEqual(typedLast), "A typed trailing --wallpaper must be stored once.");
+            Require(AutostartService.StateAt(shortcut, executable, typedLast) == AutostartState.ThisLaunch, "The launch that typed --wallpaper last must read as this launch.");
+        }
+        finally
+        {
+            File.Delete(shortcut);
+            File.Delete(executable);
+            Directory.Delete(root);
+        }
+    }
 
     // R2-03. The tray ticked Start with Windows whenever a shortcut existed, so a shortcut another
     // launch stored read as this launch's and the first click deleted it.
