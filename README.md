@@ -19,8 +19,9 @@ Windows (other settings)** and one click stores this launch's settings instead.
 Wallpaper mode leaves typing and desktop icons usable;
 desktop pointer effects are optional. Fullscreen applications pause it by default,
 and battery pause is available separately. A paused wallpaper keeps its last frame
-on the desktop; only a locked or disconnected session, sleep or Windows turning the
-display off asks WebView2 to suspend the renderer, which stays hidden while suspended.
+on the desktop, and one paused before its first frame draws one frame and keeps that;
+only a locked or disconnected session, sleep or Windows turning the display off asks
+WebView2 to suspend the renderer, which stays hidden while suspended.
 
 ```cmd
 MatrixDesktop.exe --wallpaper --scene matrix
@@ -341,7 +342,7 @@ older presets keep Legacy controls.
 
 Preset storage is portable-first:
 
-- If the publish folder accepts new files and any presets file already there is writable (not read-only, and its permissions allow writes), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`.
+- If the publish folder accepts new files and any presets file already there can be saved over (not read-only, and the permissions let you write its data and attributes and either delete it or delete files in its folder), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`. If those permissions cannot be read, name only a file server's own accounts (as on some network shares), or the folder cannot be asked whether you may delete its files, the check falls back to the older write-attributes test for that file and the configurator logs an INFO line naming it.
 - Otherwise presets are stored under `%LOCALAPPDATA%\MatrixDesktop\Configurator\`. When that hides a presets file beside the configurator, the configurator logs a warning naming both paths.
 
 In framework-dependent publish output, run:
@@ -621,7 +622,8 @@ pwsh -NoProfile -File tests\run-gate.ps1 -Tier1Only # the CI shell
 Tier 1 covers everything that does not need an interactive desktop session: a zero-warning
 build, the native regression harness, renderer lifecycle and UC3D scenario tests,
 the media importer's synthetic tests, `node --check` over every first-party web module,
-every referenced shader and asset resolving, a headless DOM smoke, the embedded argument
+every referenced shader and asset resolving, a headless DOM smoke, the shared browser
+launch's argument verification (`tests/browser-launch.test.py`), the embedded argument
 guide, a window icon in both executables at every size the app asks for, the guide header's
 version and README's current source version matching both csproj
 (`tests/check-release-version.ps1`, which `release.yml` also runs with the tag), embedded
@@ -650,15 +652,62 @@ actually scrolling, the command panel staying under 30% of the window, the previ
 aspect ratio, and WCAG contrast in both themes. It needs no GPU, no window station and no
 WebView2, so it runs in CI. The additional `tests/zmatrix-configurator.py` DOM
 suite covers ZMatrix editors, imports, dependencies and preview request ordering, and the
-configurator's color popover, hex parsing, keyboard focus and accessible names.
+configurator's color popover, hex parsing, keyboard focus and accessible names. That suite
+also requires a visible keyboard focus ring at 3:1 or better in both themes on a checkbox, a
+range slider, the `<summary>` rows of collapsible panels, a section heading reached from the
+jump list, and the help guide.
 
-It also asserts that a render flag actually *changes* the render, by measuring screenshot
-luminance at two values of `glyphIntensity`. That is the check whose absence let
+The web smoke also asserts that a render flag actually *changes* the render, by measuring
+screenshot luminance at two values of `glyphIntensity`. That is the check whose absence let
 `glyphIntensity` ship parsed, documented and inert through all of v1.0.x.
+
+The web smoke checks that the renderer's `index.html` makes no `/favicon.ico` request, and
+the configurator suite checks the same for the configurator page. The headless shell never
+requests a favicon, so both checks need the full Chromium build
+(`python -m playwright install chromium`, which CI's install step runs). With only the
+headless shell installed, each prints UNVERIFIED instead of failing, and a suite with
+nothing else wrong exits 2, which the gate reports as UNCHECKED.
 
 If Playwright is not installed for the interpreter it finds, the gate reports the smoke as
 not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific
 interpreter to override the search.
+
+Every Chromium the browser suites start goes through `tests/browser_launch.py`, apart from
+the helper's own self-test; the native suites attach to the real app's WebView2 instead. The
+helper reads the one `--disable-features` switch Playwright passes from a probe launch, adds
+`TcpPortRandomizationWin` to it, which turns off Chromium's randomized local port pick on
+Windows, and checks the launched browser's own command line for exactly one such switch
+holding that feature and every token Playwright passed. Each verified launch prints an
+argument-verification PASS line. A launch that fails verification raises
+`LaunchArgumentsError`, which the web smoke and the configurator suite report as a harness
+error (exit 3). A launch whose browser command line cannot be read prints a DEGRADED line
+and goes ahead unverified. When the probe's command line cannot be read, the helper has no
+Playwright switch to merge with, so the suite runs on its own arguments without the
+helper's `TcpPortRandomizationWin` disable; when only the real launch's command line cannot
+be read, the disable was requested but is not confirmed. Tier 1 runs
+`tests/browser-launch.test.py`, which proves the check names each wrong shape of the switch.
+
+The helper turns the feature off because of the smoke's one captured stall: 72 ms after
+navigation, a module request to its own loopback server failed with
+`net::ERR_NO_BUFFER_SPACE`, Chromium's name for Windows error 10055 (WSAENOBUFS). Windows
+can return 10055 when a socket cannot get a local port, and Chromium's randomized local
+port pick on Windows (`TcpPortRandomizationWin`; microsoft/playwright#43545, #43605) can
+return it while ports are free. A bounded A/B run on one machine saw the failed connect
+only with the pick on, which strongly supports it as the cause but does not prove it.
+
+In the web smoke, a renderer that never starts is reported as soon as its page shows a
+notice, with the diagnostics, notices, failed requests, HTTP error statuses, and page and
+console errors the page recorded. `tests/web-smoke.py` exits 3, a harness error, when its own
+infrastructure broke and nothing failed: a smoke server that does not answer, or a request
+to that server that failed with `net::ERR_NO_BUFFER_SPACE`. A missing `loadState` fixture,
+or an exception that ends the run, such as a browser launch that fails argument
+verification, also exits 3. In a run that reaches its verdict, any FAIL keeps exit 1,
+including one in another leg of the same check or, on the page the harness fault hit, an
+unexpected HTTP status of 400 or more or a failed request to another origin. The gate
+records the smoke's exit 3 as a HARNESS line of its own, which quotes up to three of the
+smoke's HARNESS lines or, when the smoke printed none, as after a failed launch verification,
+the first three non-blank lines of its error output. The gate ends in exit 3 unless another
+check failed.
 
 Installed Edge can exercise both UC3D rendering backends with
 `python tests\uc3d-browser.py --renderer both --channel msedge`. Original-control
@@ -681,7 +730,7 @@ Exit codes:
 | `0` | Pass. Every selected check ran and passed. |
 | `1` | A real failure. At least one check failed and the cause is in the code or the repo. |
 | `2` | Something could not be verified: a check was skipped for lack of an interactive session, missing build output, or similar, or a GUI check came back black, frozen or failing after the app asked WebView2 to suspend its renderer for display-off, a locked or disconnected session or sleep. Not a pass; the not-verified list is printed. |
-| `3` | The gate itself broke. Treat as a harness bug, not a product failure. |
+| `3` | A harness error: the gate itself broke, or a check's own harness broke (the web smoke's exit 3) and no check failed. Treat as a harness bug, not a product failure. |
 
 Exit 2 is worth treating as acceptable in CI while still printing the not-verified list,
 which is what `ci.yml` does. Exit 1 and 3 fail the build.
