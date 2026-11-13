@@ -369,10 +369,13 @@ smoke server that does not answer `HEAD /` (probed directly, never through a
 proxy), or a request to its own origin that failed with
 `net::ERR_NO_BUFFER_SPACE`. Its `HARNESS` lines name the check, the leg for a
 check with several, and the URL and error or the server that did not answer.
-Every other renderer failure, including a 404 of a shipped module or a request
-to another origin, stays a FAIL. On a page the harness broke, an HTTP error
-status, or a failed request to another origin that the check did not block itself, is
-still a FAIL beside the `HARNESS` line, and a product failure in another leg of
+On a page with no harness fault, every other renderer failure, including a 404
+of a shipped module or a request to another origin, stays a FAIL. On a page the
+harness broke, only request evidence stays a FAIL beside the `HARNESS` line: an
+HTTP error status, or a failed request to another origin that the check did not
+block itself. A console, page or diagnostics error on that page is not reported
+as a FAIL (the measured MDST-01 residual in BACKLOG.md), and a product failure in
+another leg of
 the same check is still that check's FAIL. The smoke exits 3 when it has
 `HARNESS` lines and no FAIL, and also when its loadState fixture is missing.
 An exception that stops the run adds one more `HARNESS` line,
