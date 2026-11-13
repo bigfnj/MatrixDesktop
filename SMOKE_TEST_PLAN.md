@@ -18,7 +18,8 @@ verifies the launched browser's argv on every launch. A launch whose argv fails
 that check raises an error and closes that browser, so no check runs on it. The
 web smoke, the ZMatrix configurator suite, `uc3d-browser.py`,
 `uc3d-audio-browser.py`, `uc3d-calibration.py`, `matrix-playback-browser.py`
-and `zmatrix-browser.py` report that error as a harness error and exit 3; the
+and `zmatrix-browser.py` report that error as a harness error and exit 3 (the
+web smoke exits 1 instead when a check failed before the launch); the
 helper's own self-test, `tests\browser-launch.test.py`, counts it as a failed
 check. To build the merged switch, the helper first reads
 Playwright's own switch from a probe launch's argv. When
@@ -82,7 +83,12 @@ real headless launches that an unreadable argv prints `DEGRADED` and, for both
 shapes Playwright's own switch can take, that the shared helper's launch passes
 argument verification and each of three broken merges is named exactly.
 `tests\test_web_smoke_verdict.py` holds a missing full Chromium build to the web
-smoke's `UNVERIFIED` exit 2, never a FAIL. Native GDI font tests exercise actual
+smoke's `UNVERIFIED` exit 2, never a FAIL. It also runs the smoke's own entry
+block over its real `main()`: a FAIL found before a stopping exception or a
+Chromium that will not start keeps exit 1, and an exception whose message the
+cp1252 code page of a redirected log cannot encode still exits 3, or 1 after a
+FAIL, because the smoke escapes such characters on its standard output. Native
+GDI font tests exercise actual
 raster metrics, rotation, decorations, substitution, DPI and owned-handle cleanup
 without a shell window. The tier also exercises
 the importer's synthetic fixtures, embedded help and icons, version parity,
@@ -368,11 +374,15 @@ to another origin, stays a FAIL. On a page the harness broke, an HTTP error
 status, or a failed request to another origin that the check did not block itself, is
 still a FAIL beside the `HARNESS` line, and a product failure in another leg of
 the same check is still that check's FAIL. The smoke exits 3 when it has
-`HARNESS` lines and no FAIL, and also when its loadState fixture is missing or it
-stops on an exception. Its exit mapping is itself a checked case
-("the exit code is 0 for a pass, 3 for harness errors alone and 1 for any
-FAIL"). The gate reports the web smoke's exit 3 as a `HARNESS` line, never a
-FAIL, and prints the smoke's `HARNESS` lines beside its ok and FAIL lines.
+`HARNESS` lines and no FAIL, and also when its loadState fixture is missing.
+An exception that stops the run adds one more `HARNESS` line,
+`the web smoke runs to its end: stopped by <type>: <message>`, and the smoke
+exits 3 when no FAIL came before it and 1 when one did. Its exit mapping is
+itself a checked case ("the exit code is 0 for a pass, 3 for harness errors
+alone and 1 for any FAIL"). The gate reports an exit 3 with no FAIL line as a
+`HARNESS` line, and an exit 3 that printed a FAIL line anyway as a FAIL with
+the harness reason beside it. It prints the smoke's `HARNESS` lines beside its
+ok and FAIL lines.
 
 A Python case under `tier 1: UC3D importer and WebGL smoke` that exits 3 counts
 as a harness error (`HARNESS`; the gate ends in exit 3 unless a check failed)

@@ -342,7 +342,7 @@ older presets keep Legacy controls.
 
 Preset storage is portable-first:
 
-- If the publish folder accepts new files and any presets file already there can be saved over (not read-only, its permissions refuse none of Read permissions, Write attributes or writing its data, and they do not refuse both Delete on the file and Delete subfolders and files on its folder), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`. When those permissions cannot be read or checked in full, as can happen on a network share, the file is not refused for the part left unchecked: the older write-attributes test decides for that file, and the configurator logs an INFO line naming it.
+- If the publish folder accepts new files and any presets file already there can be saved over (not read-only, its permissions refuse neither Read permissions nor Write attributes, and they do not refuse both Delete on the file and Delete subfolders and files on its folder; Save replaces the file rather than writing into it, so a file whose permissions refuse only writing its data stays in use), presets are stored beside the configurator as `MatrixDesktopConfigurator.presets.json`. When those permissions cannot be read or checked in full, as can happen on a network share, the file is not refused for the part left unchecked: the older write-attributes test decides for that file, and the configurator logs an INFO line naming it.
 - Otherwise presets are stored under `%LOCALAPPDATA%\MatrixDesktop\Configurator\`. When that hides a presets file beside the configurator, the configurator logs a warning naming both paths.
 
 In framework-dependent publish output, run:
@@ -671,8 +671,10 @@ fails a check or exits 3, the gate still lists its UNVERIFIED lines as UNCHECKED
 that verdict.
 
 If Playwright is not installed for the interpreter it finds, the gate reports the smoke as
-not verified rather than skipping it in silence. Point `MD_GATE_PYTHON` at a specific
-interpreter to override the search.
+not verified rather than skipping it in silence. A Chromium that will not start is reported
+the same way, unless one of the harness controls the smoke runs before its launch failed:
+the smoke then exits 1, and the gate lists its UNVERIFIED line as UNCHECKED beside the
+FAIL. Point `MD_GATE_PYTHON` at a specific interpreter to override the search.
 
 Every Chromium the browser suites start goes through `tests/browser_launch.py`, apart from
 the helper's own self-test; the native suites attach to the real app's WebView2 instead. The
@@ -685,10 +687,11 @@ argument-verification PASS line. A launch that fails verification raises
 `uc3d-audio-browser.py`, `uc3d-calibration.py`, `matrix-playback-browser.py` and
 `zmatrix-browser.py` report as a harness error (exit 3), never a product failure. The last
 five print `HARNESS ERROR: <script>: <error>`; the configurator suite prints its own
-`HARNESS ERROR` line, and the web smoke a `harness error` line, on their error output. A
-launch whose browser command line cannot be read prints a DEGRADED line and goes ahead
-unverified. When the probe's command line cannot be read, the helper has no
-Playwright switch to merge with, so the suite runs on its own arguments without the
+`HARNESS ERROR` line, and the web smoke a `harness error` line, on their error output. The
+web smoke also names it in a HARNESS line and exits 1 rather than 3 when a check failed
+before the launch. A launch whose browser command line cannot be read prints a DEGRADED
+line and goes ahead unverified. When the probe's command line cannot be read, the helper
+has no Playwright switch to merge with, so the suite runs on its own arguments without the
 helper's `TcpPortRandomizationWin` disable; when only the real launch's command line cannot
 be read, the disable was requested but is not confirmed. The gate reads every unindented
 DEGRADED line in the web smoke's and each tier-1 Python case's output and reports it as
@@ -708,15 +711,21 @@ In the web smoke, a renderer that never starts is reported as soon as its page s
 notice, with the diagnostics, notices, failed requests, HTTP error statuses, and page and
 console errors the page recorded. `tests/web-smoke.py` exits 3, a harness error, when its own
 infrastructure broke and nothing failed: a smoke server that does not answer, or a request
-to that server that failed with `net::ERR_NO_BUFFER_SPACE`. A missing `loadState` fixture,
-or an exception that ends the run, such as a browser launch that fails argument
-verification, also exits 3. In a run that reaches its verdict, any FAIL keeps exit 1,
-including one in another leg of the same check or, on the page the harness fault hit, an
-unexpected HTTP status of 400 or more or a failed request to another origin. The gate
-records the smoke's exit 3 as a HARNESS line of its own, which quotes up to three of the
-smoke's HARNESS lines or, when the smoke printed none, as after a failed launch verification,
-the first three non-blank lines of its error output. The gate ends in exit 3 unless another
-check failed. For the other tier-1 Python cases, an exit 3 is a HARNESS line too, but only
+to that server that failed with `net::ERR_NO_BUFFER_SPACE`. A missing `loadState` fixture
+also exits 3. An exception that ends the run, such as a browser launch that fails argument
+verification, is named in a HARNESS line that reads
+`the web smoke runs to its end: stopped by <type>: <message>`; the smoke then exits 3 when
+nothing failed before it and 1 when a FAIL did. On its standard output the smoke writes a
+character its log's code page (such as cp1252) cannot encode as a backslash escape, so
+such a message cannot crash the smoke into an exit 1 with no FAIL line. In a run that
+reaches its verdict, any FAIL keeps exit 1, including one in another leg of the same check
+or, on the page the harness fault hit, an unexpected HTTP status of 400 or more or a failed
+request to another origin. The gate records an exit 3 with no FAIL line as a HARNESS line
+of its own, which quotes up to three of the smoke's HARNESS lines or, when the smoke printed
+none, as for a missing `loadState` fixture, the first three non-blank lines of its error
+output. The gate ends in exit 3 unless another check failed. An exit 3 that printed a FAIL
+line anyway is a FAIL, whose detail names the FAIL lines and the harness reason beside them.
+For the other tier-1 Python cases, an exit 3 is a HARNESS line too, but only
 when the case printed a line starting `HARNESS ERROR` and no line starting `FAIL`. A bare
 exit 3 is a FAIL, because exit 3 has other sources (such as `abort()` in a native extension);
 an exit 3 beside a FAIL line is a FAIL because a FAIL outranks a harness error.
