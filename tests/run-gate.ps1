@@ -100,9 +100,10 @@ function Test-Unchecked {
     Write-Host "  UNCHECKED  $Msg" -ForegroundColor Yellow
     Write-Host "               $Why" -ForegroundColor Yellow
 }
-# A check whose own harness broke (web-smoke.py's exit 3, or a tier-1 Python case's exit 3 with
-# its HARNESS ERROR line and no FAIL line, MDST-05). The run continues, and the gate ends
-# in exit 3 unless a check failed, because a broken harness is never a verdict on the app (R3-26).
+# A check whose own harness broke (web-smoke.py's exit 3 with no FAIL line, or a tier-1 Python
+# case's exit 3 with its HARNESS ERROR line and no FAIL line, MDST-05). The run continues, and
+# the gate ends in exit 3 unless a check failed, because a broken harness is never a verdict on
+# the app (R3-26).
 function Test-Harness {
     param([string]$Msg, [string]$Detail)
     $script:HarnessCount++
@@ -714,12 +715,17 @@ try {
                 }
                 # web-smoke.py exits 3 only when its own harness broke and nothing failed: a loopback
                 # error on its server's origin, a server that stops answering, a missing fixture or
-                # an exception before a verdict. That is the gate's harness error, not a product
-                # FAIL (R3-26). The HARNESS lines name each check; a crash prints only to stderr.
+                # an exception that stopped the run. That is the gate's harness error, not a product
+                # FAIL (R3-26). The HARNESS lines name each check, or the exception; a missing fixture
+                # prints only to stderr. An exit 3 that printed a FAIL line anyway is a FAIL, with the
+                # harness error beside it, as Get-GateCaseVerdict rules for the other cases (MDR3-01).
                 3 {
                     $broken = @([regex]::Matches($smokeOut, '(?m)^\s+HARNESS\s+(.+)$') | ForEach-Object { $_.Groups[1].Value.Trim() })
                     if ($broken.Count -eq 0) { $broken = @(Get-Content -LiteralPath "$smokeLog.err" -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }) }
-                    Test-Harness 'headless web smoke' ((@($broken | Select-Object -First 3) -join ' | ') + "; see $smokeLog and $smokeLog.err")
+                    $brokenDetail = (@($broken | Select-Object -First 3) -join ' | ') + "; see $smokeLog and $smokeLog.err"
+                    $bad = @([regex]::Matches($smokeOut, '(?m)^\s+FAIL\s+(.+)$') | ForEach-Object { $_.Groups[1].Value.Trim() })
+                    if ($bad.Count -gt 0) { Test-Fail 'headless web smoke' ('exit 3, a FAIL beside a harness error: ' + ($bad -join ' | ') + " | $brokenDetail") }
+                    else { Test-Harness 'headless web smoke' $brokenDetail }
                 }
                 default { Test-Fail 'headless web smoke' "harness error (exit $smokeExit): $($smokeOut.Trim())" }
             }

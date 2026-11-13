@@ -2318,8 +2318,11 @@ def main():
             except browser_launch.LaunchArgumentsError:
                 raise
             except Exception as exc:
+                # An environment gap, the cannot-verify exit 2 when nothing else decides: a FAIL
+                # the harness controls above found still makes it exit 1 (final_verdict; MDR3-01).
+                unverified.append("every check that needs chromium")
                 print(f"UNVERIFIED: chromium is unavailable: {exc}", file=sys.stderr)
-                return 2
+                return final_verdict()
 
             print("=== web smoke: configurator ===")
             page = browser.new_page(viewport=VIEWPORT)
@@ -2372,8 +2375,22 @@ def final_verdict():
 
 
 if __name__ == "__main__":
+    # The gate redirects stdout to a log file. With neither PYTHONIOENCODING nor PYTHONUTF8 set
+    # (CI sets neither), Python on Windows writes it in the ANSI code page with surrogateescape
+    # errors, which raise on any character the page lacks that is not a lone surrogate. A detail
+    # or an exception message holding one then raised inside the except below, so a harness
+    # error exited 1 with a traceback and no FAIL line (MDR3-01). Escape it the way stderr does.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)  # a StringIO in the tests has none
+    if reconfigure:
+        reconfigure(errors="backslashreplace")
     try:
-        sys.exit(main())
+        code = main()
     except Exception as exc:  # harness error, distinct from a product failure
-        print(f"  harness error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        sys.exit(3)
+        # The exception ends the run, not its verdict: a FAIL found before it still makes the
+        # exit 1, with this harness error named beside it, and with none it is the harness
+        # error's exit 3. One such exception is a typed launch refusal
+        # (browser_launch.LaunchArgumentsError) at the favicon check's full-Chromium launch,
+        # after every other check has run (MDR3-01).
+        harness("the web smoke runs to its end", f"stopped by {type(exc).__name__}: {exc}")
+        code = final_verdict()
+    sys.exit(code)
