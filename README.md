@@ -718,7 +718,8 @@ smoke's HARNESS lines or, when the smoke printed none, as after a failed launch 
 the first three non-blank lines of its error output. The gate ends in exit 3 unless another
 check failed. For the other tier-1 Python cases, an exit 3 is a HARNESS line too, but only
 when the case printed a line starting `HARNESS ERROR` and no line starting `FAIL`. A bare
-exit 3, or an exit 3 beside a FAIL line, is a FAIL, because a FAIL outranks a harness error.
+exit 3 is a FAIL, because exit 3 has other sources (such as `abort()` in a native extension);
+an exit 3 beside a FAIL line is a FAIL because a FAIL outranks a harness error.
 
 Installed Edge can exercise both UC3D rendering backends with
 `python tests\uc3d-browser.py --renderer both --channel msedge`. Original-control

@@ -377,9 +377,9 @@ FAIL, and prints the smoke's `HARNESS` lines beside its ok and FAIL lines.
 A Python case under `tier 1: UC3D importer and WebGL smoke` that exits 3 counts
 as a harness error (`HARNESS`; the gate ends in exit 3 unless a check failed)
 only when it printed a line starting `HARNESS ERROR` and no line starting
-`FAIL`. A bare exit 3, or an exit 3 beside a FAIL line, is a FAIL, because a
-FAIL outranks a harness error; its detail names the first FAIL line and the
-`HARNESS ERROR` line. `uc3d-browser.py`, `uc3d-audio-browser.py`,
+`FAIL`. A bare exit 3 is a FAIL, because exit 3 has other sources. An exit 3
+beside a FAIL line is a FAIL too, because a FAIL outranks a harness error; its
+detail names the first FAIL line and the `HARNESS ERROR` line. `uc3d-browser.py`, `uc3d-audio-browser.py`,
 `uc3d-calibration.py`, `matrix-playback-browser.py` and `zmatrix-browser.py`
 print `HARNESS ERROR: <script>: <error>` and exit 3 when a browser launch fails
 argument verification (`browser_launch.LaunchArgumentsError`). The ZMatrix
