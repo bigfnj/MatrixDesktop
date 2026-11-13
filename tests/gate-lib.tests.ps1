@@ -1080,6 +1080,31 @@ try {
         Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
     }
 
+    Invoke-TestCase 'MDR3-01 (b) the web smoke''s exit 3 beside a FAIL line is a FAIL naming the harness error, and (c) with no FAIL line a harness error' {
+        if (-not $Python) { return 'CANNOT VERIFY MDR3-01 (b): no Python interpreter for the stubs' }
+        $refusal = 'LaunchArgumentsError: browser launch (chromium) 151.0: argument verification FAILED: stub refusal'
+        $harness = "  HARNESS  the web smoke runs to its end: stopped by $refusal"
+        $failLine = '  FAIL  a check: it broke'
+        $wrong = @()
+        foreach ($leg in @(
+                # web-smoke.py after a FAIL and a late exception: the HARNESS line on stdout, exit 3.
+                @{ Label = 'mdr3-01-b-harness'; Out = @($failLine, $harness, 'WEB SMOKE HARNESS ERROR: 1 check(s) could not run; 0 passed'); Err = @()
+                    Want = "FAIL|headless web smoke|exit 3, a FAIL beside a harness error: a check: it broke | the web smoke runs to its end: stopped by $refusal"; Echo = @($failLine, $harness) },
+                # web-smoke.py before MDR3-01: the exception on stderr alone, exit 3.
+                @{ Label = 'mdr3-01-b-crash'; Out = @($failLine); Err = @("  harness error: $refusal")
+                    Want = "FAIL|headless web smoke|exit 3, a FAIL beside a harness error: a check: it broke | harness error: $refusal"; Echo = @($failLine) },
+                # (c) Control: the same exit 3 with no FAIL line stays the harness error.
+                @{ Label = 'mdr3-01-c-harness-only'; Out = @($harness, 'WEB SMOKE HARNESS ERROR: 1 check(s) could not run; 0 passed'); Err = @()
+                    Want = "HARNESS|headless web smoke|the web smoke runs to its end: stopped by $refusal"; Echo = @($harness) })) {
+            $all = Invoke-WebSmokeBlock $leg.Label $leg.Out $leg.Err 3
+            if (($all -join ' / ') -ne $leg.Want) { $wrong += "$($leg.Label): reported '$($all -join ' / ')', expected '$($leg.Want)'" }
+            foreach ($line in $leg.Echo) {
+                if (-not ($script:Echoed -contains ('  ' + $line.Trim()))) { $wrong += "$($leg.Label): '$($line.Trim())' was not echoed (echoed: $(@($script:Echoed) -join ' / '))" }
+            }
+        }
+        Assert-Equal 0 $wrong.Count ($wrong -join ' || ')
+    }
+
     Invoke-TestCase 'MDST-05 (b) a tier-1 Python case''s exit 3 with its HARNESS ERROR line is the gate''s harness error, and a bare exit 3 or one beside a FAIL line a FAIL' {
         if (-not $Python) { return 'CANNOT VERIFY MDST-05 (b): no Python interpreter for the stubs' }
         $refused = 'browser launch (msedge) 157.0.4341.46: argument verification FAILED: TcpPortRandomizationWin is missing'
