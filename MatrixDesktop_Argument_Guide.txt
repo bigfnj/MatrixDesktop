@@ -28,8 +28,8 @@ safe windowed test run. It stores presets beside the executable, or under
 LocalAppData\MatrixDesktop\Configurator when the executable's folder refuses a
 new file, or when a presets file already there is read-only or its permissions
 refuse Read permissions or Write attributes, or refuse both Delete on the file
-and Delete subfolders and files on its folder (Save replaces the file rather
-than writing into it, which needs one of those two, so permissions that refuse
+and Delete subfolders and files on its folder (Save replaces the file, which
+needs one of those two, and never writes into it, so permissions that refuse
 only writing its data keep presets beside the executable). If it falls back
 while a presets file sits beside the executable, that file's presets are not
 shown, and a warning naming both paths goes to
