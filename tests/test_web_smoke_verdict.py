@@ -10,7 +10,9 @@ for a channel whose executable is not installed.
 
 EntryPointTests (MDR3-01) run web-smoke.py's own entry block over its real main() with the
 launches as stand-ins: a FAIL found before the run stopped, on a typed launch refusal or on a
-chromium that cannot start, stays the verdict, exit 1.
+chromium that cannot start, stays the verdict, exit 1. Two of them write to stdout the way
+Python on a cp1252 Windows runner opens the gate's redirected log, with an exception message
+that code page cannot encode: the harness error is still exit 3, and still exit 1 after a FAIL.
 
 Exit codes: 0 pass, 1 fail (unittest).
 """
@@ -129,7 +131,39 @@ def unverified_chromium(err):
     return [line for line in err.splitlines() if line.startswith("UNVERIFIED: chromium is unavailable: ")]
 
 
-def run_entry_point(launch, stand_ins):
+def a_working_launch(browser_type, **kwargs):
+    return StandInBrowser()
+
+
+# A character the cp1252 code page cannot encode (KATAKANA LETTER A), and the text a
+# backslashreplace stream writes for it.
+UNENCODABLE = chr(0x30A2)
+ESCAPED = UNENCODABLE.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def a_late_exception(namespace, *args):
+    """A check late in main() raises, with a message that cp1252 cannot encode."""
+    raise RuntimeError(f"a late check broke on {UNENCODABLE}")
+
+
+def cp1252_streams():
+    """stdout and stderr as CPython on Windows opens them for the gate's child on a cp1252 runner,
+    both redirected to log files with neither PYTHONIOENCODING nor PYTHONUTF8 set (CI's setup):
+    the code page with surrogateescape for stdout, which raises on any character that page lacks
+    other than a lone surrogate, and with backslashreplace for stderr."""
+    return (io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="surrogateescape"),
+            io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="backslashreplace"))
+
+
+def written(stream):
+    """What a stream holds: a StringIO's text, or the bytes a TextIOWrapper wrote, decoded."""
+    if isinstance(stream, io.StringIO):
+        return stream.getvalue()
+    stream.flush()
+    return stream.buffer.getvalue().decode(stream.encoding)
+
+
+def run_entry_point(launch, stand_ins, streams=None):
     """web-smoke.py's own `if __name__ == "__main__":` block, the code the gate's child process
     ends in, run over the real main(): (exit code, stdout, stderr, the launch calls' channels).
 
@@ -137,7 +171,10 @@ def run_entry_point(launch, stand_ins):
     browser_launch.launch is replaced by `launch`, every check_* function main() reaches becomes a
     no-op except check_startup_paths and check_no_favicon_request (the favicon launch's own path)
     and the ones `stand_ins` names, and REPO points at a stub loadState fixture. No browser or
-    Playwright driver starts: sync_playwright() is a stand-in too.
+    Playwright driver starts: sync_playwright() is a stand-in too. `streams` is the (stdout,
+    stderr) pair the block writes to, two StringIOs when not given. An exception the block lets
+    out, where the child would exit 1 with a traceback, comes back as the code
+    'raised <type>: <message>'.
     """
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), str(SOURCE))
     entry = tree.body[-1]
@@ -161,7 +198,8 @@ def run_entry_point(launch, stand_ins):
         yield types.SimpleNamespace(chromium="the chromium browser type")
 
     from playwright import sync_api
-    out, err, saved = io.StringIO(), io.StringIO(), (browser_launch.launch, sync_api.sync_playwright)
+    out, err = streams or (io.StringIO(), io.StringIO())
+    saved = (browser_launch.launch, sync_api.sync_playwright)
     with tempfile.TemporaryDirectory() as root:
         (Path(root) / "artifacts" / "gate").mkdir(parents=True)
         (Path(root) / "artifacts" / "gate" / "loadState.json").write_text("{}", encoding="utf-8")
@@ -174,9 +212,11 @@ def run_entry_point(launch, stand_ins):
             code = "no sys.exit"
         except SystemExit as stop:
             code = stop.code
+        except Exception as exc:
+            code = f"raised {type(exc).__name__}: {ascii(str(exc))}"
         finally:
             browser_launch.launch, sync_api.sync_playwright = saved
-    return code, out.getvalue(), err.getvalue(), channels
+    return code, written(out), written(err), channels
 
 
 def a_product_fail(namespace, *args):
@@ -226,6 +266,35 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(code, 2, f"{out}\n{err}")
         self.assertNotIn("  FAIL  ", out)
         self.assertEqual(len(unverified_chromium(err)), 1, err)
+
+    def test_an_exception_cp1252_cannot_encode_alone_is_exit_3_naming_it(self):
+        # Killing mutation: the entry block without its stdout reconfigure. harness() then raises
+        # UnicodeEncodeError inside the except, and the child exits 1 with no FAIL line.
+        streams = cp1252_streams()
+        code, out, err, channels = run_entry_point(a_working_launch, {"check_glyph_intensity": a_late_exception}, streams)
+        print(f"WITNESS stdout errors {streams[0].errors}; exit {code}", flush=True)
+        self.assertEqual(channels, [None], "main()'s one launch, then the late check")
+        self.assertEqual(code, 3, f"a harness error alone is exit 3 whatever stdout can encode:\n{out}\n{err}")
+        self.assertNotIn("  FAIL  ", out)
+        harness = [line for line in out.splitlines() if line.startswith("  HARNESS  ")]
+        self.assertEqual(len(harness), 1, out)
+        self.assertIn(f"the web smoke runs to its end: stopped by RuntimeError: a late check broke on {ESCAPED}", harness[0])
+        self.assertIn(f"harness error: the web smoke runs to its end: stopped by RuntimeError: a late check broke on {ESCAPED}", err)
+        self.assertIn("WEB SMOKE HARNESS ERROR: 1 check(s) could not run; 0 passed", out)
+
+    def test_an_exception_cp1252_cannot_encode_after_a_fail_is_exit_1_naming_both(self):
+        # Killing mutation: the same as the test above.
+        streams = cp1252_streams()
+        code, out, err, channels = run_entry_point(
+            a_working_launch, {"check_configurator": a_product_fail, "check_glyph_intensity": a_late_exception}, streams)
+        print(f"WITNESS stdout errors {streams[0].errors}; exit {code}", flush=True)
+        self.assertEqual(channels, [None], "main()'s one launch, then the late check")
+        self.assertEqual(code, 1, f"a FAIL before the exception is the verdict whatever stdout can encode:\n{out}\n{err}")
+        self.assertIn("  FAIL  a product check: it broke", out)
+        harness = [line for line in out.splitlines() if line.startswith("  HARNESS  ")]
+        self.assertEqual(len(harness), 1, out)
+        self.assertIn(f"the web smoke runs to its end: stopped by RuntimeError: a late check broke on {ESCAPED}", harness[0])
+        self.assertIn("WEB SMOKE FAILED: 1 of 1 checks, and 1 harness error(s)", out)
 
 
 if __name__ == "__main__":

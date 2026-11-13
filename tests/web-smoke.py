@@ -2375,6 +2375,14 @@ def final_verdict():
 
 
 if __name__ == "__main__":
+    # The gate redirects stdout to a log file. With neither PYTHONIOENCODING nor PYTHONUTF8 set
+    # (CI sets neither), Python on Windows writes it in the ANSI code page with surrogateescape
+    # errors, which raise on any character the page lacks that is not a lone surrogate. A detail
+    # or an exception message holding one then raised inside the except below, so a harness
+    # error exited 1 with a traceback and no FAIL line (MDR3-01). Escape it the way stderr does.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)  # a StringIO in the tests has none
+    if reconfigure:
+        reconfigure(errors="backslashreplace")
     try:
         code = main()
     except Exception as exc:  # harness error, distinct from a product failure
