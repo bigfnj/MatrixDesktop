@@ -106,8 +106,9 @@ constant argument. Each WebView2 initialisation must await the helper that
 clears a saved camera denial before it navigates, and that helper may reset a
 saved permission setting only on
 `HostPermissionPolicy.ForgetsSavedState`'s true answer: no reset may be
-reachable from the helper's entry, that answer's false edge or any exception
-handler. The walk follows normal flow only and does not enter the methods it
+reachable without passing that question, whether from the helper's entry,
+from that answer's false edge or from any exception handler. The walk
+follows normal flow only and does not enter the methods it
 calls, so these checks guard against regressions rather than model the CLR
 exactly. Version parity runs
 `tests\check-release-version.ps1`, which `release.yml` runs with the tag, and a
