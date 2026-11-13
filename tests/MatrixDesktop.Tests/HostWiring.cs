@@ -660,9 +660,26 @@ internal static class HostWiring
             });
             Check.True(paths.Count > 0 && paths.All(steps => steps.Any(step => !step.Store && step.Name == navigate)),
                 "witness: every path through ReloadRenderer with a live WebView and a target must navigate");
-            var stale = paths.Where(steps => !steps.Skip(steps.FindIndex(step => !step.Store && step.Name == navigate) + 1)
-                .Any(step => step.Store && step.Name == "MatrixDesktop.MainForm::_isSuspended" && step.Values[0] == 0)).ToList();
-            Check.True(stale.Count == 0, $"ReloadRenderer must set _isSuspended to false after it navigates, because Navigate resumes a suspended WebView: {stale.Count} of {paths.Count} paths keep it");
+            // MDR3-05. The last store on each path, not any store after Navigate: '_isSuspended =
+            // true;' after the false one brought R3-25 back. The walk follows normal flow and does
+            // not enter callees, so a method that stores anything but false is a stale store when
+            // a path calls it after its last store, and so is such a store or call in a finally.
+            const string suspended = "MatrixDesktop.MainForm::_isSuspended";
+            static bool SetsNotFalse(List<Instruction> code, int index) => code[index].Code == OpCodes.Stfld && code[index].Name == suspended && code[index - 1].Code != OpCodes.Ldc_I4_0;
+            var writers = every.Where(body => Enumerable.Range(1, body.Code.Count - 1).Any(index => SetsNotFalse(body.Code, index))).Select(body => body.Method).ToHashSet();
+            var stale = paths.Where(steps =>
+            {
+                var last = steps.FindLastIndex(step => step.Store && step.Name == suspended);
+                return last < steps.FindIndex(step => !step.Store && step.Name == navigate) || steps[last].Values[0] != 0
+                    || steps.Skip(last + 1).Any(step => !step.Store && writers.Contains(step.Name));
+            }).ToList();
+            var reload = Body(bodies, "MatrixDesktop.MainForm::ReloadRenderer");
+            var late = FinallyRegions(path, "MatrixDesktop.MainForm::ReloadRenderer").SelectMany(region => Enumerable.Range(1, reload.Count - 1)
+                .Where(index => reload[index].Offset >= region.HandlerOffset && reload[index].Offset < region.HandlerOffset + region.HandlerLength
+                    && (SetsNotFalse(reload, index) || IsCall(reload[index]) && writers.Contains(reload[index].Name!))))
+                .Select(index => $"IL_{reload[index].Offset:X4}").ToList();
+            Check.True(stale.Count == 0 && late.Count == 0, "ReloadRenderer's last store of _isSuspended must set it to false after it navigates, because Navigate resumes a suspended WebView: "
+                + $"{stale.Count} of {paths.Count} paths keep it; stale in a finally: {(late.Count == 0 ? "none" : string.Join(", ", late))}");
         });
         failures += Run($"the wallpaper tick resets the rebuild backoff once a renderer stayed ready: {path}", () =>
         {
