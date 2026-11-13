@@ -484,12 +484,39 @@ internal static class HostWiring
                 var roots = new[] { (Offset: code[0].Offset, Name: "the method entry") }.Concat(Regions(path, body.Method)
                     .SelectMany(region => region.Kind == ExceptionRegionKind.Filter ? new[] { region.FilterOffset, region.HandlerOffset } : new[] { region.HandlerOffset })
                     .Select(offset => (Offset: offset, Name: $"the handler at IL_{offset:X4}")));
-                var skipped = roots.Select(root => (Index: code.FindIndex(instruction => instruction.Offset == root.Offset), root.Name))
-                    .Where(root => root.Index < 0 || Flows(code, root.Index, index, store.Index) || Flows(code, root.Index, index, ldftn)).Select(root => $"reached from {root.Name} without them");
+                var rooted = roots.Select(root => (Index: code.FindIndex(instruction => instruction.Offset == root.Offset), root.Name)).ToList();
+                var skipped = rooted.Where(root => root.Index < 0 || Flows(code, root.Index, index, store.Index) || Flows(code, root.Index, index, ldftn)).Select(root => $"reached from {root.Name} without them");
                 var rewrites = Enumerable.Range(0, code.Count).Where(other => other != store.Index && (Writes(code[other]) || IsCall(code[other]) && writers.Contains(code[other].Name!))
                     && Flows(code, store.Index, other, index)).Select(other => $"written again by IL_{code[other].Offset:X4} {code[other].Code.Name} {code[other].Name}");
                 var unled = skipped.Concat(rewrites).ToList();
-                return unled.Count == 0 ? null : $"{at} does not run only after the handler's store (IL_{code[store.Index].Offset:X4}) and its ldftn: " + string.Join(", ", unled);
+                if (unled.Count > 0) return $"{at} does not run only after the handler's store (IL_{code[store.Index].Offset:X4}) and its ldftn: " + string.Join(", ", unled);
+                // Those legs prove the store leads the add, not that every host reaches the add:
+                // 'if (_hostKind == NativeHostKind.Interactive) { ... }' around the store and the
+                // add together, in either polarity, passed and left wallpaper, /s and /p hosts
+                // with no handler. Every host awaits the clear of a saved camera denial right after
+                // the add, in this body, so no root may reach that call, or the code after its
+                // await, without the add: the second catches the same 'if' wrapped around the
+                // clear too. An await's resume block is entered from the state machine's dispatch
+                // only after that await suspended, so a jump into one from outside its await stops
+                // the walk like the add; without that, the clear's own await (or one added before
+                // it) is a jump around the add. Not Navigate: a catch between the clear and
+                // Navigate that falls through would be a root that skips the add.
+                const string clear = "MatrixDesktop.MainForm::ForgetSavedCameraDenialAsync";
+                var clears = Enumerable.Range(0, code.Count).Where(other => IsCall(code[other]) && code[other].Name == clear).ToList();
+                var cleared = clears.Count == 1 ? clears[0] : -1;
+                var awaited = cleared < 0 ? -1 : code.FindIndex(cleared, instruction => IsCall(instruction) && instruction.Name == "System.Runtime.CompilerServices.TaskAwaiter::GetResult");
+                if (awaited < 0) return $"{at} is not followed by the one awaited call every host makes, {clear} (found {clears.Count} in its body)";
+                var awaits = Enumerable.Range(0, code.Count).Where(result => IsCall(code[result]) && code[result].Name?.EndsWith("::GetResult", StringComparison.Ordinal) == true)
+                    .Select(result => (Start: code.FindLastIndex(result, instruction => IsCall(instruction) && instruction.Name?.EndsWith("::GetAwaiter", StringComparison.Ordinal) == true), End: result))
+                    .Where(range => range.Start >= 0).ToList();
+                var resumed = Enumerable.Range(0, code.Count).SelectMany(source => (code[source].Code == OpCodes.Switch ? code[source].Targets!
+                        : code[source].Code.FlowControl is FlowControl.Branch or FlowControl.Cond_Branch ? new[] { (int)code[source].Value } : [])
+                        .Select(offset => (Source: source, Target: code.FindIndex(instruction => instruction.Offset == offset))))
+                    .Where(jump => awaits.Any(range => range.Start < jump.Target && jump.Target < range.End && (jump.Source < range.Start || jump.Source > range.End)))
+                    .Select(jump => jump.Target).ToHashSet();
+                var bypassed = rooted.SelectMany(root => new[] { (Index: cleared, Name: "the call"), (Index: awaited + 1, Name: "the code after its await") }
+                    .Where(anchor => Flows(code, root.Index, anchor.Index, index, resumed)).Select(anchor => $"{anchor.Name} reached from {root.Name} without it")).ToList();
+                return bypassed.Count == 0 ? null : $"{at} is not on every host's path to {clear} (IL_{code[cleared].Offset:X4}): " + string.Join(", ", bypassed);
             })).OfType<string>().ToList();
             Check.True(unbound.Count == 0, "each PermissionRequested add and remove must pass _permissionRequestedHandler, and the add must run on every path after the handler's store "
                 + "and only after it: " + string.Join("; ", unbound));
@@ -847,9 +874,9 @@ internal static class HostWiring
         return found[0];
     }
 
-    // True when control can flow from index from to index to without passing index stop, every
-    // branch followed both ways; exception handlers are not entered.
-    private static bool Flows(List<Instruction> code, int from, int to, int stop)
+    // True when control can flow from index from to index to without passing index stop (or any
+    // index in stops), every branch followed both ways; exception handlers are not entered.
+    private static bool Flows(List<Instruction> code, int from, int to, int stop, IReadOnlySet<int>? stops = null)
     {
         var at = code.Select((instruction, index) => (instruction.Offset, index)).ToDictionary(pair => pair.Offset, pair => pair.index);
         var seen = new HashSet<int>();
@@ -857,7 +884,7 @@ internal static class HostWiring
         while (work.Count > 0)
         {
             var index = work.Pop();
-            if (index < 0 || index == stop || !seen.Add(index)) continue;
+            if (index < 0 || index == stop || stops?.Contains(index) == true || !seen.Add(index)) continue;
             if (index == to) return true;
             var op = code[index].Code;
             if (op == OpCodes.Ret || op == OpCodes.Throw || op == OpCodes.Rethrow || op == OpCodes.Endfinally) continue;
