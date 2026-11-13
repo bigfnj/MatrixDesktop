@@ -457,9 +457,19 @@ internal static class HostWiring
             // The add must also run on every path after the handler's store, in its body: no
             // return or throw is reached around it. A reordered line subscribed null, and a branch
             // around the add left some hosts without the handler.
+            // MDR3-04F. Those legs start at the store, so a branch around the store alone passed:
+            // 'if (_hostKind == NativeHostKind.Interactive)' around the assignment subscribed null
+            // on every wallpaper, /s and /p host. The store, and the ldftn that builds its value,
+            // must also be on every path to the add from the method entry and from each exception
+            // handler (a catch that falls through to the add skips a store in its try), and no
+            // other write of the field may come between them, in the body or in a MatrixDesktop.dll
+            // method it calls: a ternary stored null on one arm, and a null store or a helper that
+            // made one before the add cleared it.
             const string field = "MatrixDesktop.MainForm::_permissionRequestedHandler";
             var built = every.SelectMany(body => Enumerable.Range(1, body.Code.Count - 1).Where(index => body.Code[index].Code == OpCodes.Stfld && body.Code[index].Name == field
                 && body.Code.Take(index).TakeLast(8).Any(instruction => instruction.Code == OpCodes.Ldftn)).Select(index => (body.Code, Index: index))).ToList();
+            static bool Writes(Instruction instruction) => (instruction.Code == OpCodes.Stfld || instruction.Code == OpCodes.Ldflda) && instruction.Name == field;
+            var writers = every.Where(body => body.Code.Any(Writes)).Select(body => body.Method).ToHashSet();
             var unbound = every.SelectMany(body => Enumerable.Range(1, body.Code.Count - 1).Select(string? (index) =>
             {
                 var (code, call) = (body.Code, body.Code[index]);
@@ -468,11 +478,21 @@ internal static class HostWiring
                 if (code[index - 1].Code != OpCodes.Ldfld || code[index - 1].Name != field) return $"{at} passes {code[index - 1].Code.Name} {code[index - 1].Name}";
                 if (call.Name == core + "remove_PermissionRequested") return null;
                 var exits = Enumerable.Range(0, code.Count).Where(exit => code[exit].Code == OpCodes.Ret || code[exit].Code == OpCodes.Throw).ToList();
-                return built is [var store] && ReferenceEquals(store.Code, code) && store.Index < index && Flows(code, store.Index, index, -1)
-                    && !exits.Any(exit => Flows(code, store.Index, exit, index)) ? null : $"{at} does not run on every path after the handler's store";
+                if (built is not [var store] || !ReferenceEquals(store.Code, code) || store.Index >= index || !Flows(code, store.Index, index, -1)
+                    || exits.Any(exit => Flows(code, store.Index, exit, index))) return $"{at} does not run on every path after the handler's store";
+                var ldftn = Enumerable.Range(store.Index - 8, 8).Last(prior => prior >= 0 && code[prior].Code == OpCodes.Ldftn);
+                var roots = new[] { (Offset: code[0].Offset, Name: "the method entry") }.Concat(Regions(path, body.Method)
+                    .SelectMany(region => region.Kind == ExceptionRegionKind.Filter ? new[] { region.FilterOffset, region.HandlerOffset } : new[] { region.HandlerOffset })
+                    .Select(offset => (Offset: offset, Name: $"the handler at IL_{offset:X4}")));
+                var skipped = roots.Select(root => (Index: code.FindIndex(instruction => instruction.Offset == root.Offset), root.Name))
+                    .Where(root => root.Index < 0 || Flows(code, root.Index, index, store.Index) || Flows(code, root.Index, index, ldftn)).Select(root => $"reached from {root.Name} without them");
+                var rewrites = Enumerable.Range(0, code.Count).Where(other => other != store.Index && (Writes(code[other]) || IsCall(code[other]) && writers.Contains(code[other].Name!))
+                    && Flows(code, store.Index, other, index)).Select(other => $"written again by IL_{code[other].Offset:X4} {code[other].Code.Name} {code[other].Name}");
+                var unled = skipped.Concat(rewrites).ToList();
+                return unled.Count == 0 ? null : $"{at} does not run only after the handler's store (IL_{code[store.Index].Offset:X4}) and its ldftn: " + string.Join(", ", unled);
             })).OfType<string>().ToList();
-            Check.True(unbound.Count == 0, "each PermissionRequested add and remove must pass _permissionRequestedHandler, and the add must run on every path after the handler's store: "
-                + string.Join("; ", unbound));
+            Check.True(unbound.Count == 0, "each PermissionRequested add and remove must pass _permissionRequestedHandler, and the add must run on every path after the handler's store "
+                + "and only after it: " + string.Join("; ", unbound));
             var handlers = BuiltFrom(bodies, field);
             Check.Equal(1, handlers.Count, "witness: the scan must find the one method _permissionRequestedHandler is built from");
             var handler = Body(bodies, handlers[0]);
