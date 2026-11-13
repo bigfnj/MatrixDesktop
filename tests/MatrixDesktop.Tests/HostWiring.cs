@@ -499,8 +499,8 @@ internal static class HostWiring
                 // clear too. An await's resume block is entered from the state machine's dispatch
                 // only after that await suspended, so a jump into one from outside its await stops
                 // the walk like the add; without that, the clear's own await (or one added before
-                // it) is a jump around the add. Not Navigate: a catch between the clear and
-                // Navigate that falls through would be a root that skips the add.
+                // it) is a jump around the add. Navigate is an anchor too, below, walked from the
+                // method entry only.
                 const string clear = "MatrixDesktop.MainForm::ForgetSavedCameraDenialAsync";
                 var clears = Enumerable.Range(0, code.Count).Where(other => IsCall(code[other]) && code[other].Name == clear).ToList();
                 var cleared = clears.Count == 1 ? clears[0] : -1;
@@ -516,6 +516,18 @@ internal static class HostWiring
                     .Select(jump => jump.Target).ToHashSet();
                 var bypassed = rooted.SelectMany(root => new[] { (Index: cleared, Name: "the call"), (Index: awaited + 1, Name: "the code after its await") }
                     .Where(anchor => Flows(code, root.Index, anchor.Index, index, resumed)).Select(anchor => $"{anchor.Name} reached from {root.Name} without it")).ToList();
+                // The same 'if' around the whole paragraph, the store, the add, the awaited clear
+                // and the shutdown check after it, passed those two anchors in either polarity.
+                // Every host that renders navigates after the add, so no Navigate in this body may
+                // be reached from the method entry without the add, with the same resume-block
+                // stops. Handler roots are not used for Navigate: one is entered whether or not the
+                // add ran, so a catch between the clear and Navigate that falls through (none today:
+                // PrepareWebRoot's catch returns) would reach Navigate without the add and fail
+                // correct code. Each Navigate is checked, so one inside a catch, which the entry does
+                // not reach, passes. A wrap that takes Navigate too leaves those hosts blank.
+                var navigates = Enumerable.Range(0, code.Count).Where(other => IsCall(code[other]) && code[other].Name == core + "Navigate").ToList();
+                bypassed.AddRange(navigates.Count == 0 ? new[] { $"no {core}Navigate in its body" } : navigates.Where(navigate => Flows(code, 0, navigate, index, resumed))
+                    .Select(navigate => $"the Navigate at IL_{code[navigate].Offset:X4} reached from the method entry without it"));
                 return bypassed.Count == 0 ? null : $"{at} is not on every host's path to {clear} (IL_{code[cleared].Offset:X4}): " + string.Join(", ", bypassed);
             })).OfType<string>().ToList();
             Check.True(unbound.Count == 0, "each PermissionRequested add and remove must pass _permissionRequestedHandler, and the add must run on every path after the handler's store "
