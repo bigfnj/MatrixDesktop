@@ -539,8 +539,9 @@ at `fa31f48`). The lane and its verifier recorded these limits of the new legs:
   (MatrixDesktop/HostPermissionPolicy.cs:17-22), and, as the verifier measured, the add moved
   after `await ForgetSavedCameraDenialAsync` and its shutdown return
   (MatrixDesktop/MainForm.cs:810-812). Exception edges between the store and the add are not
-  followed (:830-831), so a throw there that skipped the add would pass; only the add's own
-  operands are loaded between them today (MatrixDesktop/MainForm.cs:797-810). The add's
+  followed (:830-831), so an exception raised by a call between them, which would skip the add,
+  passes, while an explicit throw there is one of the exits and fails (:470-472); only the add's
+  own operands are loaded between them today (MatrixDesktop/MainForm.cs:797-810). The add's
   receiver is not tied to this form's CoreWebView2, and a removal needs only the field, so
   `PermissionRequested -= _permissionRequestedHandler;` right after the add passed both
   harnesses in the verifier's run.
