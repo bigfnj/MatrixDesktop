@@ -20,8 +20,8 @@ web smoke, the ZMatrix configurator suite, `uc3d-browser.py`,
 `uc3d-audio-browser.py`, `uc3d-calibration.py`, `matrix-playback-browser.py`
 and `zmatrix-browser.py` report that error as a harness error and exit 3; the
 helper's own self-test, `tests\browser-launch.test.py`, counts it as a failed
-check. To build the merged switch,
-the helper first reads Playwright's own switch from a probe launch's argv. When
+check. To build the merged switch, the helper first reads
+Playwright's own switch from a probe launch's argv. When
 that argv cannot be read, the suite's browser launches with its own arguments
 and `TcpPortRandomizationWin` is not disabled. When only the merged launch's
 argv cannot be read, the switch was requested but is not confirmed. Either way
