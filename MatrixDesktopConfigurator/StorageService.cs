@@ -342,7 +342,7 @@ internal sealed class StorageService
 
     // The store is opened for FILE_WRITE_ATTRIBUTES and READ_CONTROL only. Neither takes part
     // in file sharing, so this open neither waits for a reader nor makes one fail; opening for
-    // the data or DELETE rights Save needs would fail with a sharing violation while Load reads
+    // DELETE, the right Save's rename needs, would fail with a sharing violation while Load reads
     // the store (R2-18). The raw call gets the extended-length path that .NET's own file APIs
     // add for themselves, or a store path of MAX_PATH or more reads as not found (R3-11). A
     // name that is not found is R3-10's rename gap, not a refusal; every other failure still
@@ -363,10 +363,13 @@ internal sealed class StorageService
 
     // The verdict on an existing store whose open for FILE_WRITE_ATTRIBUTES the kernel granted.
     // That right alone is not the question Save asks: a hand-built ACL can keep it while denying
-    // the data rights and DELETE, and File.Replace and its File.Move fallback both need DELETE
-    // on the store or FILE_DELETE_CHILD on its folder (R3-12, MD517-01). storeRights is what
+    // DELETE, and File.Replace and its File.Move fallback both rename the store away, which
+    // needs DELETE on the store or FILE_DELETE_CHILD on its folder (R3-12, MD517-01). Save never
+    // writes into the store: it writes a sibling temp file, which the folder probe's create
+    // right covers, and renames it over, so the store's own data rights are not asked, and a
+    // store that refuses them but can be renamed away is kept (MDR3-02). storeRights is what
     // AccessCheck grants this process under the store's DACL, or null when that could not be
-    // read or evaluated; the data rights and DELETE come from it, never from opening for them.
+    // read or evaluated; DELETE comes from it, never from opening for it.
     // It is trusted only where it agrees with the kernel about FILE_WRITE_ATTRIBUTES: a share
     // whose DACL names the server's own accounts, or a volume without ACLs, is not modelled by
     // the local token. FILE_DELETE_CHILD takes no part in file sharing, so the folder's answer
@@ -387,11 +390,6 @@ internal sealed class StorageService
         {
             degraded?.Invoke($"The ACL of the portable preset store '{path}' grants this process no write attributes although the kernel did (a share whose ACL names the server's own accounts does this), {kept}.");
             return true;
-        }
-
-        if ((granted & (FileWriteData | FileAppendData)) != (FileWriteData | FileAppendData))
-        {
-            return false;
         }
 
         if ((granted & Delete) != 0)
@@ -481,8 +479,6 @@ internal sealed class StorageService
         return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
-    private const int FileWriteData = 0x0002;
-    private const int FileAppendData = 0x0004;
     private const int FileDeleteChild = 0x0040;
     private const int FileWriteAttributes = 0x0100;
     private const int Delete = 0x10000;

@@ -638,17 +638,19 @@ internal static class StorageTests
     private static void SaveRefusingAclFallsBack()
     {
         // R3-12 (MD517-01). R2-18 tested an existing store with a FILE_WRITE_ATTRIBUTES open
-        // alone, so an ACL that keeps that right but refuses the data rights or DELETE passed,
-        // and every Save then failed. Each leg keeps FILE_WRITE_ATTRIBUTES. Killing mutation:
-        // revert to the FILE_WRITE_ATTRIBUTES-only check; the three refusing legs resolve
-        // portable. ProbingLeavesReadersAlone guards the wrong fix (opening for those rights).
-        // The folder's FILE_DELETE_CHILD is the kernel's answer: report every folder as granting
-        // it and the Write-without-Modify leg resolves portable; as refusing it and the last leg
-        // resolves AppData. No leg may report the check degraded on this local volume.
-        // Each leg also runs Save under the same ACL, so the refusals are Save's own. The third
-        // leg is the exception: File.Replace only renames, so Save gets past a store that
-        // refuses writing data, but such a store is not written, as with DeniedStoreFallsBack's
-        // Write deny.
+        // alone, so an ACL that keeps that right but refuses DELETE on the store and
+        // FILE_DELETE_CHILD on its folder passed, and every Save then failed. Each leg keeps
+        // FILE_WRITE_ATTRIBUTES. Killing mutation: revert to the FILE_WRITE_ATTRIBUTES-only
+        // check; the two refusing legs resolve portable. ProbingLeavesReadersAlone guards the
+        // wrong fix (opening for DELETE). The folder's FILE_DELETE_CHILD is the kernel's answer:
+        // report every folder as granting it and the Write-without-Modify leg resolves portable;
+        // as refusing it and the fourth leg resolves AppData. No leg may report the check
+        // degraded on this local volume. Each leg runs Save under the same ACL, through the
+        // store it resolved (a refused store directly), so every verdict is Save's own, and
+        // reads the store back. MDR3-02: Save writes a sibling temp file and renames it over the
+        // store, so a store that refuses writing its data but can be renamed away is saved and
+        // resolves portable (the third and fifth legs). Killing mutation: require
+        // FILE_WRITE_DATA and FILE_APPEND_DATA again; the third leg resolves AppData.
         if (!OperatingSystem.IsWindows())
         {
             Console.WriteLine("NOTE  Save-refusing ACL case UNCHECKED: not Windows");
@@ -668,8 +670,9 @@ internal static class StorageTests
         {
             ("data, append and delete denied, folder refuses deleting children", data | delete, true, false, false),
             ("delete denied, folder refuses deleting children (Write without Modify)", delete, true, false, false),
-            ("data and append denied, delete allowed", data, false, true, false),
+            ("data and append denied, delete allowed, folder refuses deleting children", data, true, true, true),
             ("delete denied, folder grants deleting children", delete, false, true, true),
+            ("data, append and delete denied, folder grants deleting children", data | delete, false, true, true),
         };
         try
         {
@@ -679,13 +682,16 @@ internal static class StorageTests
                 var degraded = new List<string>();
                 (string Path, bool Portable) resolved;
                 Exception? saveFailure = null;
+                string? stored;
+                var before = new StorageService(portable).Load().UserPresets.FirstOrDefault()?.Name ?? "(none)";
                 SetCurrentUserRule(folder, deleteChild, leg.DenyFolderDeleteChild ? System.Security.AccessControl.AccessControlType.Deny : System.Security.AccessControl.AccessControlType.Allow, add: true);
                 DenyCurrentUser(portable, leg.Store, deny: true);
                 try
                 {
                     resolved = StorageService.ResolveStoragePath(portable, appData, warn: warnings.Add, degraded: degraded.Add);
-                    try { new StorageService(portable).Save(StateWith("saved under " + leg.Name)); }
+                    try { new StorageService(resolved.Portable ? resolved.Path : portable).Save(StateWith("saved under " + leg.Name)); }
                     catch (Exception ex) { saveFailure = ex; }
+                    stored = new StorageService(portable).Load().UserPresets.FirstOrDefault()?.Name;
                 }
                 finally
                 {
@@ -698,6 +704,8 @@ internal static class StorageTests
                     $"a fallback from a store with {leg.Name} is reported naming both stores, and keeping the store is not; got {warnings.Count} warning(s)");
                 Check.True(leg.SaveWorks == (saveFailure is null),
                     $"Save under {leg.Name} {(leg.SaveWorks ? "succeeds" : "fails")}; got {saveFailure?.GetType().Name ?? "success"}");
+                Check.Equal(leg.SaveWorks ? "saved under " + leg.Name : before, stored ?? "(none)",
+                    $"the store with {leg.Name} then holds {(leg.SaveWorks ? "what Save wrote" : "its previous state")}");
                 Check.True(degraded.Count == 0,
                     $"on a local volume the ACL check of a store with {leg.Name} runs in full, so nothing reports it degraded; got [{string.Join(" | ", degraded)}]");
             }
@@ -722,6 +730,8 @@ internal static class StorageTests
         // (drop the agreement check; the disagreeing leg refuses the store); refuse a store whose
         // DACL could not be evaluated; refuse on any folder error; drop one report; drop the
         // degraded callback on its way down from ResolveStoragePath (the resolver leg hears nothing).
+        // The last two legs grant no data rights, which Save does not need (MDR3-02): requiring
+        // FILE_WRITE_DATA and FILE_APPEND_DATA again refuses the first of them.
         const string store = @"C:\portable\presets.json";
         const int writeData = 0x2, appendData = 0x4, writeAttributes = 0x100, delete = 0x10000, readControl = 0x20000;
         const int saveRights = writeAttributes | writeData | appendData;
@@ -733,7 +743,8 @@ internal static class StorageTests
             ("every right Save needs", readControl | saveRights | delete, 0, true, false, null),
             ("no DELETE and a folder that grants deleting children", readControl | saveRights, 0, true, true, null),
             ("no DELETE and a folder that refuses deleting children", readControl | saveRights, 5, false, true, null),
-            ("write attributes without the data rights", readControl | writeAttributes, 0, false, false, null),
+            ("write attributes and DELETE without the data rights", readControl | writeAttributes | delete, 0, true, false, null),
+            ("write attributes without the data rights or DELETE, under a folder that grants deleting children", readControl | writeAttributes, 0, true, true, null),
         };
         foreach (var leg in legs)
         {
