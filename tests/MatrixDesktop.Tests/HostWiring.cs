@@ -27,12 +27,14 @@ internal static class HostWiring
         List<Call> calls;
         List<Call> functionLoads = [];
         List<string> mainFormConstructors;
+        var every = new List<(string Method, List<Instruction> Code)>();
         try
         {
             using var stream = File.OpenRead(path);
             using var pe = new PEReader(stream);
             calls = ReadCalls(pe, pe.GetMetadataReader(), functionLoads);
             mainFormConstructors = InstanceConstructorAccess(pe.GetMetadataReader(), "MatrixDesktop.MainForm");
+            ReadBodies(pe, pe.GetMetadataReader(), every);
         }
         catch (Exception error)
         {
@@ -105,18 +107,38 @@ internal static class HostWiring
         // native cases call the handlers directly. Shared/NativeMediaBridge.cs is compiled into both
         // EXEs; this reads MatrixDesktop.dll's copy. Each event must be subscribed in the
         // constructor and detached in Dispose with a delegate built from its own handler.
+        // MDR3-03: on every path through them, not somewhere in them: 'if (!preview)' around the
+        // font subscription kept each call above, and the configurator's bridge (preview: true)
+        // stopped dropping its atlases on a font install. The walk does not know the arguments,
+        // so a branch on preview or hostKind is followed both ways; Dispose is walked on its
+        // first call. Each path's last subscribe or detach of the event must be the expected one.
         failures += Run($"the native media bridge follows font, preference and display changes and detaches them: {path}", () =>
         {
             const string bridge = "MatrixDesktop.Shared.NativeMediaBridge::";
+            const string systemEvents = "Microsoft.Win32.SystemEvents::";
+            var events = new[] { ("DisplaySettingsChanged", "System.EventHandler::.ctor"),
+                ("UserPreferenceChanged", "Microsoft.Win32.UserPreferenceChangedEventHandler::.ctor"), ("InstalledFontsChanged", "System.EventHandler::.ctor") };
             var wrong = new List<string>();
-            foreach (var (name, delegateConstructor) in new[] { ("DisplaySettingsChanged", "System.EventHandler::.ctor"),
-                ("UserPreferenceChanged", "Microsoft.Win32.UserPreferenceChangedEventHandler::.ctor"), ("InstalledFontsChanged", "System.EventHandler::.ctor") })
+            foreach (var (name, delegateConstructor) in events)
                 foreach (var (method, accessor) in new[] { (".ctor", "add_"), ("Dispose", "remove_") })
                 {
-                    var targets = DelegateTargets(calls, functionLoads, bridge + method, delegateConstructor, "Microsoft.Win32.SystemEvents::" + accessor + name);
+                    var targets = DelegateTargets(calls, functionLoads, bridge + method, delegateConstructor, systemEvents + accessor + name);
                     if (targets is not [var only] || only != bridge + "On" + name)
                         wrong.Add($"{method} {accessor}{name} -> [{string.Join(", ", targets)}]");
                 }
+            foreach (var (method, accessor, facts) in new[] { (".ctor", "add_", new Dictionary<string, long>()), ("Dispose", "remove_", new Dictionary<string, long> { [bridge + "_disposed"] = 0 }) })
+            {
+                var paths = every.Where(body => body.Method == bridge + method).SelectMany(body => Paths(body.Code, facts)).ToList();
+                foreach (var (name, _) in events)
+                {
+                    // A constructor that chains to another one subscribes through it.
+                    string[] seen = [systemEvents + "add_" + name, systemEvents + "remove_" + name, bridge + ".ctor"];
+                    var missing = paths.Count(steps => steps.LastOrDefault(step => !step.Store && seen.Contains(step.Name))?.Name is not string last
+                        || last != systemEvents + accessor + name && !(method == ".ctor" && last == bridge + ".ctor"));
+                    if (paths.Count == 0 || missing > 0)
+                        wrong.Add($"{method} must end every path {accessor}{name}: {missing} of {paths.Count} do not");
+                }
+            }
             Check.True(wrong.Count == 0, "NativeMediaBridge's constructor must subscribe, and Dispose detach, each SystemEvents change with its own handler: " + string.Join("; ", wrong));
         });
         // AUD-72. WallpaperInstanceGuard has its own tests; these prove the wallpaper context uses it.
