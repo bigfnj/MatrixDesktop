@@ -186,8 +186,10 @@ DEGRADED line as well. The gate reports every unindented DEGRADED line as
 UNCHECKED beside that suite's own verdict, so a degraded launch never passes
 the gate. A launch whose arguments fail the check closes that browser and
 raises `LaunchArgumentsError`. The gate's browser suites, apart from the
-helper's own self-test, report that as a harness error and exit 3;
-how the gate weighs an exit 3 beside a FAIL is in SMOKE_TEST_PLAN.md.
+helper's own self-test, report that as a harness error and exit 3, except the
+web smoke when a check failed before the launch: it then exits 1 and keeps the
+harness reason beside the FAIL. How the gate weighs an exit 3 beside a FAIL is
+in SMOKE_TEST_PLAN.md.
 Chromium reports Windows error 10055 (WSAENOBUFS) as
 `net::ERR_NO_BUFFER_SPACE`. Windows can return 10055 when a socket cannot get a
 local port, and Chromium's randomized local port pick on Windows
