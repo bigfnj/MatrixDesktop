@@ -569,7 +569,8 @@ at `fa31f48`). The lane and its verifier recorded these limits of the new legs:
   check after it, or any later line short of Navigate. A gate that also takes Navigate passes,
   and leaves those hosts rendering nothing. A gate around the awaited clear alone still passes
   all 24 checks (measured; the add still runs, so this is R2-52 and R3-23 territory, reported
-  in round 2). Such a MainForm gate fails by design, since HostPermissionPolicy, not MainForm,
+  in round 2). A MainForm gate around the store or the add fails by design, since
+  HostPermissionPolicy, not MainForm,
   picks the hosts. A `remove_PermissionRequested` that passes the field right after the add,
   behind an `_hostKind` gate, passes (measured): the check ties each removal to the field and
   requires one in DetachWebViewHandlers, but does not confine removals to it. Known false
