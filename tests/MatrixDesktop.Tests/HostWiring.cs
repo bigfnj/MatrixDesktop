@@ -451,7 +451,29 @@ internal static class HostWiring
             Check.True(bodies.Keys.Any(caller => caller.StartsWith("MatrixDesktop.MainForm", StringComparison.Ordinal) && Calls(caller, core + "add_PermissionRequested")),
                 "MainForm must subscribe CoreWebView2.PermissionRequested");
             Check.True(Calls("MatrixDesktop.MainForm::DetachWebViewHandlers", core + "remove_PermissionRequested"), "MainForm must detach its PermissionRequested handler with the others");
-            var handlers = BuiltFrom(bodies, "MatrixDesktop.MainForm::_permissionRequestedHandler");
+            // MDR3-04. The walks below read the method built into _permissionRequestedHandler, so
+            // each add and remove must pass that field: 'PermissionRequested += (_, _) => { };'
+            // kept the field's store and every walk, and left each request to WebView2's prompt.
+            // The add must also run on every path after the handler's store, in its body: no
+            // return or throw is reached around it. A reordered line subscribed null, and a branch
+            // around the add left some hosts without the handler.
+            const string field = "MatrixDesktop.MainForm::_permissionRequestedHandler";
+            var built = every.SelectMany(body => Enumerable.Range(1, body.Code.Count - 1).Where(index => body.Code[index].Code == OpCodes.Stfld && body.Code[index].Name == field
+                && body.Code.Take(index).TakeLast(8).Any(instruction => instruction.Code == OpCodes.Ldftn)).Select(index => (body.Code, Index: index))).ToList();
+            var unbound = every.SelectMany(body => Enumerable.Range(1, body.Code.Count - 1).Select(string? (index) =>
+            {
+                var (code, call) = (body.Code, body.Code[index]);
+                if (!IsCall(call) || call.Name is not (core + "add_PermissionRequested" or core + "remove_PermissionRequested")) return null;
+                var at = $"{body.Method} IL_{call.Offset:X4} {call.Name![core.Length..]}";
+                if (code[index - 1].Code != OpCodes.Ldfld || code[index - 1].Name != field) return $"{at} passes {code[index - 1].Code.Name} {code[index - 1].Name}";
+                if (call.Name == core + "remove_PermissionRequested") return null;
+                var exits = Enumerable.Range(0, code.Count).Where(exit => code[exit].Code == OpCodes.Ret || code[exit].Code == OpCodes.Throw).ToList();
+                return built is [var store] && ReferenceEquals(store.Code, code) && store.Index < index && Flows(code, store.Index, index, -1)
+                    && !exits.Any(exit => Flows(code, store.Index, exit, index)) ? null : $"{at} does not run on every path after the handler's store";
+            })).OfType<string>().ToList();
+            Check.True(unbound.Count == 0, "each PermissionRequested add and remove must pass _permissionRequestedHandler, and the add must run on every path after the handler's store: "
+                + string.Join("; ", unbound));
+            var handlers = BuiltFrom(bodies, field);
             Check.Equal(1, handlers.Count, "witness: the scan must find the one method _permissionRequestedHandler is built from");
             var handler = Body(bodies, handlers[0]);
             // Sentinels no constant in the handler could stand in for.
