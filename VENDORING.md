@@ -182,7 +182,13 @@ merges `TcpPortRandomizationWin` into the one `--disable-features` switch
 Playwright passes and checks the launched browser's arguments. When it cannot
 read Playwright's switch it prints a DEGRADED line and launches without the
 change; when it cannot read the launched browser's arguments back it prints a
-DEGRADED line as well. Chromium reports Windows error 10055 (WSAENOBUFS) as
+DEGRADED line as well. The gate reports every unindented DEGRADED line as
+UNCHECKED beside that suite's own verdict, so a degraded launch never passes
+the gate. A launch whose arguments fail the check closes that browser and
+raises `LaunchArgumentsError`. The gate's browser suites, apart from the
+helper's own self-test, report that as a harness error and exit 3;
+how the gate weighs an exit 3 beside a FAIL is in SMOKE_TEST_PLAN.md.
+Chromium reports Windows error 10055 (WSAENOBUFS) as
 `net::ERR_NO_BUFFER_SPACE`. Windows can return 10055 when a socket cannot get a
 local port, and Chromium's randomized local port pick on Windows
 (TcpPortRandomizationWin; microsoft/playwright#43545, #43605) can return it
